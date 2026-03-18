@@ -28,12 +28,15 @@ jobs:
         id: version
         shell: powershell
         run: |
-          $latestTag = $null
-          $latestTag = git describe --tags --abbrev=0 2>$null
+          # Check if any tags exist at all
+          $hasTags = git tag
 
-          if ($null -eq $latestTag -or $latestTag -eq "") {
+          if ($null -eq $hasTags -or $hasTags.Count -eq 0) {
             $newVersion = "v1.0.0"
           } else {
+            # If tags exist, it is safe to run git describe
+            $latestTag = git describe --tags --abbrev=0 2>$null
+
             $clean = $latestTag -replace '^v', ''
             $parts = $clean.Split('.')
             $major = [int]$parts[0]
@@ -44,6 +47,7 @@ jobs:
 
           Write-Host "New version: $newVersion"
 
+          # Write to GitHub Output
           "VERSION=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "VERSION_NUMBER=$($newVersion -replace '^v', '')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
