@@ -28,9 +28,9 @@ jobs:
         id: version
         shell: powershell
         run: |
-          $ErrorActionPreference = "SilentlyContinue"
-          $latestTag = git describe --tags --abbrev=0 2>&1 | Where-Object { $_ -notmatch '^fatal:' }
-          $ErrorActionPreference = "Stop"
+          $latestTag = $null
+          try { $latestTag = git describe --tags --abbrev=0 2>$null } catch {}
+          if ($LASTEXITCODE -ne 0) { $latestTag = $null }
           if (-not $latestTag) {
             $newVersion = "v1.0.0"
           } else {
