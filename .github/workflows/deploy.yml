@@ -1,0 +1,92 @@
+name: Build and Deploy WatchTower
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+
+    env:
+      DOTNET_VERSION: '8.0.x'
+      SERVICE_NAME: 'WatchTower'
+      DEPLOY_PATH: 'C:\Services\WatchTower'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet test --configuration Release --no-build --verbosity normal
+
+      - name: Publish
+        run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 --self-contained false
+
+      - name: Stop service (if running)
+        shell: pwsh
+        run: |
+          $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -eq 'Running') {
+            Stop-Service -Name $env:SERVICE_NAME -Force
+            Start-Sleep -Seconds 3
+          }
+
+      - name: Backup production config
+        shell: pwsh
+        run: |
+          $configPath = "${{ env.DEPLOY_PATH }}\appsettings.json"
+          if (Test-Path $configPath) {
+            Copy-Item $configPath "${{ env.DEPLOY_PATH }}\appsettings.json.bak"
+          }
+
+      - name: Deploy files
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ${{ env.DEPLOY_PATH }})) {
+            New-Item -ItemType Directory -Path ${{ env.DEPLOY_PATH }} -Force
+          }
+          Copy-Item -Path ./publish/* -Destination ${{ env.DEPLOY_PATH }} -Recurse -Force
+
+      - name: Restore production config
+        shell: pwsh
+        run: |
+          $backupPath = "${{ env.DEPLOY_PATH }}\appsettings.json.bak"
+          if (Test-Path $backupPath) {
+            Copy-Item $backupPath "${{ env.DEPLOY_PATH }}\appsettings.json" -Force
+            Remove-Item $backupPath
+          }
+
+      - name: Create service (if not exists)
+        shell: pwsh
+        run: |
+          $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
+          if (-not $service) {
+            sc.exe create $env:SERVICE_NAME binPath="${{ env.DEPLOY_PATH }}\WatchTower.exe" start=auto
+            sc.exe description $env:SERVICE_NAME "WatchTower Server Monitoring Service"
+          }
+
+      - name: Start service
+        shell: pwsh
+        run: Start-Service -Name $env:SERVICE_NAME
+
+      - name: Verify service status
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 5
+          $service = Get-Service -Name $env:SERVICE_NAME
+          if ($service.Status -ne 'Running') {
+            throw "Service failed to start. Status: $($service.Status)"
+          }
+          Write-Host "Service is running successfully"
