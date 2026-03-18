@@ -1,0 +1,139 @@
+name: Rollback WatchTower
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Backup folder name to rollback to (leave empty to use latest backup). Run "List backups" first to see available versions.'
+        required: false
+        default: ''
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - rollback
+          - list-backups
+
+jobs:
+  list-backups:
+    if: inputs.action == 'list-backups'
+    runs-on: self-hosted
+    env:
+      BACKUP_ROOT: 'C:\Services\WatchTower.backups'
+
+    steps:
+      - name: List available backups
+        shell: powershell
+        run: |
+          $backupRoot = "${{ env.BACKUP_ROOT }}"
+
+          if (-not (Test-Path $backupRoot)) {
+            Write-Host "No backup directory found at $backupRoot"
+            exit 0
+          }
+
+          $backups = Get-ChildItem -Path $backupRoot -Directory | Sort-Object CreationTime -Descending
+
+          if ($backups.Count -eq 0) {
+            Write-Host "No backups found"
+            exit 0
+          }
+
+          Write-Host "Available backups (newest first):"
+          Write-Host "=================================="
+          foreach ($b in $backups) {
+            $size = "{0:N1} MB" -f ((Get-ChildItem $b.FullName -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+            Write-Host "  $($b.Name)  |  Created: $($b.CreationTime)  |  Size: $size"
+          }
+          Write-Host ""
+          Write-Host "To rollback, re-run this workflow with action=rollback and version set to the backup folder name above."
+
+  rollback:
+    if: inputs.action == 'rollback'
+    runs-on: self-hosted
+    env:
+      SERVICE_NAME: 'WatchTower'
+      DEPLOY_PATH: 'C:\Services\WatchTower'
+      BACKUP_ROOT: 'C:\Services\WatchTower.backups'
+
+    steps:
+      - name: Determine backup to restore
+        id: resolve
+        shell: powershell
+        run: |
+          $backupRoot = "${{ env.BACKUP_ROOT }}"
+          $requestedVersion = "${{ inputs.version }}"
+
+          if (-not (Test-Path $backupRoot)) {
+            Write-Host "::error::No backup directory found at $backupRoot"
+            exit 1
+          }
+
+          if ([string]::IsNullOrWhiteSpace($requestedVersion)) {
+            # Use the latest backup
+            $backup = Get-ChildItem -Path $backupRoot -Directory | Sort-Object CreationTime -Descending | Select-Object -First 1
+            if (-not $backup) {
+              Write-Host "::error::No backups found"
+              exit 1
+            }
+            $backupPath = $backup.FullName
+            Write-Host "No version specified, using latest backup: $($backup.Name)"
+          } else {
+            $backupPath = "$backupRoot\$requestedVersion"
+            if (-not (Test-Path $backupPath)) {
+              Write-Host "::error::Backup not found: $backupPath"
+              Write-Host "Available backups:"
+              Get-ChildItem -Path $backupRoot -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
+              exit 1
+            }
+            Write-Host "Using specified backup: $requestedVersion"
+          }
+
+          echo "BACKUP_PATH=$backupPath" >> $env:GITHUB_OUTPUT
+
+      - name: Stop service
+        shell: powershell
+        run: |
+          $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -ne 'Stopped') {
+            Write-Host "Stopping service..."
+            Stop-Service -Name $env:SERVICE_NAME -Force
+            Start-Sleep -Seconds 3
+          }
+
+      - name: Backup current (broken) deployment
+        shell: powershell
+        run: |
+          $deployPath = "${{ env.DEPLOY_PATH }}"
+          $failedPath = "${{ env.BACKUP_ROOT }}\failed-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+
+          if (Test-Path "$deployPath\WatchTower.exe") {
+            Write-Host "Saving current (broken) deployment to: $failedPath"
+            Copy-Item -Path $deployPath -Destination $failedPath -Recurse -Force
+          }
+
+      - name: Restore from backup
+        shell: powershell
+        run: |
+          $backupPath = "${{ steps.resolve.outputs.BACKUP_PATH }}"
+          $deployPath = "${{ env.DEPLOY_PATH }}"
+
+          Write-Host "Restoring from: $backupPath"
+          Copy-Item -Path "$backupPath\*" -Destination $deployPath -Recurse -Force
+          Write-Host "Files restored successfully"
+
+      - name: Start service
+        shell: powershell
+        run: Start-Service -Name $env:SERVICE_NAME
+
+      - name: Verify service status
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds 5
+          $service = Get-Service -Name $env:SERVICE_NAME
+          if ($service.Status -ne 'Running') {
+            Write-Host "::error::Service failed to start after rollback. Status: $($service.Status). Manual intervention required."
+            exit 1
+          }
+          Write-Host "Rollback successful! Service is running."

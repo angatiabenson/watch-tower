@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build-and-deploy:
     runs-on: self-hosted
@@ -12,10 +15,33 @@ jobs:
       DOTNET_VERSION: '8.0.x'
       SERVICE_NAME: 'WatchTower'
       DEPLOY_PATH: 'C:\Services\WatchTower'
+      BACKUP_ROOT: 'C:\Services\WatchTower.backups'
+      MAX_BACKUPS: 3
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        shell: powershell
+        run: |
+          $latestTag = git describe --tags --abbrev=0 2>$null
+          if (-not $latestTag) {
+            $newVersion = "v1.0.0"
+          } else {
+            $clean = $latestTag -replace '^v', ''
+            $parts = $clean.Split('.')
+            $major = [int]$parts[0]
+            $minor = [int]$parts[1]
+            $patch = [int]$parts[2] + 1
+            $newVersion = "v$major.$minor.$patch"
+          }
+          Write-Host "New version: $newVersion"
+          echo "VERSION=$newVersion" >> $env:GITHUB_OUTPUT
+          echo "VERSION_NUMBER=$($newVersion -replace '^v', '')" >> $env:GITHUB_OUTPUT
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -26,16 +52,16 @@ jobs:
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --configuration Release --no-restore
+        run: dotnet build --configuration Release --no-restore -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
 
       - name: Run tests
         run: dotnet test --configuration Release --no-build --verbosity normal
 
       - name: Publish
-        run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 --self-contained false
+        run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
 
       - name: Stop service (if running)
-        shell: pwsh
+        shell: powershell
         run: |
           $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
           if ($service -and $service.Status -eq 'Running') {
@@ -43,33 +69,83 @@ jobs:
             Start-Sleep -Seconds 3
           }
 
-      - name: Backup production config
-        shell: pwsh
+      - name: Backup current deployment
+        id: backup
+        shell: powershell
         run: |
-          $configPath = "${{ env.DEPLOY_PATH }}\appsettings.json"
-          if (Test-Path $configPath) {
-            Copy-Item $configPath "${{ env.DEPLOY_PATH }}\appsettings.json.bak"
+          $deployPath = "${{ env.DEPLOY_PATH }}"
+          $backupRoot = "${{ env.BACKUP_ROOT }}"
+
+          if (-not (Test-Path $backupRoot)) {
+            New-Item -ItemType Directory -Path $backupRoot -Force
+          }
+
+          if (Test-Path "$deployPath\WatchTower.exe") {
+            # Try to read the current version from the deployed exe
+            try {
+              $currentVersion = (Get-Item "$deployPath\WatchTower.exe").VersionInfo.ProductVersion
+              if (-not $currentVersion) { $currentVersion = "unknown" }
+            } catch {
+              $currentVersion = "unknown"
+            }
+
+            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $backupName = "v$currentVersion-$timestamp"
+            $backupPath = "$backupRoot\$backupName"
+
+            Write-Host "Backing up current deployment to: $backupPath"
+            Copy-Item -Path $deployPath -Destination $backupPath -Recurse -Force
+
+            echo "BACKUP_PATH=$backupPath" >> $env:GITHUB_OUTPUT
+            echo "HAS_BACKUP=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "No existing deployment found, skipping backup"
+            echo "HAS_BACKUP=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Prune old backups
+        shell: powershell
+        run: |
+          $backupRoot = "${{ env.BACKUP_ROOT }}"
+          $maxBackups = ${{ env.MAX_BACKUPS }}
+
+          if (Test-Path $backupRoot) {
+            $backups = Get-ChildItem -Path $backupRoot -Directory | Sort-Object CreationTime -Descending
+            if ($backups.Count -gt $maxBackups) {
+              $toDelete = $backups | Select-Object -Skip $maxBackups
+              foreach ($dir in $toDelete) {
+                Write-Host "Pruning old backup: $($dir.Name)"
+                Remove-Item -Path $dir.FullName -Recurse -Force
+              }
+            }
+            Write-Host "Backups retained: $(($backups | Select-Object -First $maxBackups).Count)"
           }
 
       - name: Deploy files
-        shell: pwsh
+        shell: powershell
         run: |
-          if (-not (Test-Path ${{ env.DEPLOY_PATH }})) {
-            New-Item -ItemType Directory -Path ${{ env.DEPLOY_PATH }} -Force
+          $deployPath = "${{ env.DEPLOY_PATH }}"
+          if (-not (Test-Path $deployPath)) {
+            New-Item -ItemType Directory -Path $deployPath -Force
           }
-          Copy-Item -Path ./publish/* -Destination ${{ env.DEPLOY_PATH }} -Recurse -Force
 
-      - name: Restore production config
-        shell: pwsh
-        run: |
-          $backupPath = "${{ env.DEPLOY_PATH }}\appsettings.json.bak"
-          if (Test-Path $backupPath) {
-            Copy-Item $backupPath "${{ env.DEPLOY_PATH }}\appsettings.json" -Force
-            Remove-Item $backupPath
+          # Preserve production config
+          $configBackup = $null
+          $configPath = "$deployPath\appsettings.json"
+          if (Test-Path $configPath) {
+            $configBackup = Get-Content $configPath -Raw
+          }
+
+          Copy-Item -Path ./publish/* -Destination $deployPath -Recurse -Force
+
+          # Restore production config
+          if ($configBackup) {
+            Set-Content -Path $configPath -Value $configBackup -NoNewline
+            Write-Host "Production appsettings.json preserved"
           }
 
       - name: Create service (if not exists)
-        shell: pwsh
+        shell: powershell
         run: |
           $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
           if (-not $service) {
@@ -78,15 +154,72 @@ jobs:
           }
 
       - name: Start service
-        shell: pwsh
+        shell: powershell
         run: Start-Service -Name $env:SERVICE_NAME
 
       - name: Verify service status
-        shell: pwsh
+        id: verify
+        shell: powershell
         run: |
           Start-Sleep -Seconds 5
           $service = Get-Service -Name $env:SERVICE_NAME
           if ($service.Status -ne 'Running') {
-            throw "Service failed to start. Status: $($service.Status)"
+            Write-Host "::error::Service failed to start. Status: $($service.Status)"
+            echo "HEALTHY=false" >> $env:GITHUB_OUTPUT
+            exit 1
           }
           Write-Host "Service is running successfully"
+          echo "HEALTHY=true" >> $env:GITHUB_OUTPUT
+
+      - name: Auto-rollback on failure
+        if: failure() && steps.verify.outputs.HEALTHY == 'false' && steps.backup.outputs.HAS_BACKUP == 'true'
+        shell: powershell
+        run: |
+          $backupPath = "${{ steps.backup.outputs.BACKUP_PATH }}"
+          $deployPath = "${{ env.DEPLOY_PATH }}"
+
+          Write-Host "::warning::ROLLING BACK to $backupPath"
+
+          # Stop the broken service
+          $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -ne 'Stopped') {
+            Stop-Service -Name $env:SERVICE_NAME -Force
+            Start-Sleep -Seconds 3
+          }
+
+          # Restore from backup
+          Copy-Item -Path "$backupPath\*" -Destination $deployPath -Recurse -Force
+          Write-Host "Files restored from backup"
+
+          # Start the previous version
+          Start-Service -Name $env:SERVICE_NAME
+          Start-Sleep -Seconds 5
+
+          $service = Get-Service -Name $env:SERVICE_NAME
+          if ($service.Status -eq 'Running') {
+            Write-Host "::warning::Rollback successful. Previous version is running."
+          } else {
+            Write-Host "::error::Rollback failed. Service status: $($service.Status). Manual intervention required."
+          }
+
+          # Fail the pipeline to signal the deploy was bad
+          exit 1
+
+      - name: Create Git tag and GitHub release
+        if: success()
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+
+          git tag $version
+          git push origin $version
+
+          # Create a zip of the published output for the release
+          Compress-Archive -Path ./publish/* -DestinationPath "./WatchTower-$version.zip"
+
+          gh release create $version `
+            "./WatchTower-$version.zip#WatchTower $version (win-x64)" `
+            --title "WatchTower $version" `
+            --generate-notes
