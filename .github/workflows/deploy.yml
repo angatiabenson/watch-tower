@@ -29,9 +29,9 @@ jobs:
         shell: powershell
         run: |
           $latestTag = $null
-          try { $latestTag = git describe --tags --abbrev=0 2>$null } catch {}
-          if ($LASTEXITCODE -ne 0) { $latestTag = $null }
-          if (-not $latestTag) {
+          $latestTag = git describe --tags --abbrev=0 2>$null
+
+          if ($null -eq $latestTag -or $latestTag -eq "") {
             $newVersion = "v1.0.0"
           } else {
             $clean = $latestTag -replace '^v', ''
@@ -41,9 +41,11 @@ jobs:
             $patch = [int]$parts[2] + 1
             $newVersion = "v$major.$minor.$patch"
           }
+
           Write-Host "New version: $newVersion"
-          echo "VERSION=$newVersion" >> $env:GITHUB_OUTPUT
-          echo "VERSION_NUMBER=$($newVersion -replace '^v', '')" >> $env:GITHUB_OUTPUT
+
+          "VERSION=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "VERSION_NUMBER=$($newVersion -replace '^v', '')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
