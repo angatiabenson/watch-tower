@@ -4,6 +4,10 @@ using WatchTower.Services;
 using WatchTower.Services.Abstractions;
 using WatchTower.Workers;
 
+// Set working directory to the exe's directory so relative paths (logs, config) resolve correctly
+// Windows Services default to C:\Windows\System32 as working directory
+Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateBootstrapLogger();
@@ -13,6 +17,7 @@ try
     Log.Information("Starting WatchTower service");
 
     var builder = Host.CreateDefaultBuilder(args)
+        .UseContentRoot(AppContext.BaseDirectory)
         .UseWindowsService(o => o.ServiceName = "WatchTower")
         .UseSerilog((context, services, configuration) =>
             configuration.ReadFrom.Configuration(context.Configuration))
