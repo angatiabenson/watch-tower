@@ -36,7 +36,11 @@ public class SystemMetricsProvider : ISystemMetricsProvider
     public IReadOnlyList<DiskMetric> GetDiskMetrics()
     {
         var metrics = new List<DiskMetric>();
-        foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady))
+        foreach (
+            var drive in DriveInfo
+                .GetDrives()
+                .Where(d => d.DriveType == DriveType.Fixed && d.IsReady)
+        )
         {
             var totalGb = drive.TotalSize / (1024.0 * 1024.0 * 1024.0);
             var freeGb = drive.TotalFreeSpace / (1024.0 * 1024.0 * 1024.0);
@@ -47,17 +51,81 @@ public class SystemMetricsProvider : ISystemMetricsProvider
         return metrics;
     }
 
+    public IReadOnlyList<DiskQueueMetric> GetDiskQueueMetrics()
+    {
+        var metrics = new List<DiskQueueMetric>();
+        try
+        {
+            var category = new PerformanceCounterCategory("PhysicalDisk");
+            var instances = category.GetInstanceNames().Where(i => i != "_Total");
+
+            foreach (var instance in instances)
+            {
+                try
+                {
+                    using var counter = new PerformanceCounter("PhysicalDisk", "Current Disk Queue Length", instance);
+                    var queueLength = counter.NextValue();
+                    metrics.Add(new DiskQueueMetric(DateTime.UtcNow, instance, queueLength));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to read disk queue for instance: {Instance}", instance);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to enumerate PhysicalDisk performance counters");
+        }
+        return metrics;
+    }
+
+    public IReadOnlyList<NetworkMetric> GetNetworkMetrics()
+    {
+        var metrics = new List<NetworkMetric>();
+        try
+        {
+            var category = new PerformanceCounterCategory("Network Interface");
+            var instances = category.GetInstanceNames();
+
+            foreach (var instance in instances)
+            {
+                try
+                {
+                    using var counter = new PerformanceCounter("Network Interface", "Output Queue Length", instance);
+                    var queueLength = counter.NextValue();
+                    metrics.Add(new NetworkMetric(DateTime.UtcNow, instance, queueLength));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to read network queue for interface: {Interface}", instance);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to enumerate Network Interface performance counters");
+        }
+        return metrics;
+    }
+
     public IReadOnlyList<ProcessInfo> GetTopCpuProcesses(int count)
     {
         try
         {
-            return Process.GetProcesses()
+            return Process
+                .GetProcesses()
                 .Where(p => p.Id != 0)
                 .Select(p =>
                 {
                     try
                     {
-                        return new ProcessInfo(p.ProcessName, p.Id, p.TotalProcessorTime.TotalSeconds, p.WorkingSet64 / (1024.0 * 1024.0));
+                        return new ProcessInfo(
+                            p.ProcessName,
+                            p.Id,
+                            p.TotalProcessorTime.TotalSeconds,
+                            p.WorkingSet64 / (1024.0 * 1024.0)
+                        );
                     }
                     catch
                     {
@@ -80,13 +148,19 @@ public class SystemMetricsProvider : ISystemMetricsProvider
     {
         try
         {
-            return Process.GetProcesses()
+            return Process
+                .GetProcesses()
                 .Where(p => p.Id != 0)
                 .Select(p =>
                 {
                     try
                     {
-                        return new ProcessInfo(p.ProcessName, p.Id, p.TotalProcessorTime.TotalSeconds, p.WorkingSet64 / (1024.0 * 1024.0));
+                        return new ProcessInfo(
+                            p.ProcessName,
+                            p.Id,
+                            p.TotalProcessorTime.TotalSeconds,
+                            p.WorkingSet64 / (1024.0 * 1024.0)
+                        );
                     }
                     catch
                     {

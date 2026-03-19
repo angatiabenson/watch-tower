@@ -13,6 +13,15 @@ public class ReportBuilderTests
 
     public ReportBuilderTests()
     {
+        // Default empty returns for all store methods
+        _storeMock.Setup(s => s.GetCpuMetrics(It.IsAny<TimeSpan>())).Returns(new List<CpuMetric>());
+        _storeMock.Setup(s => s.GetRamMetrics(It.IsAny<TimeSpan>())).Returns(new List<RamMetric>());
+        _storeMock.Setup(s => s.GetLatestDiskMetrics()).Returns(new List<DiskMetric>());
+        _storeMock.Setup(s => s.GetLatestDiskQueueMetrics()).Returns(new List<DiskQueueMetric>());
+        _storeMock.Setup(s => s.GetLatestNetworkMetrics()).Returns(new List<NetworkMetric>());
+        _storeMock.Setup(s => s.GetLatestServiceStatuses()).Returns(new List<ServiceStatus>());
+        _storeMock.Setup(s => s.GetIncidents(It.IsAny<TimeSpan>())).Returns(new List<Incident>());
+
         _builder = new ReportBuilder(_storeMock.Object);
     }
 
@@ -28,10 +37,6 @@ public class ReportBuilderTests
         };
 
         _storeMock.Setup(s => s.GetCpuMetrics(It.IsAny<TimeSpan>())).Returns(cpuMetrics);
-        _storeMock.Setup(s => s.GetRamMetrics(It.IsAny<TimeSpan>())).Returns(new List<RamMetric>());
-        _storeMock.Setup(s => s.GetLatestDiskMetrics()).Returns(new List<DiskMetric>());
-        _storeMock.Setup(s => s.GetLatestServiceStatuses()).Returns(new List<ServiceStatus>());
-        _storeMock.Setup(s => s.GetIncidents(It.IsAny<TimeSpan>())).Returns(new List<Incident>());
 
         var report = _builder.BuildReport(TimeSpan.FromHours(2));
 
@@ -51,11 +56,7 @@ public class ReportBuilderTests
             new(now, 80, 6400, 32000)
         };
 
-        _storeMock.Setup(s => s.GetCpuMetrics(It.IsAny<TimeSpan>())).Returns(new List<CpuMetric>());
         _storeMock.Setup(s => s.GetRamMetrics(It.IsAny<TimeSpan>())).Returns(ramMetrics);
-        _storeMock.Setup(s => s.GetLatestDiskMetrics()).Returns(new List<DiskMetric>());
-        _storeMock.Setup(s => s.GetLatestServiceStatuses()).Returns(new List<ServiceStatus>());
-        _storeMock.Setup(s => s.GetIncidents(It.IsAny<TimeSpan>())).Returns(new List<Incident>());
 
         var report = _builder.BuildReport(TimeSpan.FromHours(2));
 
@@ -67,12 +68,6 @@ public class ReportBuilderTests
     [Fact]
     public void BuildReport_WithNoMetrics_ShouldReturnZeros()
     {
-        _storeMock.Setup(s => s.GetCpuMetrics(It.IsAny<TimeSpan>())).Returns(new List<CpuMetric>());
-        _storeMock.Setup(s => s.GetRamMetrics(It.IsAny<TimeSpan>())).Returns(new List<RamMetric>());
-        _storeMock.Setup(s => s.GetLatestDiskMetrics()).Returns(new List<DiskMetric>());
-        _storeMock.Setup(s => s.GetLatestServiceStatuses()).Returns(new List<ServiceStatus>());
-        _storeMock.Setup(s => s.GetIncidents(It.IsAny<TimeSpan>())).Returns(new List<Incident>());
-
         var report = _builder.BuildReport(TimeSpan.FromHours(2));
 
         report.CpuMin.Should().Be(0);

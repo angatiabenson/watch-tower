@@ -30,6 +30,7 @@ try
             services.Configure<RamMonitorOptions>(config.GetSection(RamMonitorOptions.SectionName));
             services.Configure<DiskMonitorOptions>(config.GetSection(DiskMonitorOptions.SectionName));
             services.Configure<ServiceMonitorOptions>(config.GetSection(ServiceMonitorOptions.SectionName));
+            services.Configure<NetworkMonitorOptions>(config.GetSection(NetworkMonitorOptions.SectionName));
             services.Configure<HeartbeatOptions>(config.GetSection(HeartbeatOptions.SectionName));
             services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
             services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
@@ -51,6 +52,7 @@ try
             services.AddHostedService<CpuMonitorWorker>();
             services.AddHostedService<RamMonitorWorker>();
             services.AddHostedService<DiskMonitorWorker>();
+            services.AddHostedService<NetworkMonitorWorker>();
             services.AddHostedService<ServiceMonitorWorker>();
             services.AddHostedService<HeartbeatWorker>();
             services.AddHostedService<EmailReporterWorker>();

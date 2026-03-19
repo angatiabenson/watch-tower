@@ -14,6 +14,8 @@ public class ServerReport
     public double RamMax { get; set; }
 
     public List<DiskMetric> DiskSnapshots { get; set; } = new();
+    public List<DiskQueueMetric> DiskQueueSnapshots { get; set; } = new();
+    public List<NetworkMetric> NetworkSnapshots { get; set; } = new();
     public List<ServiceStatus> ServiceSnapshots { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();
 }

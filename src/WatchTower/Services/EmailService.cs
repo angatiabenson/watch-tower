@@ -18,7 +18,11 @@ public class EmailService : IEmailService
         _logger = logger;
     }
 
-    public async Task SendEmailAsync(string subject, string htmlBody, CancellationToken cancellationToken = default)
+    public async Task SendEmailAsync(
+        string subject,
+        string htmlBody,
+        CancellationToken cancellationToken = default
+    )
     {
         var opts = _options.CurrentValue;
 
@@ -49,9 +53,14 @@ public class EmailService : IEmailService
                 "none" => SecureSocketOptions.None,
                 "ssl" or "implicit" => SecureSocketOptions.SslOnConnect,
                 "starttls" => SecureSocketOptions.StartTls,
-                _ => SecureSocketOptions.Auto
+                _ => SecureSocketOptions.Auto,
             };
-            await client.ConnectAsync(opts.SmtpHost, opts.SmtpPort, secureOption, cancellationToken);
+            await client.ConnectAsync(
+                opts.SmtpHost,
+                opts.SmtpPort,
+                secureOption,
+                cancellationToken
+            );
 
             if (!string.IsNullOrWhiteSpace(opts.Username))
                 await client.AuthenticateAsync(opts.Username, opts.Password, cancellationToken);

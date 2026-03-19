@@ -25,13 +25,17 @@ public class DiskMonitorWorkerTests
         {
             PollIntervalSeconds = 1,
             WarningThresholdPercent = 70,
-            CriticalThresholdPercent = 85
+            CriticalThresholdPercent = 85,
+            QueueLengthWarningThreshold = 2.0
         });
 
         _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions
         {
             EmergencyCooldownSeconds = 300
         });
+
+        // Default: return empty disk queue metrics
+        _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(new List<DiskQueueMetric>());
     }
 
     [Fact]
@@ -94,6 +98,30 @@ public class DiskMonitorWorkerTests
         await worker.StopAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_HighDiskQueue_ShouldSendEmail()
+    {
+        var disks = new List<DiskMetric> { new(DateTime.UtcNow, "C:\\", 500, 300, 40) };
+        var queues = new List<DiskQueueMetric> { new(DateTime.UtcNow, "0 C:", 5.0) };
+
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(disks);
+        _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(queues);
+        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
+        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
+
+        var worker = CreateWorker();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        await worker.StartAsync(cts.Token);
+        await Task.Delay(1500);
+        await worker.StopAsync(CancellationToken.None);
+
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.Contains("Disk Queue High")),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.AtLeastOnce);
     }
 
     private DiskMonitorWorker CreateWorker() => new(

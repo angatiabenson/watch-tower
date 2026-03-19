@@ -9,6 +9,8 @@ public class MetricsStore : IMetricsStore
     private readonly ConcurrentQueue<CpuMetric> _cpuMetrics = new();
     private readonly ConcurrentQueue<RamMetric> _ramMetrics = new();
     private readonly ConcurrentDictionary<string, DiskMetric> _diskMetrics = new();
+    private readonly ConcurrentDictionary<string, DiskQueueMetric> _diskQueueMetrics = new();
+    private readonly ConcurrentDictionary<string, NetworkMetric> _networkMetrics = new();
     private readonly ConcurrentDictionary<string, ServiceStatus> _serviceStatuses = new();
     private readonly ConcurrentQueue<Incident> _incidents = new();
 
@@ -18,7 +20,14 @@ public class MetricsStore : IMetricsStore
 
     public void AddDiskMetric(DiskMetric metric) => _diskMetrics[metric.DriveName] = metric;
 
-    public void AddServiceStatus(ServiceStatus status) => _serviceStatuses[status.ServiceName] = status;
+    public void AddDiskQueueMetric(DiskQueueMetric metric) =>
+        _diskQueueMetrics[metric.InstanceName] = metric;
+
+    public void AddNetworkMetric(NetworkMetric metric) =>
+        _networkMetrics[metric.InterfaceName] = metric;
+
+    public void AddServiceStatus(ServiceStatus status) =>
+        _serviceStatuses[status.ServiceName] = status;
 
     public void AddIncident(Incident incident) => _incidents.Enqueue(incident);
 
@@ -36,7 +45,14 @@ public class MetricsStore : IMetricsStore
 
     public IReadOnlyList<DiskMetric> GetLatestDiskMetrics() => _diskMetrics.Values.ToList();
 
-    public IReadOnlyList<ServiceStatus> GetLatestServiceStatuses() => _serviceStatuses.Values.ToList();
+    public IReadOnlyList<DiskQueueMetric> GetLatestDiskQueueMetrics() =>
+        _diskQueueMetrics.Values.ToList();
+
+    public IReadOnlyList<NetworkMetric> GetLatestNetworkMetrics() =>
+        _networkMetrics.Values.ToList();
+
+    public IReadOnlyList<ServiceStatus> GetLatestServiceStatuses() =>
+        _serviceStatuses.Values.ToList();
 
     public IReadOnlyList<Incident> GetIncidents(TimeSpan period)
     {

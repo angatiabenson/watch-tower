@@ -17,6 +17,7 @@ public class DiskMonitorWorker : BackgroundService
     private readonly ILogger<DiskMonitorWorker> _logger;
 
     private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerDrive = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastQueueEmergencyPerDisk = new();
 
     public DiskMonitorWorker(
         ISystemMetricsProvider metricsProvider,
@@ -66,6 +67,24 @@ public class DiskMonitorWorker : BackgroundService
                     }
                 }
 
+                // Disk queue length monitoring
+                var queueMetrics = _metricsProvider.GetDiskQueueMetrics();
+                foreach (var queue in queueMetrics)
+                {
+                    _metricsStore.AddDiskQueueMetric(queue);
+
+                    if (queue.QueueLength > opts.QueueLengthWarningThreshold)
+                    {
+                        _logger.LogWarning("DISK QUEUE HIGH: {Disk} queue length {Queue:F1} (threshold: {Threshold})",
+                            queue.InstanceName, queue.QueueLength, opts.QueueLengthWarningThreshold);
+                        await HandleQueueEmergencyAsync(queue, stoppingToken);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
+                    }
+                }
+
                 await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -102,5 +121,27 @@ public class DiskMonitorWorker : BackgroundService
         await _emailService.SendEmailAsync($"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%", html, ct);
 
         _lastEmergencyPerDrive[disk.DriveName] = DateTime.UtcNow;
+    }
+
+    private async Task HandleQueueEmergencyAsync(DiskQueueMetric queue, CancellationToken ct)
+    {
+        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
+        var lastEmail = _lastQueueEmergencyPerDisk.GetValueOrDefault(queue.InstanceName, DateTime.MinValue);
+
+        if (DateTime.UtcNow - lastEmail < cooldown)
+            return;
+
+        var incident = new Incident(
+            DateTime.UtcNow,
+            IncidentType.DiskQueueHigh,
+            $"Disk '{queue.InstanceName}' queue length at {queue.QueueLength:F1} (threshold: {_options.CurrentValue.QueueLengthWarningThreshold})");
+
+        _metricsStore.AddIncident(incident);
+
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
+        await _emailService.SendEmailAsync($"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}", html, ct);
+
+        _lastQueueEmergencyPerDisk[queue.InstanceName] = DateTime.UtcNow;
     }
 }

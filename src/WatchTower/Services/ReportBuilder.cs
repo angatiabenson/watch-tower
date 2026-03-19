@@ -19,6 +19,8 @@ public class ReportBuilder : IReportBuilder
         var cpuMetrics = _metricsStore.GetCpuMetrics(period);
         var ramMetrics = _metricsStore.GetRamMetrics(period);
         var diskMetrics = _metricsStore.GetLatestDiskMetrics();
+        var diskQueueMetrics = _metricsStore.GetLatestDiskQueueMetrics();
+        var networkMetrics = _metricsStore.GetLatestNetworkMetrics();
         var serviceStatuses = _metricsStore.GetLatestServiceStatuses();
         var incidents = _metricsStore.GetIncidents(period);
 
@@ -27,6 +29,8 @@ public class ReportBuilder : IReportBuilder
             GeneratedAt = DateTime.UtcNow,
             ReportPeriod = period,
             DiskSnapshots = diskMetrics.ToList(),
+            DiskQueueSnapshots = diskQueueMetrics.ToList(),
+            NetworkSnapshots = networkMetrics.ToList(),
             ServiceSnapshots = serviceStatuses.ToList(),
             Incidents = incidents.ToList()
         };
