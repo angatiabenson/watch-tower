@@ -136,7 +136,69 @@ public static class EmailTemplates
 </tr></table>"
         );
 
-        // Disk section
+        // Disk Queue & Network Output side-by-side cards
+        sb.AppendLine(@"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top:20px;'>
+<tr>
+<td width='48%' style='vertical-align:top;'>
+<table width='100%' cellpadding='0' cellspacing='0' style='border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
+<tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>Network Output Queue</td></tr>
+<tr><td style='padding:12px 14px;'>");
+
+        if (report.NetworkSnapshots.Count > 0)
+        {
+            sb.AppendLine("<table width='100%' cellpadding='0' cellspacing='0'>");
+            foreach (var net in report.NetworkSnapshots)
+            {
+                var netColor = net.OutputQueueLength > 0 ? "#e74c3c" : "#27ae60";
+                var statusText = net.OutputQueueLength > 0 ? "SATURATED" : "OK";
+                sb.AppendLine($@"<tr>
+<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{net.InterfaceName}</td>
+<td align='right' style='padding:6px 0;font-family:monospace;font-size:12px;color:{netColor};font-weight:600;'>{net.OutputQueueLength:F0}</td>
+<td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:{netColor};width:60px;'>{statusText}</td></tr>");
+            }
+            sb.AppendLine("</table>");
+        }
+        else
+        {
+            sb.AppendLine("<span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#999;'>No data</span>");
+        }
+
+        sb.AppendLine(@"</td></tr>
+<tr><td style='padding:8px 14px 12px;border-top:1px solid #f0f2f5;'>
+<span style='font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#8896a8;line-height:1.4;'>Packets waiting to be sent by the NIC — any value above 0 means the network adapter is saturated and may cause API timeouts.</span>
+</td></tr></table>
+</td>
+<td width='4%'></td>
+<td width='48%' style='vertical-align:top;'>
+<table width='100%' cellpadding='0' cellspacing='0' style='border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
+<tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>Disk Queue Length</td></tr>
+<tr><td style='padding:12px 14px;'>");
+
+        if (report.DiskQueueSnapshots.Count > 0)
+        {
+            sb.AppendLine("<table width='100%' cellpadding='0' cellspacing='0'>");
+            foreach (var queue in report.DiskQueueSnapshots)
+            {
+                var queueColor = queue.QueueLength > 2 ? "#e74c3c" : queue.QueueLength > 1 ? "#f39c12" : "#27ae60";
+                sb.AppendLine($@"<tr>
+<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{queue.InstanceName}</td>
+<td align='right' style='padding:6px 0;font-family:monospace;font-size:13px;font-weight:600;color:{queueColor};'>{queue.QueueLength:F1}</td></tr>");
+            }
+            sb.AppendLine("</table>");
+        }
+        else
+        {
+            sb.AppendLine("<span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#999;'>No data</span>");
+        }
+
+        sb.AppendLine(@"</td></tr>
+<tr><td style='padding:8px 14px 12px;border-top:1px solid #f0f2f5;'>
+<span style='font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#8896a8;line-height:1.4;'>I/O requests waiting for the disk — values above 2 indicate the disk cannot keep up with read/write demand from SQL, IIS, or other services.</span>
+</td></tr></table>
+</td>
+</tr></table>");
+
+        // Disk Usage section
         if (report.DiskSnapshots.Count > 0)
         {
             sb.AppendLine(
@@ -168,44 +230,6 @@ public static class EmailTemplates
 <td></td></tr></table>
 </td></tr>"
                 );
-            }
-            sb.AppendLine("</table></td></tr></table>");
-        }
-
-        // Disk Queue section
-        if (report.DiskQueueSnapshots.Count > 0)
-        {
-            sb.AppendLine(@"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top:20px;border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
-<tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>Disk Queue Length</td></tr>
-<tr><td style='padding:12px 14px;'>
-<table width='100%' cellpadding='0' cellspacing='0'>");
-
-            foreach (var queue in report.DiskQueueSnapshots)
-            {
-                var queueColor = queue.QueueLength > 2 ? "#e74c3c" : queue.QueueLength > 1 ? "#f39c12" : "#27ae60";
-                sb.AppendLine($@"<tr>
-<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{queue.InstanceName}</td>
-<td align='right' style='padding:6px 0;font-family:monospace;font-size:13px;font-weight:600;color:{queueColor};'>{queue.QueueLength:F1}</td></tr>");
-            }
-            sb.AppendLine("</table></td></tr></table>");
-        }
-
-        // Network section
-        if (report.NetworkSnapshots.Count > 0)
-        {
-            sb.AppendLine(@"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top:20px;border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
-<tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>Network Output Queue</td></tr>
-<tr><td style='padding:12px 14px;'>
-<table width='100%' cellpadding='0' cellspacing='0'>");
-
-            foreach (var net in report.NetworkSnapshots)
-            {
-                var netColor = net.OutputQueueLength > 0 ? "#e74c3c" : "#27ae60";
-                var statusText = net.OutputQueueLength > 0 ? "SATURATED" : "OK";
-                sb.AppendLine($@"<tr>
-<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{net.InterfaceName}</td>
-<td align='right' style='padding:6px 0;font-family:monospace;font-size:12px;color:{netColor};font-weight:600;'>{net.OutputQueueLength:F0}</td>
-<td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:{netColor};width:80px;'>{statusText}</td></tr>");
             }
             sb.AppendLine("</table></td></tr></table>");
         }
