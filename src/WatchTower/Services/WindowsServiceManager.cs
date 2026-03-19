@@ -20,12 +20,12 @@ public class WindowsServiceManager : IWindowsServiceManager
             using var sc = new ServiceController(serviceName);
             var status = sc.Status.ToString();
             var isRunning = sc.Status == ServiceControllerStatus.Running;
-            return new ServiceStatus(DateTime.UtcNow, serviceName, status, isRunning);
+            return new ServiceStatus(DateTime.UtcNow, serviceName, sc.DisplayName, status, isRunning);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to query service: {ServiceName}", serviceName);
-            return new ServiceStatus(DateTime.UtcNow, serviceName, "NotFound", false);
+            return new ServiceStatus(DateTime.UtcNow, serviceName, serviceName, "NotFound", false);
         }
     }
 

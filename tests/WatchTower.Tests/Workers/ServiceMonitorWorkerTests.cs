@@ -39,7 +39,7 @@ public class ServiceMonitorWorkerTests
     public async Task ExecuteAsync_RunningService_ShouldStoreStatus()
     {
         _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Running", true));
+            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Running", true));
 
         var worker = CreateWorker();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -55,7 +55,7 @@ public class ServiceMonitorWorkerTests
     public async Task ExecuteAsync_StoppedService_ShouldAttemptRestart()
     {
         _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Stopped", false));
+            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false));
         _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
 
         var worker = CreateWorker();

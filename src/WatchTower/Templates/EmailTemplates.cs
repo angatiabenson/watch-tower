@@ -160,7 +160,7 @@ public static class EmailTemplates
                 var statusText = svc.IsRunning ? "Running" : svc.Status;
                 sb.AppendLine($@"<tr>
 <td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>
-<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{svc.ServiceName}</td>
+<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{svc.DisplayName}</td>
 <td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:{dotColor};'>{statusText}</td></tr>");
             }
             sb.AppendLine("</table></td></tr></table>");

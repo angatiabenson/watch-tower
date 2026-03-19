@@ -44,8 +44,8 @@ public class MetricsStoreTests
     [Fact]
     public void AddServiceStatus_ShouldOverwritePreviousForSameService()
     {
-        var status1 = new ServiceStatus(DateTime.UtcNow, "TestService", "Running", true);
-        var status2 = new ServiceStatus(DateTime.UtcNow, "TestService", "Stopped", false);
+        var status1 = new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Running", true);
+        var status2 = new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false);
 
         _store.AddServiceStatus(status1);
         _store.AddServiceStatus(status2);
