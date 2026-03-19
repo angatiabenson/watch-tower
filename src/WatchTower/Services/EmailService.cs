@@ -1,4 +1,5 @@
 using MailKit.Net.Smtp;
+using MailKit.Security;
 using Microsoft.Extensions.Options;
 using MimeKit;
 using WatchTower.Configuration;
@@ -43,7 +44,14 @@ public class EmailService : IEmailService
         using var client = new SmtpClient();
         try
         {
-            await client.ConnectAsync(opts.SmtpHost, opts.SmtpPort, opts.UseSsl, cancellationToken);
+            var secureOption = opts.Security?.ToLowerInvariant() switch
+            {
+                "none" => SecureSocketOptions.None,
+                "ssl" or "implicit" => SecureSocketOptions.SslOnConnect,
+                "starttls" => SecureSocketOptions.StartTls,
+                _ => SecureSocketOptions.Auto
+            };
+            await client.ConnectAsync(opts.SmtpHost, opts.SmtpPort, secureOption, cancellationToken);
 
             if (!string.IsNullOrWhiteSpace(opts.Username))
                 await client.AuthenticateAsync(opts.Username, opts.Password, cancellationToken);
