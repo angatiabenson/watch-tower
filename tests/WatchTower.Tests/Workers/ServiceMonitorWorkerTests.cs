@@ -69,6 +69,25 @@ public class ServiceMonitorWorkerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SuccessfulRestart_ShouldLogIncident()
+    {
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
+            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false));
+        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
+
+        var worker = CreateWorker();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        await worker.StartAsync(cts.Token);
+        await Task.Delay(2000);
+        await worker.StopAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i =>
+            i.Type == IncidentType.ServiceRestarted &&
+            i.Description.Contains("Test Service"))), Times.AtLeastOnce);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_NoWatchedServices_ShouldNotQueryServices()
     {
         _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions

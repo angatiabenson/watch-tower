@@ -12,6 +12,8 @@ public class ServerReport
     public double RamMin { get; set; }
     public double RamAvg { get; set; }
     public double RamMax { get; set; }
+    public double RamUsedGb { get; set; }
+    public double RamTotalGb { get; set; }
 
     public List<DiskMetric> DiskSnapshots { get; set; } = new();
     public List<DiskQueueMetric> DiskQueueSnapshots { get; set; } = new();

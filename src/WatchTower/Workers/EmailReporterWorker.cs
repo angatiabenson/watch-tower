@@ -6,6 +6,8 @@ namespace WatchTower.Workers;
 
 public class EmailReporterWorker : BackgroundService
 {
+    private static readonly TimeZoneInfo EatZone = TimeZoneInfo.FindSystemTimeZoneById("E. Africa Standard Time");
+
     private readonly IReportBuilder _reportBuilder;
     private readonly IEmailService _emailService;
     private readonly IMetricsStore _metricsStore;
@@ -34,20 +36,23 @@ public class EmailReporterWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-                var interval = TimeSpan.FromSeconds(opts.ReportIntervalSeconds);
+                var delay = GetDelayUntilNextReport();
+                _logger.LogInformation("Next daily report scheduled in {Hours:F1} hours", delay.TotalHours);
 
-                await Task.Delay(interval, stoppingToken);
+                await Task.Delay(delay, stoppingToken);
 
-                _logger.LogInformation("Generating scheduled report");
+                _logger.LogInformation("Generating daily scheduled report");
 
-                // Purge old data (keep 2.5 hours)
-                _metricsStore.Purge(TimeSpan.FromHours(2.5));
+                var reportPeriod = TimeSpan.FromHours(24);
 
-                var report = _reportBuilder.BuildReport(interval);
+                // Purge data older than 25 hours (keep buffer beyond 24h period)
+                _metricsStore.Purge(TimeSpan.FromHours(25));
+
+                var report = _reportBuilder.BuildReport(reportPeriod);
+                var eatTime = TimeZoneInfo.ConvertTimeFromUtc(report.GeneratedAt, EatZone);
                 var html = _reportBuilder.RenderScheduledReportHtml(report);
                 await _emailService.SendEmailAsync(
-                    $"[WatchTower] Scheduled Report - {report.GeneratedAt:yyyy-MM-dd HH:mm} UTC",
+                    $"[WatchTower] Daily Report - {eatTime:yyyy-MM-dd HH:mm} EAT",
                     html,
                     stoppingToken);
             }
@@ -63,5 +68,23 @@ public class EmailReporterWorker : BackgroundService
         }
 
         _logger.LogInformation("Email Reporter Worker stopped");
+    }
+
+    private TimeSpan GetDelayUntilNextReport()
+    {
+        var opts = _options.CurrentValue;
+
+        if (!TimeSpan.TryParse(opts.DailyReportTime, out var reportTimeOfDay))
+            reportTimeOfDay = TimeSpan.FromHours(8);
+
+        var nowUtc = DateTime.UtcNow;
+        var nowEat = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, EatZone);
+
+        var nextReportEat = nowEat.Date + reportTimeOfDay;
+        if (nextReportEat <= nowEat)
+            nextReportEat = nextReportEat.AddDays(1);
+
+        var nextReportUtc = TimeZoneInfo.ConvertTimeToUtc(nextReportEat, EatZone);
+        return nextReportUtc - nowUtc;
     }
 }

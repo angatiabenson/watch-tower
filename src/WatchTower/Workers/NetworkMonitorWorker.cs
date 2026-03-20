@@ -94,7 +94,7 @@ public class NetworkMonitorWorker : BackgroundService
 
         _metricsStore.AddIncident(incident);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
         await _emailService.SendEmailAsync($"[WatchTower] Network Saturated: {metric.InterfaceName}", html, ct);
 

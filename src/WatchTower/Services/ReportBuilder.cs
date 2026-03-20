@@ -47,6 +47,10 @@ public class ReportBuilder : IReportBuilder
             report.RamMin = ramMetrics.Min(m => m.UsagePercent);
             report.RamAvg = ramMetrics.Average(m => m.UsagePercent);
             report.RamMax = ramMetrics.Max(m => m.UsagePercent);
+
+            var latestRam = ramMetrics.OrderByDescending(m => m.Timestamp).First();
+            report.RamTotalGb = latestRam.TotalMb / 1024.0;
+            report.RamUsedGb = (latestRam.TotalMb - latestRam.AvailableMb) / 1024.0;
         }
 
         return report;

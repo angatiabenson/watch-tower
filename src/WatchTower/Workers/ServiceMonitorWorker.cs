@@ -90,6 +90,13 @@ public class ServiceMonitorWorker : BackgroundService
 
                         var restartStatus = _serviceManager.GetServiceStatus(serviceName);
                         _metricsStore.AddServiceStatus(restartStatus);
+
+                        // Log successful restart as incident
+                        var restartIncident = new Incident(
+                            DateTime.UtcNow,
+                            IncidentType.ServiceRestarted,
+                            $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully");
+                        _metricsStore.AddIncident(restartIncident);
                     }
                     else
                     {
@@ -145,7 +152,7 @@ public class ServiceMonitorWorker : BackgroundService
 
         _metricsStore.AddIncident(incident);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
         await _emailService.SendEmailAsync($"[WatchTower] Service Down: {serviceName}", html, ct);
 

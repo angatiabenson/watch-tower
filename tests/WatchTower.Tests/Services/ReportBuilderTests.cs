@@ -63,6 +63,8 @@ public class ReportBuilderTests
         report.RamMin.Should().Be(40);
         report.RamAvg.Should().Be(60);
         report.RamMax.Should().Be(80);
+        report.RamTotalGb.Should().BeApproximately(32000.0 / 1024, 0.1);
+        report.RamUsedGb.Should().BeApproximately((32000.0 - 6400) / 1024, 0.1);
     }
 
     [Fact]
@@ -110,5 +112,6 @@ public class ReportBuilderTests
         html.Should().Contain("EMERGENCY");
         html.Should().Contain("CpuThresholdBreached");
         html.Should().Contain("CPU at 99.5%");
+        html.Should().Contain("EAT");
     }
 }

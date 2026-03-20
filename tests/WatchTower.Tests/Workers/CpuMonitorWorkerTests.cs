@@ -66,6 +66,27 @@ public class CpuMonitorWorkerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_AboveThreshold_ShouldLogSpikeIncident()
+    {
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
+        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>
+        {
+            new("sqlservr", 1234, 500, 2048)
+        });
+
+        var worker = CreateWorker();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        await worker.StartAsync(cts.Token);
+        await Task.Delay(1500);
+        await worker.StopAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i =>
+            i.Type == IncidentType.CpuSpikeDetected &&
+            i.TopProcesses != null && i.TopProcesses.Count > 0)), Times.Once);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SustainedBreach_ShouldSendEmergencyEmail()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);

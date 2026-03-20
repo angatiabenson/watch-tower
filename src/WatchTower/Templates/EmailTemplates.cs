@@ -5,6 +5,14 @@ namespace WatchTower.Templates;
 
 public static class EmailTemplates
 {
+    private static readonly TimeZoneInfo EatZone = TimeZoneInfo.FindSystemTimeZoneById("E. Africa Standard Time");
+
+    private static string ToEat(DateTime utcTime) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utcTime, EatZone).ToString("HH:mm:ss");
+
+    private static string ToEatFull(DateTime utcTime) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utcTime, EatZone).ToString("yyyy-MM-dd HH:mm:ss");
+
     private static string GetStatusColor(double percent, double warning, double critical) =>
         percent >= critical ? "#e74c3c"
         : percent >= warning ? "#f39c12"
@@ -48,7 +56,7 @@ public static class EmailTemplates
         );
         sb.AppendLine(
             $@"<td align='right' style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:rgba(255,255,255,0.7);vertical-align:top;'>
-{report.GeneratedAt:yyyy-MM-dd HH:mm:ss} UTC<br>Period: {FormatDuration(report.ReportPeriod)}</td>"
+{ToEatFull(report.GeneratedAt)} EAT<br>Period: {FormatDuration(report.ReportPeriod)}</td>"
         );
         sb.AppendLine("</tr></table></td></tr>");
 
@@ -65,7 +73,7 @@ public static class EmailTemplates
 <span style='font-size:16px;font-weight:700;color:#c0392b;'>EMERGENCY ALERT</span><br>
 <span style='font-size:14px;font-weight:600;color:#333;'>{emergencyIncident.Type}</span><br>
 <span style='font-size:13px;color:#555;'>{emergencyIncident.Description}</span><br>
-<span style='font-size:11px;color:#999;'>Detected at {emergencyIncident.Timestamp:HH:mm:ss} UTC</span>
+<span style='font-size:11px;color:#999;'>Detected at {ToEat(emergencyIncident.Timestamp)} EAT</span>
 </td></tr></table>"
             );
 
@@ -100,6 +108,9 @@ public static class EmailTemplates
         // CPU & RAM side-by-side summary cards
         var cpuColor = GetStatusColor(report.CpuAvg, 70, 90);
         var ramColor = GetStatusColor(report.RamAvg, 70, 85);
+        var ramGbText = report.RamTotalGb > 0
+            ? $"<br><span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#888;'>({report.RamUsedGb:F1} / {report.RamTotalGb:F1} GB)</span>"
+            : "";
 
         sb.AppendLine(
             $@"<table width='100%' cellpadding='0' cellspacing='0'>
@@ -123,7 +134,7 @@ public static class EmailTemplates
 <table width='100%' cellpadding='0' cellspacing='0' style='border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
 <tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>RAM Usage</td></tr>
 <tr><td style='padding:16px 14px;text-align:center;'>
-<span style='font-family:Segoe UI,Arial,sans-serif;font-size:36px;font-weight:700;color:{ramColor};'>{report.RamAvg:F0}%</span>
+<span style='font-family:Segoe UI,Arial,sans-serif;font-size:36px;font-weight:700;color:{ramColor};'>{report.RamAvg:F0}%</span>{ramGbText}
 <br><span style='font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#999;'>{GetRamStatusLabel(report.RamAvg)}</span>
 <table width='100%' cellpadding='0' cellspacing='0' style='margin-top:10px;'>
 <tr>
@@ -272,11 +283,35 @@ public static class EmailTemplates
             {
                 sb.AppendLine(
                     $@"<tr style='border-top:1px solid #fce4e4;'>
-<td style='padding:10px 14px;width:70px;vertical-align:top;font-family:monospace;font-size:12px;color:#999;white-space:nowrap;'>{incident.Timestamp:HH:mm:ss}</td>
+<td style='padding:10px 14px;width:70px;vertical-align:top;font-family:monospace;font-size:12px;color:#999;white-space:nowrap;'>{ToEat(incident.Timestamp)} EAT</td>
 <td style='padding:10px 14px;vertical-align:top;'>
 <span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#c0392b;'>{FormatIncidentType(incident.Type)}</span><br>
 <span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#555;'>{incident.Description}</span></td></tr>"
                 );
+
+                // Show top processes for CPU/RAM spike and threshold incidents
+                if (incident.TopProcesses is { Count: > 0 })
+                {
+                    sb.AppendLine(
+                        @"<tr><td colspan='2' style='padding:0 14px 10px 84px;'>
+<table width='100%' cellpadding='0' cellspacing='0' style='background:#fff9f9;border:1px solid #f5e0e0;border-radius:4px;'>
+<tr style='background:#fce4e4;'>
+<td style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>PROCESS</td>
+<td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>PID</td>
+<td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>CPU TIME</td>
+<td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>MEMORY</td></tr>");
+
+                    foreach (var p in incident.TopProcesses)
+                    {
+                        sb.AppendLine(
+                            $@"<tr>
+<td style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#333;border-top:1px solid #f5e0e0;'>{p.Name}</td>
+<td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.Pid}</td>
+<td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuSeconds:F1}s</td>
+<td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.MemoryMb:F0} MB</td></tr>");
+                    }
+                    sb.AppendLine("</table></td></tr>");
+                }
             }
             sb.AppendLine("</table></td></tr></table>");
         }
@@ -312,7 +347,7 @@ public static class EmailTemplates
     private static string FormatDuration(TimeSpan span)
     {
         if (span.TotalHours >= 1)
-            return $"{span.TotalHours:F1} hours";
+            return $"{span.TotalHours:F0} hours";
         return $"{span.TotalMinutes:F0} minutes";
     }
 
@@ -320,11 +355,14 @@ public static class EmailTemplates
         type switch
         {
             IncidentType.CpuThresholdBreached => "CPU Threshold Breached",
+            IncidentType.CpuSpikeDetected => "CPU Spike Detected",
             IncidentType.RamThresholdBreached => "RAM Threshold Breached",
+            IncidentType.RamSpikeDetected => "RAM Spike Detected",
             IncidentType.DiskCritical => "Disk Critical",
             IncidentType.DiskQueueHigh => "Disk Queue High",
             IncidentType.NetworkQueueSaturated => "Network Saturated",
             IncidentType.ServiceDown => "Service Down",
+            IncidentType.ServiceRestarted => "Service Restarted",
             IncidentType.ServiceRestartFailed => "Service Restart Failed",
             _ => type.ToString(),
         };

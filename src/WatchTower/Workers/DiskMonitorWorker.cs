@@ -116,7 +116,7 @@ public class DiskMonitorWorker : BackgroundService
 
         _metricsStore.AddIncident(incident);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
         await _emailService.SendEmailAsync($"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%", html, ct);
 
@@ -138,7 +138,7 @@ public class DiskMonitorWorker : BackgroundService
 
         _metricsStore.AddIncident(incident);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
         await _emailService.SendEmailAsync($"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}", html, ct);
 

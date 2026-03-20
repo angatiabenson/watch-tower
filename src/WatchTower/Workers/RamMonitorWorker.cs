@@ -53,7 +53,20 @@ public class RamMonitorWorker : BackgroundService
 
                 if (ramMetric.UsagePercent >= opts.ThresholdPercent)
                 {
-                    _firstBreachTime ??= DateTime.UtcNow;
+                    if (_firstBreachTime == null)
+                    {
+                        _firstBreachTime = DateTime.UtcNow;
+
+                        // Log spike incident immediately with top processes
+                        var topProcs = _metricsProvider.GetTopMemoryProcesses(3).ToList();
+                        var spike = new Incident(
+                            DateTime.UtcNow,
+                            IncidentType.RamSpikeDetected,
+                            $"RAM hit {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available, threshold: {opts.ThresholdPercent}%)",
+                            topProcs);
+                        _metricsStore.AddIncident(spike);
+                        _logger.LogWarning("RAM spike detected: {Description}", spike.Description);
+                    }
 
                     var elapsed = DateTime.UtcNow - _firstBreachTime.Value;
                     if (elapsed.TotalSeconds >= opts.SustainedSeconds)
@@ -99,7 +112,7 @@ public class RamMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         _logger.LogWarning("RAM EMERGENCY: {Description}", incident.Description);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
         await _emailService.SendEmailAsync($"[WatchTower] RAM Emergency: {ramMetric.UsagePercent:F1}%", html, ct);
 

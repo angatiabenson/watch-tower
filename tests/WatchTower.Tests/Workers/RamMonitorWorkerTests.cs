@@ -65,6 +65,27 @@ public class RamMonitorWorkerTests
         _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_AboveThreshold_ShouldLogSpikeIncident()
+    {
+        _metricsProvider.Setup(m => m.GetRamMetric()).Returns(new RamMetric(DateTime.UtcNow, 95, 1600, 32000));
+        _metricsProvider.Setup(m => m.GetTopMemoryProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>
+        {
+            new("sqlservr", 1234, 500, 4096)
+        });
+
+        var worker = CreateWorker();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        await worker.StartAsync(cts.Token);
+        await Task.Delay(1500);
+        await worker.StopAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i =>
+            i.Type == IncidentType.RamSpikeDetected &&
+            i.TopProcesses != null && i.TopProcesses.Count > 0)), Times.Once);
+    }
+
     private RamMonitorWorker CreateWorker() => new(
         _metricsProvider.Object,
         _metricsStore.Object,

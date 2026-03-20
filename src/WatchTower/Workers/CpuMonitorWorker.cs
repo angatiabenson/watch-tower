@@ -53,7 +53,20 @@ public class CpuMonitorWorker : BackgroundService
 
                 if (cpuUsage >= opts.ThresholdPercent)
                 {
-                    _firstBreachTime ??= DateTime.UtcNow;
+                    if (_firstBreachTime == null)
+                    {
+                        _firstBreachTime = DateTime.UtcNow;
+
+                        // Log spike incident immediately with top processes
+                        var topProcs = _metricsProvider.GetTopCpuProcesses(3).ToList();
+                        var spike = new Incident(
+                            DateTime.UtcNow,
+                            IncidentType.CpuSpikeDetected,
+                            $"CPU hit {cpuUsage:F1}% (threshold: {opts.ThresholdPercent}%)",
+                            topProcs);
+                        _metricsStore.AddIncident(spike);
+                        _logger.LogWarning("CPU spike detected: {Description}", spike.Description);
+                    }
 
                     var elapsed = DateTime.UtcNow - _firstBreachTime.Value;
                     if (elapsed.TotalSeconds >= opts.SustainedSeconds)
@@ -99,7 +112,7 @@ public class CpuMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         _logger.LogWarning("CPU EMERGENCY: {Description}", incident.Description);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(2.5));
+        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
         await _emailService.SendEmailAsync($"[WatchTower] CPU Emergency: {cpuUsage:F1}%", html, ct);
 
