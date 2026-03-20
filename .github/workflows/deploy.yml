@@ -3,6 +3,11 @@ name: Build and Deploy WatchTower
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/deploy.yml'
+      - 'WatchTower.slnx'
 
 permissions:
   contents: write
