@@ -18,6 +18,8 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/deploy.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/deploy.yml/badge.svg" alt="Build and Deploy"></a>
+  <img src="https://img.shields.io/badge/tests-41%20passing-brightgreen?logo=checkmarx" alt="Tests">
   <img src="https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet" alt=".NET 8">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
