@@ -72,6 +72,6 @@ public class EmailReporterWorkerTests
         await Task.Delay(4000);
         await worker.StopAsync(CancellationToken.None);
 
-        _metricsStore.Verify(s => s.Purge(It.Is<TimeSpan>(t => t.TotalHours == 25)), Times.AtLeastOnce);
+        _metricsStore.Verify(s => s.Purge(It.Is<TimeSpan>(t => t == TimeSpan.Zero)), Times.AtLeastOnce);
     }
 }

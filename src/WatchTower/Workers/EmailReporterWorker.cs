@@ -45,9 +45,6 @@ public class EmailReporterWorker : BackgroundService
 
                 var reportPeriod = TimeSpan.FromHours(24);
 
-                // Purge data older than 25 hours (keep buffer beyond 24h period)
-                _metricsStore.Purge(TimeSpan.FromHours(25));
-
                 var report = _reportBuilder.BuildReport(reportPeriod);
                 var eatTime = TimeZoneInfo.ConvertTimeFromUtc(report.GeneratedAt, EatZone);
                 var html = _reportBuilder.RenderScheduledReportHtml(report);
@@ -55,6 +52,10 @@ public class EmailReporterWorker : BackgroundService
                     $"[WatchTower] Daily Report - {eatTime:yyyy-MM-dd HH:mm} EAT",
                     html,
                     stoppingToken);
+
+                // Purge all data after daily report sent successfully
+                _metricsStore.Purge(TimeSpan.Zero);
+                _logger.LogInformation("Metrics data purged after daily report");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

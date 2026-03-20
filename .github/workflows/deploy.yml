@@ -137,11 +137,18 @@ jobs:
             New-Item -ItemType Directory -Path $deployPath -Force
           }
 
-          # Preserve production config
+          # Preserve production config and database
           $configBackup = $null
           $configPath = "$deployPath\appsettings.json"
           if (Test-Path $configPath) {
             $configBackup = Get-Content $configPath -Raw
+          }
+
+          $dbBackup = $null
+          $dbPath = "$deployPath\watchtower.db"
+          if (Test-Path $dbPath) {
+            $dbBackup = "$env:TEMP\watchtower.db.bak"
+            Copy-Item -Path $dbPath -Destination $dbBackup -Force
           }
 
           Copy-Item -Path ./publish/* -Destination $deployPath -Recurse -Force
@@ -150,6 +157,13 @@ jobs:
           if ($configBackup) {
             Set-Content -Path $configPath -Value $configBackup -NoNewline
             Write-Host "Production appsettings.json preserved"
+          }
+
+          # Restore metrics database
+          if ($dbBackup -and (Test-Path $dbBackup)) {
+            Copy-Item -Path $dbBackup -Destination $dbPath -Force
+            Remove-Item $dbBackup -Force
+            Write-Host "Production watchtower.db preserved"
           }
 
       - name: Create service (if not exists)

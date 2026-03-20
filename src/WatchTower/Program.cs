@@ -36,7 +36,8 @@ try
             services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
 
             // Services
-            services.AddSingleton<IMetricsStore, MetricsStore>();
+            var dbPath = Path.Combine(AppContext.BaseDirectory, "watchtower.db");
+            services.AddSingleton<IMetricsStore>(new SqliteMetricsStore(dbPath));
             services.AddSingleton<ISystemMetricsProvider, SystemMetricsProvider>();
             services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
             services.AddTransient<IEmailService, EmailService>();
