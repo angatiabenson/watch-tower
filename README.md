@@ -109,17 +109,36 @@ All metrics are persisted to a local `watchtower.db` SQLite database:
 
 ## Architecture
 
-```
-                                                      ┌──────────────────────┐
-  CpuMonitorWorker (5s)  ──┐                          │                      │
-  RamMonitorWorker (5s)  ──┤                          │   Daily Report       │
-  DiskMonitorWorker (60s) ─┤── write ──► SQLite DB ◄──┤── read ──────────────┤
-  NetworkMonitorWorker (30s)┤            (watchtower.db)  EmailReporterWorker │
-  ServiceMonitorWorker (30s)┘                          │   (daily @ 08:00)   │
-                                                       └──────────────────────┘
-  HeartbeatWorker (30min) ── independent ──► healthchecks.io
+```mermaid
+---
+config:
+  theme: neo
+  look: neo
+---
+flowchart LR
+  subgraph workers["Monitor workers"]
+    CPU["CpuMonitorWorker<br>(every 5s)"]
+    RAM["RamMonitorWorker<br>(every 5s)"]
+    DISK["DiskMonitorWorker<br>(every 60s)"]
+    NET["NetworkMonitorWorker<br>(every 30s)"]
+    SVC["ServiceMonitorWorker<br>(every 30s)"]
+  end
 
-  Emergency emails sent directly by monitor workers when thresholds are breached.
+  DB[("SQLite DB<br>watchtower.db")]
+
+  subgraph reporter["Daily report"]
+    EMAIL["EmailReporterWorker<br>(daily @ 08:00)"]
+  end
+
+  HB["HeartbeatWorker<br>(every 30 min)"]
+  HC["healthchecks.io"]
+  SMTP["📧 Emergency email"]
+
+  workers -- write --> DB
+  DB -- read --> reporter
+
+  HB -- ping --> HC
+  workers -. threshold breach .-> SMTP
 ```
 
 **Seven independent `BackgroundService` workers** share a singleton `SqliteMetricsStore`:
