@@ -12,7 +12,8 @@ public class HeartbeatWorker : BackgroundService
     public HeartbeatWorker(
         IHttpClientFactory httpClientFactory,
         IOptionsMonitor<HeartbeatOptions> options,
-        ILogger<HeartbeatWorker> logger)
+        ILogger<HeartbeatWorker> logger
+    )
     {
         _httpClientFactory = httpClientFactory;
         _options = options;
@@ -65,14 +66,20 @@ public class HeartbeatWorker : BackgroundService
             }
             else
             {
-                _logger.LogWarning("Heartbeat ping returned {StatusCode}, retrying once", response.StatusCode);
+                _logger.LogWarning(
+                    "Heartbeat ping returned {StatusCode}, retrying once",
+                    response.StatusCode
+                );
                 await Task.Delay(TimeSpan.FromSeconds(5), ct);
 
                 response = await client.GetAsync(url, ct);
                 if (response.IsSuccessStatusCode)
                     _logger.LogInformation("Heartbeat retry successful");
                 else
-                    _logger.LogError("Heartbeat retry failed with {StatusCode}", response.StatusCode);
+                    _logger.LogError(
+                        "Heartbeat retry failed with {StatusCode}",
+                        response.StatusCode
+                    );
             }
         }
         catch (HttpRequestException ex)
@@ -86,7 +93,10 @@ public class HeartbeatWorker : BackgroundService
                 if (response.IsSuccessStatusCode)
                     _logger.LogInformation("Heartbeat retry successful");
                 else
-                    _logger.LogError("Heartbeat retry failed with {StatusCode}", response.StatusCode);
+                    _logger.LogError(
+                        "Heartbeat retry failed with {StatusCode}",
+                        response.StatusCode
+                    );
             }
             catch (Exception retryEx)
             {

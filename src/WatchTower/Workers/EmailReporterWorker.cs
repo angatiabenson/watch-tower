@@ -6,7 +6,9 @@ namespace WatchTower.Workers;
 
 public class EmailReporterWorker : BackgroundService
 {
-    private static readonly TimeZoneInfo EatZone = TimeZoneInfo.FindSystemTimeZoneById("E. Africa Standard Time");
+    private static readonly TimeZoneInfo EatZone = TimeZoneInfo.FindSystemTimeZoneById(
+        "E. Africa Standard Time"
+    );
 
     private readonly IReportBuilder _reportBuilder;
     private readonly IEmailService _emailService;
@@ -19,7 +21,8 @@ public class EmailReporterWorker : BackgroundService
         IEmailService emailService,
         IMetricsStore metricsStore,
         IOptionsMonitor<ReportingOptions> options,
-        ILogger<EmailReporterWorker> logger)
+        ILogger<EmailReporterWorker> logger
+    )
     {
         _reportBuilder = reportBuilder;
         _emailService = emailService;
@@ -37,7 +40,10 @@ public class EmailReporterWorker : BackgroundService
             try
             {
                 var delay = GetDelayUntilNextReport();
-                _logger.LogInformation("Next daily report scheduled in {Hours:F1} hours", delay.TotalHours);
+                _logger.LogInformation(
+                    "Next daily report scheduled in {Hours:F1} hours",
+                    delay.TotalHours
+                );
 
                 await Task.Delay(delay, stoppingToken);
 
@@ -51,11 +57,16 @@ public class EmailReporterWorker : BackgroundService
                 await _emailService.SendEmailAsync(
                     $"[WatchTower] Daily Report - {eatTime:yyyy-MM-dd HH:mm} EAT",
                     html,
-                    stoppingToken);
+                    stoppingToken
+                );
 
                 // Purge all data after daily report sent successfully
                 _metricsStore.Purge(TimeSpan.Zero);
                 _logger.LogInformation("Metrics data purged after daily report");
+
+                // Guard: wait 60s so the next GetDelayUntilNextReport() call
+                // is safely past the target time and schedules for tomorrow
+                await Task.Delay(TimeSpan.FromSeconds(60), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

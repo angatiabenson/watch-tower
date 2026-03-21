@@ -20,7 +20,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
+        cmd.CommandText =
+            @"
             CREATE TABLE IF NOT EXISTS cpu_metrics (
                 timestamp TEXT NOT NULL,
                 usage_percent REAL NOT NULL
@@ -87,7 +88,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO cpu_metrics (timestamp, usage_percent) VALUES (@ts, @usage)";
+            cmd.CommandText =
+                "INSERT INTO cpu_metrics (timestamp, usage_percent) VALUES (@ts, @usage)";
             cmd.Parameters.AddWithValue("@ts", metric.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@usage", metric.UsagePercent);
             cmd.ExecuteNonQuery();
@@ -100,7 +102,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO ram_metrics (timestamp, usage_percent, available_mb, total_mb) VALUES (@ts, @usage, @avail, @total)";
+            cmd.CommandText =
+                "INSERT INTO ram_metrics (timestamp, usage_percent, available_mb, total_mb) VALUES (@ts, @usage, @avail, @total)";
             cmd.Parameters.AddWithValue("@ts", metric.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@usage", metric.UsagePercent);
             cmd.Parameters.AddWithValue("@avail", metric.AvailableMb);
@@ -115,7 +118,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"INSERT OR REPLACE INTO disk_metrics (drive_name, timestamp, total_gb, free_gb, usage_percent)
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO disk_metrics (drive_name, timestamp, total_gb, free_gb, usage_percent)
                                 VALUES (@drive, @ts, @total, @free, @usage)";
             cmd.Parameters.AddWithValue("@drive", metric.DriveName);
             cmd.Parameters.AddWithValue("@ts", metric.Timestamp.ToString("O"));
@@ -132,7 +136,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"INSERT OR REPLACE INTO disk_queue_metrics (instance_name, timestamp, queue_length)
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO disk_queue_metrics (instance_name, timestamp, queue_length)
                                 VALUES (@name, @ts, @queue)";
             cmd.Parameters.AddWithValue("@name", metric.InstanceName);
             cmd.Parameters.AddWithValue("@ts", metric.Timestamp.ToString("O"));
@@ -147,7 +152,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"INSERT OR REPLACE INTO network_metrics (interface_name, timestamp, output_queue_length)
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO network_metrics (interface_name, timestamp, output_queue_length)
                                 VALUES (@name, @ts, @queue)";
             cmd.Parameters.AddWithValue("@name", metric.InterfaceName);
             cmd.Parameters.AddWithValue("@ts", metric.Timestamp.ToString("O"));
@@ -162,7 +168,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"INSERT OR REPLACE INTO service_statuses (service_name, timestamp, display_name, status, is_running)
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO service_statuses (service_name, timestamp, display_name, status, is_running)
                                 VALUES (@name, @ts, @display, @status, @running)";
             cmd.Parameters.AddWithValue("@name", status.ServiceName);
             cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
@@ -179,15 +186,18 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"INSERT INTO incidents (timestamp, type, description, top_processes_json)
+            cmd.CommandText =
+                @"INSERT INTO incidents (timestamp, type, description, top_processes_json)
                                 VALUES (@ts, @type, @desc, @procs)";
             cmd.Parameters.AddWithValue("@ts", incident.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@type", (int)incident.Type);
             cmd.Parameters.AddWithValue("@desc", incident.Description);
-            cmd.Parameters.AddWithValue("@procs",
+            cmd.Parameters.AddWithValue(
+                "@procs",
                 incident.TopProcesses is { Count: > 0 }
                     ? JsonSerializer.Serialize(incident.TopProcesses)
-                    : (object)DBNull.Value);
+                    : (object)DBNull.Value
+            );
             cmd.ExecuteNonQuery();
         }
     }
@@ -201,15 +211,19 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT timestamp, usage_percent FROM cpu_metrics WHERE timestamp >= @cutoff ORDER BY timestamp";
+            cmd.CommandText =
+                "SELECT timestamp, usage_percent FROM cpu_metrics WHERE timestamp >= @cutoff ORDER BY timestamp";
             cmd.Parameters.AddWithValue("@cutoff", cutoff.ToString("O"));
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new CpuMetric(
-                    DateTime.Parse(reader.GetString(0)).ToUniversalTime(),
-                    reader.GetDouble(1)));
+                results.Add(
+                    new CpuMetric(
+                        DateTime.Parse(reader.GetString(0)).ToUniversalTime(),
+                        reader.GetDouble(1)
+                    )
+                );
             }
         }
         return results;
@@ -224,17 +238,21 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT timestamp, usage_percent, available_mb, total_mb FROM ram_metrics WHERE timestamp >= @cutoff ORDER BY timestamp";
+            cmd.CommandText =
+                "SELECT timestamp, usage_percent, available_mb, total_mb FROM ram_metrics WHERE timestamp >= @cutoff ORDER BY timestamp";
             cmd.Parameters.AddWithValue("@cutoff", cutoff.ToString("O"));
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new RamMetric(
-                    DateTime.Parse(reader.GetString(0)).ToUniversalTime(),
-                    reader.GetDouble(1),
-                    reader.GetDouble(2),
-                    reader.GetDouble(3)));
+                results.Add(
+                    new RamMetric(
+                        DateTime.Parse(reader.GetString(0)).ToUniversalTime(),
+                        reader.GetDouble(1),
+                        reader.GetDouble(2),
+                        reader.GetDouble(3)
+                    )
+                );
             }
         }
         return results;
@@ -248,17 +266,21 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT drive_name, timestamp, total_gb, free_gb, usage_percent FROM disk_metrics";
+            cmd.CommandText =
+                "SELECT drive_name, timestamp, total_gb, free_gb, usage_percent FROM disk_metrics";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new DiskMetric(
-                    DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
-                    reader.GetString(0),
-                    reader.GetDouble(2),
-                    reader.GetDouble(3),
-                    reader.GetDouble(4)));
+                results.Add(
+                    new DiskMetric(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetDouble(2),
+                        reader.GetDouble(3),
+                        reader.GetDouble(4)
+                    )
+                );
             }
         }
         return results;
@@ -272,15 +294,19 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT instance_name, timestamp, queue_length FROM disk_queue_metrics";
+            cmd.CommandText =
+                "SELECT instance_name, timestamp, queue_length FROM disk_queue_metrics";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new DiskQueueMetric(
-                    DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
-                    reader.GetString(0),
-                    reader.GetDouble(2)));
+                results.Add(
+                    new DiskQueueMetric(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetDouble(2)
+                    )
+                );
             }
         }
         return results;
@@ -294,15 +320,19 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT interface_name, timestamp, output_queue_length FROM network_metrics";
+            cmd.CommandText =
+                "SELECT interface_name, timestamp, output_queue_length FROM network_metrics";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new NetworkMetric(
-                    DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
-                    reader.GetString(0),
-                    reader.GetDouble(2)));
+                results.Add(
+                    new NetworkMetric(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetDouble(2)
+                    )
+                );
             }
         }
         return results;
@@ -316,17 +346,21 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT service_name, timestamp, display_name, status, is_running FROM service_statuses";
+            cmd.CommandText =
+                "SELECT service_name, timestamp, display_name, status, is_running FROM service_statuses";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new ServiceStatus(
-                    DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
-                    reader.GetString(0),
-                    reader.GetString(2),
-                    reader.GetString(3),
-                    reader.GetInt32(4) == 1));
+                results.Add(
+                    new ServiceStatus(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetInt32(4) == 1
+                    )
+                );
             }
         }
         return results;
@@ -341,7 +375,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT timestamp, type, description, top_processes_json FROM incidents WHERE timestamp >= @cutoff ORDER BY timestamp";
+            cmd.CommandText =
+                "SELECT timestamp, type, description, top_processes_json FROM incidents WHERE timestamp >= @cutoff ORDER BY timestamp";
             cmd.Parameters.AddWithValue("@cutoff", cutoff.ToString("O"));
 
             using var reader = cmd.ExecuteReader();
@@ -350,14 +385,19 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                 List<ProcessInfo>? topProcesses = null;
                 if (!reader.IsDBNull(3))
                 {
-                    topProcesses = JsonSerializer.Deserialize<List<ProcessInfo>>(reader.GetString(3));
+                    topProcesses = JsonSerializer.Deserialize<List<ProcessInfo>>(
+                        reader.GetString(3)
+                    );
                 }
 
-                results.Add(new Incident(
-                    DateTime.Parse(reader.GetString(0)).ToUniversalTime(),
-                    (IncidentType)reader.GetInt32(1),
-                    reader.GetString(2),
-                    topProcesses));
+                results.Add(
+                    new Incident(
+                        DateTime.Parse(reader.GetString(0)).ToUniversalTime(),
+                        (IncidentType)reader.GetInt32(1),
+                        reader.GetString(2),
+                        topProcesses
+                    )
+                );
             }
         }
         return results;
@@ -373,7 +413,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             if (maxAge == TimeSpan.Zero)
             {
                 // Full purge — clear all data after daily report sent
-                cmd.CommandText = @"
+                cmd.CommandText =
+                    @"
                     DELETE FROM cpu_metrics;
                     DELETE FROM ram_metrics;
                     DELETE FROM disk_metrics;
@@ -387,7 +428,8 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             {
                 var cutoff = DateTime.UtcNow - maxAge;
                 var cutoffStr = cutoff.ToString("O");
-                cmd.CommandText = @"
+                cmd.CommandText =
+                    @"
                     DELETE FROM cpu_metrics WHERE timestamp < @cutoff;
                     DELETE FROM ram_metrics WHERE timestamp < @cutoff;
                     DELETE FROM incidents WHERE timestamp < @cutoff;

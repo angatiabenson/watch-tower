@@ -8,9 +8,7 @@ using WatchTower.Workers;
 // Windows Services default to C:\Windows\System32 as working directory
 Directory.SetCurrentDirectory(AppContext.BaseDirectory);
 
-Log.Logger = new LoggerConfiguration()
-    .WriteTo.Console()
-    .CreateBootstrapLogger();
+Log.Logger = new LoggerConfiguration().WriteTo.Console().CreateBootstrapLogger();
 
 try
 {
@@ -19,53 +17,77 @@ try
     var builder = Host.CreateDefaultBuilder(args)
         .UseContentRoot(AppContext.BaseDirectory)
         .UseWindowsService(o => o.ServiceName = "WatchTower")
-        .UseSerilog((context, services, configuration) =>
-            configuration.ReadFrom.Configuration(context.Configuration))
-        .ConfigureServices((context, services) =>
-        {
-            var config = context.Configuration;
-
-            // Configuration options
-            services.Configure<CpuMonitorOptions>(config.GetSection(CpuMonitorOptions.SectionName));
-            services.Configure<RamMonitorOptions>(config.GetSection(RamMonitorOptions.SectionName));
-            services.Configure<DiskMonitorOptions>(config.GetSection(DiskMonitorOptions.SectionName));
-            services.Configure<ServiceMonitorOptions>(config.GetSection(ServiceMonitorOptions.SectionName));
-            services.Configure<NetworkMonitorOptions>(config.GetSection(NetworkMonitorOptions.SectionName));
-            services.Configure<HeartbeatOptions>(config.GetSection(HeartbeatOptions.SectionName));
-            services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
-            services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
-
-            // Services
-            var dbPath = Path.Combine(AppContext.BaseDirectory, "watchtower.db");
-            services.AddSingleton<IMetricsStore>(new SqliteMetricsStore(dbPath));
-            services.AddSingleton<ISystemMetricsProvider, SystemMetricsProvider>();
-            services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
-            services.AddTransient<IEmailService, EmailService>();
-            services.AddTransient<IReportBuilder, ReportBuilder>();
-
-            // HTTP client for heartbeat
-            services.AddHttpClient("Heartbeat", client =>
+        .UseSerilog(
+            (context, services, configuration) =>
+                configuration.ReadFrom.Configuration(context.Configuration)
+        )
+        .ConfigureServices(
+            (context, services) =>
             {
-                client.Timeout = TimeSpan.FromSeconds(30);
-            });
+                var config = context.Configuration;
 
-            // Workers
-            services.AddHostedService<CpuMonitorWorker>();
-            services.AddHostedService<RamMonitorWorker>();
-            services.AddHostedService<DiskMonitorWorker>();
-            services.AddHostedService<NetworkMonitorWorker>();
-            services.AddHostedService<ServiceMonitorWorker>();
-            services.AddHostedService<HeartbeatWorker>();
-            services.AddHostedService<EmailReporterWorker>();
-        });
+                // Configuration options
+                services.Configure<CpuMonitorOptions>(
+                    config.GetSection(CpuMonitorOptions.SectionName)
+                );
+                services.Configure<RamMonitorOptions>(
+                    config.GetSection(RamMonitorOptions.SectionName)
+                );
+                services.Configure<DiskMonitorOptions>(
+                    config.GetSection(DiskMonitorOptions.SectionName)
+                );
+                services.Configure<ServiceMonitorOptions>(
+                    config.GetSection(ServiceMonitorOptions.SectionName)
+                );
+                services.Configure<NetworkMonitorOptions>(
+                    config.GetSection(NetworkMonitorOptions.SectionName)
+                );
+                services.Configure<HeartbeatOptions>(
+                    config.GetSection(HeartbeatOptions.SectionName)
+                );
+                services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
+                services.Configure<ReportingOptions>(
+                    config.GetSection(ReportingOptions.SectionName)
+                );
+
+                // Services
+                var dbPath = Path.Combine(AppContext.BaseDirectory, "watchtower.db");
+                services.AddSingleton<IMetricsStore>(new SqliteMetricsStore(dbPath));
+                services.AddSingleton<ISystemMetricsProvider, SystemMetricsProvider>();
+                services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
+                services.AddTransient<IEmailService, EmailService>();
+                services.AddTransient<IReportBuilder, ReportBuilder>();
+
+                // HTTP client for heartbeat
+                services.AddHttpClient(
+                    "Heartbeat",
+                    client =>
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(30);
+                    }
+                );
+
+                // Workers
+                services.AddHostedService<CpuMonitorWorker>();
+                services.AddHostedService<RamMonitorWorker>();
+                services.AddHostedService<DiskMonitorWorker>();
+                services.AddHostedService<NetworkMonitorWorker>();
+                services.AddHostedService<ServiceMonitorWorker>();
+                services.AddHostedService<HeartbeatWorker>();
+                services.AddHostedService<EmailReporterWorker>();
+            }
+        );
 
     var host = builder.Build();
 
     // Startup validation
     var logger = host.Services.GetRequiredService<ILogger<Program>>();
-    var emailConfig = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<EmailOptions>>();
-    var heartbeatConfig = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<HeartbeatOptions>>();
-    var serviceConfig = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ServiceMonitorOptions>>();
+    var emailConfig =
+        host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<EmailOptions>>();
+    var heartbeatConfig =
+        host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<HeartbeatOptions>>();
+    var serviceConfig =
+        host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ServiceMonitorOptions>>();
 
     if (string.IsNullOrWhiteSpace(emailConfig.CurrentValue.SmtpHost))
         logger.LogWarning("SMTP host is not configured. Email notifications will be disabled.");

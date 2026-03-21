@@ -25,7 +25,8 @@ public class NetworkMonitorWorker : BackgroundService
         IReportBuilder reportBuilder,
         IOptionsMonitor<NetworkMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
-        ILogger<NetworkMonitorWorker> logger)
+        ILogger<NetworkMonitorWorker> logger
+    )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
@@ -53,13 +54,21 @@ public class NetworkMonitorWorker : BackgroundService
 
                     if (metric.OutputQueueLength > opts.OutputQueueWarningThreshold)
                     {
-                        _logger.LogWarning("NETWORK QUEUE SATURATED: {Interface} output queue {Queue:F0} (threshold: > {Threshold})",
-                            metric.InterfaceName, metric.OutputQueueLength, opts.OutputQueueWarningThreshold);
+                        _logger.LogWarning(
+                            "NETWORK QUEUE SATURATED: {Interface} output queue {Queue:F0} (threshold: > {Threshold})",
+                            metric.InterfaceName,
+                            metric.OutputQueueLength,
+                            opts.OutputQueueWarningThreshold
+                        );
                         await HandleEmergencyAsync(metric, stoppingToken);
                     }
                     else
                     {
-                        _logger.LogDebug("Network {Interface}: output queue {Queue:F0}", metric.InterfaceName, metric.OutputQueueLength);
+                        _logger.LogDebug(
+                            "Network {Interface}: output queue {Queue:F0}",
+                            metric.InterfaceName,
+                            metric.OutputQueueLength
+                        );
                     }
                 }
 
@@ -81,8 +90,13 @@ public class NetworkMonitorWorker : BackgroundService
 
     private async Task HandleEmergencyAsync(NetworkMetric metric, CancellationToken ct)
     {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastEmergencyPerInterface.GetValueOrDefault(metric.InterfaceName, DateTime.MinValue);
+        var cooldown = TimeSpan.FromSeconds(
+            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
+        );
+        var lastEmail = _lastEmergencyPerInterface.GetValueOrDefault(
+            metric.InterfaceName,
+            DateTime.MinValue
+        );
 
         if (DateTime.UtcNow - lastEmail < cooldown)
             return;
@@ -90,13 +104,18 @@ public class NetworkMonitorWorker : BackgroundService
         var incident = new Incident(
             DateTime.UtcNow,
             IncidentType.NetworkQueueSaturated,
-            $"Network interface '{metric.InterfaceName}' output queue at {metric.OutputQueueLength:F0} (threshold: > {_options.CurrentValue.OutputQueueWarningThreshold})");
+            $"Network interface '{metric.InterfaceName}' output queue at {metric.OutputQueueLength:F0} (threshold: > {_options.CurrentValue.OutputQueueWarningThreshold})"
+        );
 
         _metricsStore.AddIncident(incident);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] Network Saturated: {metric.InterfaceName}", html, ct);
+        await _emailService.SendEmailAsync(
+            $"[WatchTower] Network Saturated: {metric.InterfaceName}",
+            html,
+            ct
+        );
 
         _lastEmergencyPerInterface[metric.InterfaceName] = DateTime.UtcNow;
     }

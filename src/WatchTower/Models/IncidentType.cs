@@ -11,5 +11,5 @@ public enum IncidentType
     NetworkQueueSaturated,
     ServiceDown,
     ServiceRestarted,
-    ServiceRestartFailed
+    ServiceRestartFailed,
 }

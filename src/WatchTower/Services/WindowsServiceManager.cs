@@ -20,7 +20,13 @@ public class WindowsServiceManager : IWindowsServiceManager
             using var sc = new ServiceController(serviceName);
             var status = sc.Status.ToString();
             var isRunning = sc.Status == ServiceControllerStatus.Running;
-            return new ServiceStatus(DateTime.UtcNow, serviceName, sc.DisplayName, status, isRunning);
+            return new ServiceStatus(
+                DateTime.UtcNow,
+                serviceName,
+                sc.DisplayName,
+                status,
+                isRunning
+            );
         }
         catch (Exception ex)
         {

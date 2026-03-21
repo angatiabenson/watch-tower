@@ -26,7 +26,8 @@ public class DiskMonitorWorker : BackgroundService
         IReportBuilder reportBuilder,
         IOptionsMonitor<DiskMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
-        ILogger<DiskMonitorWorker> logger)
+        ILogger<DiskMonitorWorker> logger
+    )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
@@ -54,16 +55,29 @@ public class DiskMonitorWorker : BackgroundService
 
                     if (disk.UsagePercent >= opts.CriticalThresholdPercent)
                     {
-                        _logger.LogWarning("DISK CRITICAL: {Drive} at {Usage:F1}%", disk.DriveName, disk.UsagePercent);
+                        _logger.LogWarning(
+                            "DISK CRITICAL: {Drive} at {Usage:F1}%",
+                            disk.DriveName,
+                            disk.UsagePercent
+                        );
                         await HandleEmergencyAsync(disk, stoppingToken);
                     }
                     else if (disk.UsagePercent >= opts.WarningThresholdPercent)
                     {
-                        _logger.LogWarning("DISK WARNING: {Drive} at {Usage:F1}%", disk.DriveName, disk.UsagePercent);
+                        _logger.LogWarning(
+                            "DISK WARNING: {Drive} at {Usage:F1}%",
+                            disk.DriveName,
+                            disk.UsagePercent
+                        );
                     }
                     else
                     {
-                        _logger.LogDebug("Disk {Drive}: {Usage:F1}% ({Free:F1} GB free)", disk.DriveName, disk.UsagePercent, disk.FreeGb);
+                        _logger.LogDebug(
+                            "Disk {Drive}: {Usage:F1}% ({Free:F1} GB free)",
+                            disk.DriveName,
+                            disk.UsagePercent,
+                            disk.FreeGb
+                        );
                     }
                 }
 
@@ -75,13 +89,21 @@ public class DiskMonitorWorker : BackgroundService
 
                     if (queue.QueueLength > opts.QueueLengthWarningThreshold)
                     {
-                        _logger.LogWarning("DISK QUEUE HIGH: {Disk} queue length {Queue:F1} (threshold: {Threshold})",
-                            queue.InstanceName, queue.QueueLength, opts.QueueLengthWarningThreshold);
+                        _logger.LogWarning(
+                            "DISK QUEUE HIGH: {Disk} queue length {Queue:F1} (threshold: {Threshold})",
+                            queue.InstanceName,
+                            queue.QueueLength,
+                            opts.QueueLengthWarningThreshold
+                        );
                         await HandleQueueEmergencyAsync(queue, stoppingToken);
                     }
                     else
                     {
-                        _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
+                        _logger.LogDebug(
+                            "Disk queue {Disk}: {Queue:F1}",
+                            queue.InstanceName,
+                            queue.QueueLength
+                        );
                     }
                 }
 
@@ -103,7 +125,9 @@ public class DiskMonitorWorker : BackgroundService
 
     private async Task HandleEmergencyAsync(DiskMetric disk, CancellationToken ct)
     {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
+        var cooldown = TimeSpan.FromSeconds(
+            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
+        );
         var lastEmail = _lastEmergencyPerDrive.GetValueOrDefault(disk.DriveName, DateTime.MinValue);
 
         if (DateTime.UtcNow - lastEmail < cooldown)
@@ -112,21 +136,31 @@ public class DiskMonitorWorker : BackgroundService
         var incident = new Incident(
             DateTime.UtcNow,
             IncidentType.DiskCritical,
-            $"Drive {disk.DriveName} at {disk.UsagePercent:F1}% ({disk.FreeGb:F1} GB free of {disk.TotalGb:F1} GB)");
+            $"Drive {disk.DriveName} at {disk.UsagePercent:F1}% ({disk.FreeGb:F1} GB free of {disk.TotalGb:F1} GB)"
+        );
 
         _metricsStore.AddIncident(incident);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%", html, ct);
+        await _emailService.SendEmailAsync(
+            $"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%",
+            html,
+            ct
+        );
 
         _lastEmergencyPerDrive[disk.DriveName] = DateTime.UtcNow;
     }
 
     private async Task HandleQueueEmergencyAsync(DiskQueueMetric queue, CancellationToken ct)
     {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastQueueEmergencyPerDisk.GetValueOrDefault(queue.InstanceName, DateTime.MinValue);
+        var cooldown = TimeSpan.FromSeconds(
+            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
+        );
+        var lastEmail = _lastQueueEmergencyPerDisk.GetValueOrDefault(
+            queue.InstanceName,
+            DateTime.MinValue
+        );
 
         if (DateTime.UtcNow - lastEmail < cooldown)
             return;
@@ -134,13 +168,18 @@ public class DiskMonitorWorker : BackgroundService
         var incident = new Incident(
             DateTime.UtcNow,
             IncidentType.DiskQueueHigh,
-            $"Disk '{queue.InstanceName}' queue length at {queue.QueueLength:F1} (threshold: {_options.CurrentValue.QueueLengthWarningThreshold})");
+            $"Disk '{queue.InstanceName}' queue length at {queue.QueueLength:F1} (threshold: {_options.CurrentValue.QueueLengthWarningThreshold})"
+        );
 
         _metricsStore.AddIncident(incident);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}", html, ct);
+        await _emailService.SendEmailAsync(
+            $"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}",
+            html,
+            ct
+        );
 
         _lastQueueEmergencyPerDisk[queue.InstanceName] = DateTime.UtcNow;
     }

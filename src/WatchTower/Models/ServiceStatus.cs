@@ -5,4 +5,5 @@ public record ServiceStatus(
     string ServiceName,
     string DisplayName,
     string Status,
-    bool IsRunning);
+    bool IsRunning
+);

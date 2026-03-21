@@ -28,7 +28,7 @@ public class SystemMetricsProvider : ISystemMetricsProvider
     {
         var availableMb = _ramCounter.NextValue();
         var totalMb = GetTotalPhysicalMemoryMb();
-        var usagePercent = totalMb > 0 ? ((totalMb - availableMb) / totalMb) * 100.0 : 0;
+        var usagePercent = totalMb > 0 ? (totalMb - availableMb) / totalMb * 100.0 : 0;
 
         return new RamMetric(DateTime.UtcNow, usagePercent, availableMb, totalMb);
     }
@@ -63,13 +63,21 @@ public class SystemMetricsProvider : ISystemMetricsProvider
             {
                 try
                 {
-                    using var counter = new PerformanceCounter("PhysicalDisk", "Current Disk Queue Length", instance);
+                    using var counter = new PerformanceCounter(
+                        "PhysicalDisk",
+                        "Current Disk Queue Length",
+                        instance
+                    );
                     var queueLength = counter.NextValue();
                     metrics.Add(new DiskQueueMetric(DateTime.UtcNow, instance, queueLength));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Failed to read disk queue for instance: {Instance}", instance);
+                    _logger.LogDebug(
+                        ex,
+                        "Failed to read disk queue for instance: {Instance}",
+                        instance
+                    );
                 }
             }
         }
@@ -92,13 +100,21 @@ public class SystemMetricsProvider : ISystemMetricsProvider
             {
                 try
                 {
-                    using var counter = new PerformanceCounter("Network Interface", "Output Queue Length", instance);
+                    using var counter = new PerformanceCounter(
+                        "Network Interface",
+                        "Output Queue Length",
+                        instance
+                    );
                     var queueLength = counter.NextValue();
                     metrics.Add(new NetworkMetric(DateTime.UtcNow, instance, queueLength));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Failed to read network queue for interface: {Interface}", instance);
+                    _logger.LogDebug(
+                        ex,
+                        "Failed to read network queue for interface: {Interface}",
+                        instance
+                    );
                 }
             }
         }

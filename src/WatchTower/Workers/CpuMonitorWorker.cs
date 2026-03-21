@@ -25,7 +25,8 @@ public class CpuMonitorWorker : BackgroundService
         IReportBuilder reportBuilder,
         IOptionsMonitor<CpuMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
-        ILogger<CpuMonitorWorker> logger)
+        ILogger<CpuMonitorWorker> logger
+    )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
@@ -63,7 +64,8 @@ public class CpuMonitorWorker : BackgroundService
                             DateTime.UtcNow,
                             IncidentType.CpuSpikeDetected,
                             $"CPU hit {cpuUsage:F1}% (threshold: {opts.ThresholdPercent}%)",
-                            topProcs);
+                            topProcs
+                        );
                         _metricsStore.AddIncident(spike);
                         _logger.LogWarning("CPU spike detected: {Description}", spike.Description);
                     }
@@ -96,9 +98,15 @@ public class CpuMonitorWorker : BackgroundService
         _logger.LogInformation("CPU Monitor Worker stopped");
     }
 
-    private async Task HandleEmergencyAsync(double cpuUsage, CpuMonitorOptions opts, CancellationToken ct)
+    private async Task HandleEmergencyAsync(
+        double cpuUsage,
+        CpuMonitorOptions opts,
+        CancellationToken ct
+    )
     {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
+        var cooldown = TimeSpan.FromSeconds(
+            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
+        );
         if (DateTime.UtcNow - _lastEmergencyEmail < cooldown)
             return;
 
@@ -107,7 +115,8 @@ public class CpuMonitorWorker : BackgroundService
             DateTime.UtcNow,
             IncidentType.CpuThresholdBreached,
             $"CPU at {cpuUsage:F1}% for over {opts.SustainedSeconds}s",
-            topProcesses);
+            topProcesses
+        );
 
         _metricsStore.AddIncident(incident);
         _logger.LogWarning("CPU EMERGENCY: {Description}", incident.Description);

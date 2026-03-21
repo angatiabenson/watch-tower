@@ -25,7 +25,8 @@ public class RamMonitorWorker : BackgroundService
         IReportBuilder reportBuilder,
         IOptionsMonitor<RamMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
-        ILogger<RamMonitorWorker> logger)
+        ILogger<RamMonitorWorker> logger
+    )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
@@ -48,8 +49,12 @@ public class RamMonitorWorker : BackgroundService
                 var ramMetric = _metricsProvider.GetRamMetric();
                 _metricsStore.AddRamMetric(ramMetric);
 
-                _logger.LogDebug("RAM: {Usage:F1}% ({Available:F0} MB available / {Total:F0} MB total)",
-                    ramMetric.UsagePercent, ramMetric.AvailableMb, ramMetric.TotalMb);
+                _logger.LogDebug(
+                    "RAM: {Usage:F1}% ({Available:F0} MB available / {Total:F0} MB total)",
+                    ramMetric.UsagePercent,
+                    ramMetric.AvailableMb,
+                    ramMetric.TotalMb
+                );
 
                 if (ramMetric.UsagePercent >= opts.ThresholdPercent)
                 {
@@ -63,7 +68,8 @@ public class RamMonitorWorker : BackgroundService
                             DateTime.UtcNow,
                             IncidentType.RamSpikeDetected,
                             $"RAM hit {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available, threshold: {opts.ThresholdPercent}%)",
-                            topProcs);
+                            topProcs
+                        );
                         _metricsStore.AddIncident(spike);
                         _logger.LogWarning("RAM spike detected: {Description}", spike.Description);
                     }
@@ -96,9 +102,15 @@ public class RamMonitorWorker : BackgroundService
         _logger.LogInformation("RAM Monitor Worker stopped");
     }
 
-    private async Task HandleEmergencyAsync(RamMetric ramMetric, RamMonitorOptions opts, CancellationToken ct)
+    private async Task HandleEmergencyAsync(
+        RamMetric ramMetric,
+        RamMonitorOptions opts,
+        CancellationToken ct
+    )
     {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
+        var cooldown = TimeSpan.FromSeconds(
+            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
+        );
         if (DateTime.UtcNow - _lastEmergencyEmail < cooldown)
             return;
 
@@ -107,14 +119,19 @@ public class RamMonitorWorker : BackgroundService
             DateTime.UtcNow,
             IncidentType.RamThresholdBreached,
             $"RAM at {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available) for over {opts.SustainedSeconds}s",
-            topProcesses);
+            topProcesses
+        );
 
         _metricsStore.AddIncident(incident);
         _logger.LogWarning("RAM EMERGENCY: {Description}", incident.Description);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] RAM Emergency: {ramMetric.UsagePercent:F1}%", html, ct);
+        await _emailService.SendEmailAsync(
+            $"[WatchTower] RAM Emergency: {ramMetric.UsagePercent:F1}%",
+            html,
+            ct
+        );
 
         _lastEmergencyEmail = DateTime.UtcNow;
     }

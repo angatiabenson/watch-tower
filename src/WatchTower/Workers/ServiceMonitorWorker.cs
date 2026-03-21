@@ -95,7 +95,8 @@ public class ServiceMonitorWorker : BackgroundService
                         var restartIncident = new Incident(
                             DateTime.UtcNow,
                             IncidentType.ServiceRestarted,
-                            $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully");
+                            $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully"
+                        );
                         _metricsStore.AddIncident(restartIncident);
                     }
                     else
