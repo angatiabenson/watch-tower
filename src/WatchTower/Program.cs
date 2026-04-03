@@ -39,6 +39,9 @@ try
                 services.Configure<ServiceMonitorOptions>(
                     config.GetSection(ServiceMonitorOptions.SectionName)
                 );
+                services.Configure<ApplicationPoolMonitorOptions>(
+                    config.GetSection(ApplicationPoolMonitorOptions.SectionName)
+                );
                 services.Configure<NetworkMonitorOptions>(
                     config.GetSection(NetworkMonitorOptions.SectionName)
                 );
@@ -55,6 +58,7 @@ try
                 services.AddSingleton<IMetricsStore>(new SqliteMetricsStore(dbPath));
                 services.AddSingleton<ISystemMetricsProvider, SystemMetricsProvider>();
                 services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
+                services.AddSingleton<IIisApplicationPoolManager, IisApplicationPoolManager>();
                 services.AddTransient<IEmailService, EmailService>();
                 services.AddTransient<IReportBuilder, ReportBuilder>();
 
@@ -73,6 +77,7 @@ try
                 services.AddHostedService<DiskMonitorWorker>();
                 services.AddHostedService<NetworkMonitorWorker>();
                 services.AddHostedService<ServiceMonitorWorker>();
+                services.AddHostedService<ApplicationPoolMonitorWorker>();
                 services.AddHostedService<HeartbeatWorker>();
                 services.AddHostedService<EmailReporterWorker>();
             }
@@ -88,6 +93,8 @@ try
         host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<HeartbeatOptions>>();
     var serviceConfig =
         host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ServiceMonitorOptions>>();
+    var applicationPoolConfig =
+        host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ApplicationPoolMonitorOptions>>();
 
     if (string.IsNullOrWhiteSpace(emailConfig.CurrentValue.SmtpHost))
         logger.LogWarning("SMTP host is not configured. Email notifications will be disabled.");
@@ -97,6 +104,9 @@ try
 
     if (serviceConfig.CurrentValue.WatchedServices.Count == 0)
         logger.LogWarning("No watched services configured. Service monitoring will be idle.");
+
+    if (applicationPoolConfig.CurrentValue.WatchedApplicationPools.Count == 0)
+        logger.LogWarning("No watched IIS application pools configured. Application pool monitoring will be idle.");
 
     await host.RunAsync();
 }

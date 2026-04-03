@@ -55,6 +55,19 @@ public class MetricsStoreTests
     }
 
     [Fact]
+    public void AddApplicationPoolStatus_ShouldOverwritePreviousForSamePool()
+    {
+        var status1 = new ApplicationPoolStatus(DateTime.UtcNow, "DefaultAppPool", "Started", true);
+        var status2 = new ApplicationPoolStatus(DateTime.UtcNow, "DefaultAppPool", "Stopped", false);
+
+        _store.AddApplicationPoolStatus(status1);
+        _store.AddApplicationPoolStatus(status2);
+
+        var result = _store.GetLatestApplicationPoolStatuses();
+        result.Should().ContainSingle().Which.IsRunning.Should().BeFalse();
+    }
+
+    [Fact]
     public void AddIncident_ShouldBeRetrievable()
     {
         var incident = new Incident(DateTime.UtcNow, IncidentType.CpuThresholdBreached, "CPU high");

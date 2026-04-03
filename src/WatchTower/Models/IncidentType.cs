@@ -12,4 +12,7 @@ public enum IncidentType
     ServiceDown,
     ServiceRestarted,
     ServiceRestartFailed,
+    ApplicationPoolDown,
+    ApplicationPoolStarted,
+    ApplicationPoolStartFailed,
 }

@@ -79,6 +79,19 @@ public class SqliteMetricsStoreTests : IDisposable
     }
 
     [Fact]
+    public void AddApplicationPoolStatus_ShouldPersist()
+    {
+        _store.AddApplicationPoolStatus(
+            new ApplicationPoolStatus(DateTime.UtcNow, "DefaultAppPool", "Started", true)
+        );
+
+        var statuses = _store.GetLatestApplicationPoolStatuses();
+        statuses.Should().ContainSingle();
+        statuses[0].ApplicationPoolName.Should().Be("DefaultAppPool");
+        statuses[0].IsRunning.Should().BeTrue();
+    }
+
+    [Fact]
     public void Purge_WithZero_ShouldClearAllData()
     {
         _store.AddCpuMetric(new CpuMetric(DateTime.UtcNow, 50));

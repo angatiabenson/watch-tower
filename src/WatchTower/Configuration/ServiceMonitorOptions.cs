@@ -7,5 +7,6 @@ public class ServiceMonitorOptions
     public int PollIntervalSeconds { get; set; } = 30;
     public int MaxRestartAttempts { get; set; } = 3;
     public int RestartDelaySeconds { get; set; } = 10;
+    public int RestartTimeoutSeconds { get; set; } = 30;
     public List<string> WatchedServices { get; set; } = new();
 }

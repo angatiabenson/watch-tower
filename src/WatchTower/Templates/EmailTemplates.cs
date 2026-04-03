@@ -269,6 +269,29 @@ public static class EmailTemplates
             sb.AppendLine("</table></td></tr></table>");
         }
 
+        if (report.ApplicationPoolSnapshots.Count > 0)
+        {
+            sb.AppendLine(
+                @"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top:20px;border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
+<tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>Watched IIS Application Pools</td></tr>
+<tr><td style='padding:12px 14px;'>
+<table width='100%' cellpadding='0' cellspacing='0'>"
+            );
+
+            foreach (var pool in report.ApplicationPoolSnapshots)
+            {
+                var dotColor = pool.IsRunning ? "#27ae60" : "#e74c3c";
+                var statusText = pool.IsRunning ? "Started" : pool.Status;
+                sb.AppendLine(
+                    $@"<tr>
+<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>
+<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{pool.ApplicationPoolName}</td>
+<td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:{dotColor};'>{statusText}</td></tr>"
+                );
+            }
+            sb.AppendLine("</table></td></tr></table>");
+        }
+
         // Incidents section
         if (report.Incidents.Count > 0)
         {
@@ -364,6 +387,9 @@ public static class EmailTemplates
             IncidentType.ServiceDown => "Service Down",
             IncidentType.ServiceRestarted => "Service Restarted",
             IncidentType.ServiceRestartFailed => "Service Restart Failed",
+            IncidentType.ApplicationPoolDown => "Application Pool Down",
+            IncidentType.ApplicationPoolStarted => "Application Pool Started",
+            IncidentType.ApplicationPoolStartFailed => "Application Pool Start Failed",
             _ => type.ToString(),
         };
 }

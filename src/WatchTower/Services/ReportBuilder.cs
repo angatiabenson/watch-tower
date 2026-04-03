@@ -22,6 +22,7 @@ public class ReportBuilder : IReportBuilder
         var diskQueueMetrics = _metricsStore.GetLatestDiskQueueMetrics();
         var networkMetrics = _metricsStore.GetLatestNetworkMetrics();
         var serviceStatuses = _metricsStore.GetLatestServiceStatuses();
+        var applicationPoolStatuses = _metricsStore.GetLatestApplicationPoolStatuses();
         var incidents = _metricsStore.GetIncidents(period);
 
         var report = new ServerReport
@@ -32,6 +33,7 @@ public class ReportBuilder : IReportBuilder
             DiskQueueSnapshots = diskQueueMetrics.ToList(),
             NetworkSnapshots = networkMetrics.ToList(),
             ServiceSnapshots = serviceStatuses.ToList(),
+            ApplicationPoolSnapshots = applicationPoolStatuses.ToList(),
             Incidents = incidents.ToList()
         };
 

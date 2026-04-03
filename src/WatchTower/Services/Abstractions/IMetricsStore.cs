@@ -10,6 +10,7 @@ public interface IMetricsStore
     void AddDiskQueueMetric(DiskQueueMetric metric);
     void AddNetworkMetric(NetworkMetric metric);
     void AddServiceStatus(ServiceStatus status);
+    void AddApplicationPoolStatus(ApplicationPoolStatus status);
     void AddIncident(Incident incident);
 
     IReadOnlyList<CpuMetric> GetCpuMetrics(TimeSpan period);
@@ -18,6 +19,7 @@ public interface IMetricsStore
     IReadOnlyList<DiskQueueMetric> GetLatestDiskQueueMetrics();
     IReadOnlyList<NetworkMetric> GetLatestNetworkMetrics();
     IReadOnlyList<ServiceStatus> GetLatestServiceStatuses();
+    IReadOnlyList<ApplicationPoolStatus> GetLatestApplicationPoolStatuses();
     IReadOnlyList<Incident> GetIncidents(TimeSpan period);
 
     void Purge(TimeSpan maxAge);

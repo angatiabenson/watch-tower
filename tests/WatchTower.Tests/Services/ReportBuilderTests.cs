@@ -20,6 +20,7 @@ public class ReportBuilderTests
         _storeMock.Setup(s => s.GetLatestDiskQueueMetrics()).Returns(new List<DiskQueueMetric>());
         _storeMock.Setup(s => s.GetLatestNetworkMetrics()).Returns(new List<NetworkMetric>());
         _storeMock.Setup(s => s.GetLatestServiceStatuses()).Returns(new List<ServiceStatus>());
+        _storeMock.Setup(s => s.GetLatestApplicationPoolStatuses()).Returns(new List<ApplicationPoolStatus>());
         _storeMock.Setup(s => s.GetIncidents(It.IsAny<TimeSpan>())).Returns(new List<Incident>());
 
         _builder = new ReportBuilder(_storeMock.Object);
@@ -113,5 +114,24 @@ public class ReportBuilderTests
         html.Should().Contain("CpuThresholdBreached");
         html.Should().Contain("CPU at 99.5%");
         html.Should().Contain("EAT");
+    }
+
+    [Fact]
+    public void RenderScheduledReportHtml_ShouldContainApplicationPoolSection()
+    {
+        var report = new ServerReport
+        {
+            GeneratedAt = DateTime.UtcNow,
+            ReportPeriod = TimeSpan.FromHours(2),
+            ApplicationPoolSnapshots =
+            [
+                new ApplicationPoolStatus(DateTime.UtcNow, "DefaultAppPool", "Started", true)
+            ]
+        };
+
+        var html = _builder.RenderScheduledReportHtml(report);
+
+        html.Should().Contain("Watched IIS Application Pools");
+        html.Should().Contain("DefaultAppPool");
     }
 }

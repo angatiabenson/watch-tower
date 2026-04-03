@@ -56,6 +56,12 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                 status TEXT NOT NULL,
                 is_running INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS application_pool_statuses (
+                app_pool_name TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                status TEXT NOT NULL,
+                is_running INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS incidents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -174,6 +180,23 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             cmd.Parameters.AddWithValue("@name", status.ServiceName);
             cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@display", status.DisplayName);
+            cmd.Parameters.AddWithValue("@status", status.Status);
+            cmd.Parameters.AddWithValue("@running", status.IsRunning ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void AddApplicationPoolStatus(ApplicationPoolStatus status)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO application_pool_statuses (app_pool_name, timestamp, status, is_running)
+                                VALUES (@name, @ts, @status, @running)";
+            cmd.Parameters.AddWithValue("@name", status.ApplicationPoolName);
+            cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@status", status.Status);
             cmd.Parameters.AddWithValue("@running", status.IsRunning ? 1 : 0);
             cmd.ExecuteNonQuery();
@@ -366,6 +389,33 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         return results;
     }
 
+    public IReadOnlyList<ApplicationPoolStatus> GetLatestApplicationPoolStatuses()
+    {
+        var results = new List<ApplicationPoolStatus>();
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT app_pool_name, timestamp, status, is_running FROM application_pool_statuses";
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(
+                    new ApplicationPoolStatus(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetString(2),
+                        reader.GetInt32(3) == 1
+                    )
+                );
+            }
+        }
+        return results;
+    }
+
     public IReadOnlyList<Incident> GetIncidents(TimeSpan period)
     {
         var cutoff = DateTime.UtcNow - period;
@@ -421,6 +471,7 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                     DELETE FROM disk_queue_metrics;
                     DELETE FROM network_metrics;
                     DELETE FROM service_statuses;
+                    DELETE FROM application_pool_statuses;
                     DELETE FROM incidents;
                 ";
             }

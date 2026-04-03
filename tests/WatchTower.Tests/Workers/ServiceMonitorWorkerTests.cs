@@ -26,6 +26,7 @@ public class ServiceMonitorWorkerTests
             PollIntervalSeconds = 1,
             MaxRestartAttempts = 3,
             RestartDelaySeconds = 0,
+            RestartTimeoutSeconds = 1,
             WatchedServices = new List<string> { "TestService" }
         });
 
@@ -93,6 +94,7 @@ public class ServiceMonitorWorkerTests
         _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions
         {
             PollIntervalSeconds = 1,
+            RestartTimeoutSeconds = 1,
             WatchedServices = new List<string>()
         });
 
@@ -104,6 +106,34 @@ public class ServiceMonitorWorkerTests
         await worker.StopAsync(CancellationToken.None);
 
         _serviceManager.Verify(s => s.GetServiceStatus(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_StoppedService_ShouldLogDownIncident()
+    {
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
+            .Returns(
+                new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false)
+            );
+        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>()))
+            .Returns(true);
+
+        var worker = CreateWorker();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        await worker.StartAsync(cts.Token);
+        await Task.Delay(2000);
+        await worker.StopAsync(CancellationToken.None);
+
+        _metricsStore.Verify(
+            s => s.AddIncident(
+                It.Is<Incident>(i =>
+                    i.Type == IncidentType.ServiceDown
+                    && i.Description.Contains("Test Service")
+                )
+            ),
+            Times.AtLeastOnce
+        );
     }
 
     private ServiceMonitorWorker CreateWorker() => new(

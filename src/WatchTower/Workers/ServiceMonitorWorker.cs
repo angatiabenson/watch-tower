@@ -18,6 +18,7 @@ public class ServiceMonitorWorker : BackgroundService
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerService = new();
+    private readonly ConcurrentDictionary<string, byte> _activeOutages = new();
 
     public ServiceMonitorWorker(
         IWindowsServiceManager serviceManager,
@@ -63,8 +64,20 @@ public class ServiceMonitorWorker : BackgroundService
                     if (status.IsRunning)
                     {
                         _consecutiveFailures.TryRemove(serviceName, out _);
+                        _activeOutages.TryRemove(serviceName, out _);
                         _logger.LogDebug("Service {ServiceName}: Running", serviceName);
                         continue;
+                    }
+
+                    if (_activeOutages.TryAdd(serviceName, 0))
+                    {
+                        _metricsStore.AddIncident(
+                            new Incident(
+                                DateTime.UtcNow,
+                                IncidentType.ServiceDown,
+                                $"Service '{status.DisplayName}' ({serviceName}) is {status.Status}"
+                            )
+                        );
                     }
 
                     _logger.LogWarning(
@@ -77,12 +90,13 @@ public class ServiceMonitorWorker : BackgroundService
 
                     var restarted = _serviceManager.RestartService(
                         serviceName,
-                        TimeSpan.FromSeconds(30)
+                        TimeSpan.FromSeconds(opts.RestartTimeoutSeconds)
                     );
 
                     if (restarted)
                     {
                         _consecutiveFailures.TryRemove(serviceName, out _);
+                        _activeOutages.TryRemove(serviceName, out _);
                         _logger.LogInformation(
                             "Service {ServiceName} restarted successfully",
                             serviceName
