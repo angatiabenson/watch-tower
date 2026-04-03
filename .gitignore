@@ -7,9 +7,8 @@
 .env
 
 # Project-specific
-plan.md
+docs/
 CLAUDE.md
-learn.md
 
 # User-specific files
 *.rsuser
