@@ -67,8 +67,8 @@ public class SqliteMetricsStoreTests : IDisposable
     {
         var processes = new List<ProcessInfo>
         {
-            new("sqlservr", 1234, 500, 2048),
-            new("w3wp", 5678, 200, 1024)
+            new("sqlservr", 1234, 500, 2048, 42.5),
+            new("w3wp", 5678, 200, 1024, 25.0)
         };
         _store.AddIncident(new Incident(DateTime.UtcNow, IncidentType.CpuSpikeDetected, "CPU at 99%", processes));
 
@@ -76,6 +76,7 @@ public class SqliteMetricsStoreTests : IDisposable
         incidents.Should().HaveCount(1);
         incidents[0].TopProcesses.Should().HaveCount(2);
         incidents[0].TopProcesses![0].Name.Should().Be("sqlservr");
+        incidents[0].TopProcesses![0].CpuPercent.Should().Be(42.5);
     }
 
     [Fact]

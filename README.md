@@ -153,73 +153,6 @@ flowchart LR
 | `HeartbeatWorker` | Dead man's switch ping to healthchecks.io | 30min |
 | `EmailReporterWorker` | Daily scheduled HTML report + data purge | Daily |
 
----
-
-## Project Structure
-
-```
-WatchTower/
-├── .github/workflows/
-│   ├── deploy.yml              # CI/CD: build, test, deploy, auto-rollback
-│   └── rollback.yml            # Manual rollback to previous version
-├── src/WatchTower/
-│   ├── Configuration/          # 8 options classes (IOptionsMonitor<T>)
-│   │   ├── CpuMonitorOptions.cs
-│   │   ├── RamMonitorOptions.cs
-│   │   ├── DiskMonitorOptions.cs
-│   │   ├── NetworkMonitorOptions.cs
-│   │   ├── ServiceMonitorOptions.cs
-│   │   ├── HeartbeatOptions.cs
-│   │   ├── EmailOptions.cs
-│   │   └── ReportingOptions.cs
-│   ├── Models/                 # Immutable data records
-│   │   ├── CpuMetric.cs
-│   │   ├── RamMetric.cs
-│   │   ├── DiskMetric.cs
-│   │   ├── DiskQueueMetric.cs
-│   │   ├── NetworkMetric.cs
-│   │   ├── ServiceStatus.cs
-│   │   ├── ProcessInfo.cs
-│   │   ├── Incident.cs
-│   │   ├── IncidentType.cs
-│   │   └── ServerReport.cs
-│   ├── Services/
-│   │   ├── Abstractions/       # Interfaces for DI
-│   │   │   ├── IMetricsStore.cs
-│   │   │   ├── ISystemMetricsProvider.cs
-│   │   │   ├── IWindowsServiceManager.cs
-│   │   │   ├── IEmailService.cs
-│   │   │   └── IReportBuilder.cs
-│   │   ├── SqliteMetricsStore.cs    # SQLite-backed metrics persistence
-│   │   ├── MetricsStore.cs          # In-memory store (legacy)
-│   │   ├── SystemMetricsProvider.cs # Windows perf counters + DriveInfo
-│   │   ├── WindowsServiceManager.cs # ServiceController wrapper
-│   │   ├── EmailService.cs          # MailKit SMTP client
-│   │   └── ReportBuilder.cs         # Report aggregation + HTML rendering
-│   ├── Workers/                # 7 BackgroundService workers
-│   ├── Templates/
-│   │   └── EmailTemplates.cs   # Inline-CSS HTML email templates
-│   ├── Program.cs              # DI wiring + startup
-│   └── appsettings.json        # All configuration
-├── tests/WatchTower.Tests/
-│   ├── Services/
-│   │   ├── MetricsStoreTests.cs
-│   │   ├── ReportBuilderTests.cs
-│   │   └── SqliteMetricsStoreTests.cs
-│   └── Workers/
-│       ├── CpuMonitorWorkerTests.cs
-│       ├── RamMonitorWorkerTests.cs
-│       ├── DiskMonitorWorkerTests.cs
-│       ├── NetworkMonitorWorkerTests.cs
-│       ├── ServiceMonitorWorkerTests.cs
-│       ├── HeartbeatWorkerTests.cs
-│       └── EmailReporterWorkerTests.cs
-├── WatchTower.slnx
-├── logo.png
-```
-
----
-
 ## Getting Started
 
 ### Prerequisites
@@ -456,9 +389,9 @@ WatchTower tracks the following incident types in the daily report:
 
 | Type | Trigger | Details Included |
 |------|---------|-----------------|
-| `CpuSpikeDetected` | CPU exceeds threshold (instant) | Top 3 CPU processes with PID, CPU time, memory |
+| `CpuSpikeDetected` | CPU exceeds threshold (instant) | Top 3 CPU processes with PID, current CPU percentage, memory |
 | `CpuThresholdBreached` | CPU sustained above threshold for N seconds | Top 3 CPU processes + emergency email |
-| `RamSpikeDetected` | RAM exceeds threshold (instant) | Top 3 memory processes with PID, CPU time, memory |
+| `RamSpikeDetected` | RAM exceeds threshold (instant) | Top 3 memory processes with PID, current CPU percentage, memory |
 | `RamThresholdBreached` | RAM sustained above threshold for N seconds | Top 3 memory processes + emergency email |
 | `DiskCritical` | Disk usage exceeds critical threshold | Drive name, usage percentage |
 | `DiskQueueHigh` | Disk I/O queue exceeds threshold | Disk instance, queue length |
