@@ -87,6 +87,29 @@ public class CpuMonitorWorkerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_AboveThreshold_ShouldUseConfiguredTopProcessCount()
+    {
+        _options.Setup(o => o.CurrentValue).Returns(new CpuMonitorOptions
+        {
+            PollIntervalSeconds = 1,
+            ThresholdPercent = 99,
+            SustainedSeconds = 30,
+            TopProcessCount = 5
+        });
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
+        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>());
+
+        var worker = CreateWorker();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        await worker.StartAsync(cts.Token);
+        await Task.Delay(1500);
+        await worker.StopAsync(CancellationToken.None);
+
+        _metricsProvider.Verify(m => m.GetTopCpuProcesses(5), Times.Once);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SustainedBreach_ShouldSendEmergencyEmail()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);

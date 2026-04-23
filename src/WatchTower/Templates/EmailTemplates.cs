@@ -86,7 +86,7 @@ public static class EmailTemplates
 <tr style='background:#fce4e4;'>
 <td style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#7b2c2c;'>PROCESS</td>
 <td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#7b2c2c;'>PID</td>
-<td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#7b2c2c;'>CPU TIME</td>
+<td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#7b2c2c;'>CPU %</td>
 <td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#7b2c2c;'>MEMORY</td></tr>"
                 );
                 foreach (var p in emergencyIncident.TopProcesses)
@@ -95,7 +95,7 @@ public static class EmailTemplates
                         $@"<tr>
 <td style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#333;border-top:1px solid #f5e0e0;'>{p.Name}</td>
 <td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.Pid}</td>
-<td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuSeconds:F1}s</td>
+<td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuPercent:F1}%</td>
 <td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.MemoryMb:F0} MB</td></tr>"
                     );
                 }
@@ -341,7 +341,7 @@ public static class EmailTemplates
 <tr style='background:#fce4e4;'>
 <td style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>PROCESS</td>
 <td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>PID</td>
-<td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>CPU TIME</td>
+<td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>CPU %</td>
 <td align='right' style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:10px;font-weight:600;color:#7b2c2c;'>MEMORY</td></tr>"
                     );
 
@@ -351,7 +351,7 @@ public static class EmailTemplates
                             $@"<tr>
 <td style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#333;border-top:1px solid #f5e0e0;'>{p.Name}</td>
 <td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.Pid}</td>
-<td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuSeconds:F1}s</td>
+<td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuPercent:F1}%</td>
 <td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.MemoryMb:F0} MB</td></tr>"
                         );
                     }

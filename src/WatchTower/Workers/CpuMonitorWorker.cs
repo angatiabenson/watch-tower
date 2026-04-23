@@ -59,7 +59,7 @@ public class CpuMonitorWorker : BackgroundService
                         _firstBreachTime = DateTime.UtcNow;
 
                         // Log spike incident immediately with top processes
-                        var topProcs = _metricsProvider.GetTopCpuProcesses(3).ToList();
+                        var topProcs = _metricsProvider.GetTopCpuProcesses(opts.TopProcessCount).ToList();
                         var spike = new Incident(
                             DateTime.UtcNow,
                             IncidentType.CpuSpikeDetected,

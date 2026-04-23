@@ -62,13 +62,13 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore tests/WatchTower.Tests/WatchTower.Tests.csproj
 
       - name: Build
-        run: dotnet build --configuration Release --no-restore -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
+        run: dotnet build tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-restore -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
 
       - name: Run tests
-        run: dotnet test --configuration Release --no-build --verbosity normal
+        run: dotnet test tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-build --verbosity normal
 
       - name: Publish
         run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}

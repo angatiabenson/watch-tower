@@ -6,6 +6,8 @@ namespace WatchTower.Services;
 
 public class SystemMetricsProvider : ISystemMetricsProvider
 {
+    private const int ProcessCpuSampleMilliseconds = 500;
+
     private readonly PerformanceCounter _cpuCounter;
     private readonly PerformanceCounter _ramCounter;
     private readonly ILogger<SystemMetricsProvider> _logger;
@@ -129,29 +131,10 @@ public class SystemMetricsProvider : ISystemMetricsProvider
     {
         try
         {
-            return Process
-                .GetProcesses()
-                .Where(p => p.Id != 0)
-                .Select(p =>
-                {
-                    try
-                    {
-                        return new ProcessInfo(
-                            p.ProcessName,
-                            p.Id,
-                            p.TotalProcessorTime.TotalSeconds,
-                            p.WorkingSet64 / (1024.0 * 1024.0)
-                        );
-                    }
-                    catch
-                    {
-                        return null;
-                    }
-                })
-                .Where(p => p != null)
-                .OrderByDescending(p => p!.CpuSeconds)
+            return SampleProcesses()
+                .OrderByDescending(p => p.CpuPercent)
                 .Take(count)
-                .ToList()!;
+                .ToList();
         }
         catch (Exception ex)
         {
@@ -164,35 +147,72 @@ public class SystemMetricsProvider : ISystemMetricsProvider
     {
         try
         {
-            return Process
-                .GetProcesses()
-                .Where(p => p.Id != 0)
-                .Select(p =>
-                {
-                    try
-                    {
-                        return new ProcessInfo(
-                            p.ProcessName,
-                            p.Id,
-                            p.TotalProcessorTime.TotalSeconds,
-                            p.WorkingSet64 / (1024.0 * 1024.0)
-                        );
-                    }
-                    catch
-                    {
-                        return null;
-                    }
-                })
-                .Where(p => p != null)
+            return CaptureProcessSamples()
                 .OrderByDescending(p => p!.MemoryMb)
                 .Take(count)
-                .ToList()!;
+                .ToList();
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to get top memory processes");
             return Array.Empty<ProcessInfo>();
         }
+    }
+
+    private IReadOnlyList<ProcessInfo> SampleProcesses()
+    {
+        var initialSamples = CaptureProcessSamples()
+            .ToDictionary(p => p.Pid, p => p);
+
+        var startedAt = DateTime.UtcNow;
+        Thread.Sleep(ProcessCpuSampleMilliseconds);
+        var elapsedSeconds = Math.Max((DateTime.UtcNow - startedAt).TotalSeconds, 0.001);
+
+        var processorCount = Math.Max(Environment.ProcessorCount, 1);
+        var results = new List<ProcessInfo>();
+
+        foreach (var current in CaptureProcessSamples())
+        {
+            if (!initialSamples.TryGetValue(current.Pid, out var initial))
+                continue;
+
+            var cpuDeltaSeconds = current.CpuSeconds - initial.CpuSeconds;
+            var cpuPercent = cpuDeltaSeconds / elapsedSeconds / processorCount * 100.0;
+            cpuPercent = Math.Clamp(cpuPercent, 0, 100);
+
+            results.Add(current with { CpuPercent = cpuPercent });
+        }
+
+        return results;
+    }
+
+    private static IReadOnlyList<ProcessInfo> CaptureProcessSamples()
+    {
+        var samples = new List<ProcessInfo>();
+
+        foreach (var process in Process.GetProcesses().Where(p => p.Id != 0))
+        {
+            using (process)
+            {
+                try
+                {
+                    samples.Add(
+                        new ProcessInfo(
+                            process.ProcessName,
+                            process.Id,
+                            process.TotalProcessorTime.TotalSeconds,
+                            process.WorkingSet64 / (1024.0 * 1024.0)
+                        )
+                    );
+                }
+                catch
+                {
+                    // Processes can exit or deny access while being sampled.
+                }
+            }
+        }
+
+        return samples;
     }
 
     private double GetTotalPhysicalMemoryMb()

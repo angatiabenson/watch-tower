@@ -106,13 +106,21 @@ public class ReportBuilderTests
             ReportPeriod = TimeSpan.FromHours(2)
         };
 
-        var incident = new Incident(DateTime.UtcNow, IncidentType.CpuThresholdBreached, "CPU at 99.5%");
+        var incident = new Incident(
+            DateTime.UtcNow,
+            IncidentType.CpuThresholdBreached,
+            "CPU at 99.5%",
+            [new ProcessInfo("sqlservr", 1234, 500, 2048, 42.5)]
+        );
 
         var html = _builder.RenderEmergencyReportHtml(report, incident);
 
         html.Should().Contain("EMERGENCY");
         html.Should().Contain("CpuThresholdBreached");
         html.Should().Contain("CPU at 99.5%");
+        html.Should().Contain("CPU %");
+        html.Should().Contain("42.5%");
+        html.Should().NotContain("CPU TIME");
         html.Should().Contain("EAT");
     }
 
