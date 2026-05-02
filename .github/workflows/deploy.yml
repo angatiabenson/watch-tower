@@ -232,21 +232,15 @@ jobs:
           # Fail the pipeline to signal the deploy was bad
           exit 1
 
-      - name: Create Git tag and GitHub release
-        if: success()
+      - name: Package binaries
         shell: powershell
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${{ steps.version.outputs.VERSION }}"
+          Compress-Archive -Path ./publish/* -DestinationPath ./WatchTower-${{ steps.version.outputs.VERSION_NUMBER }}.zip
 
-          git tag $version
-          git push origin $version
-
-          # Create a zip of the published output for the release
-          Compress-Archive -Path ./publish/* -DestinationPath "./WatchTower-$version.zip"
-
-          gh release create $version `
-            "./WatchTower-$version.zip#WatchTower $version (win-x64)" `
-            --title "WatchTower $version" `
-            --generate-notes
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: WatchTower v${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          files: ./WatchTower-*.zip
