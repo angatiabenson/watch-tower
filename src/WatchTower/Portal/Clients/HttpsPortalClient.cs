@@ -38,18 +38,27 @@ public class HttpsPortalClient : IPortalClient
             !opts.BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(
-                $"VisibilityPortal.BaseUrl must use HTTPS when RequireTls=true. Current value: {opts.BaseUrl}");
+                $"VisibilityPortal.BaseUrl must use HTTPS when Tls.RequireTls=true. " +
+                $"Current BaseUrl: '{opts.BaseUrl}'. " +
+                $"Either change the BaseUrl to start with https:// or set Tls.RequireTls=false " +
+                $"(for local/HTTP-only deployments).");
         }
+    }
+
+    private string BuildUrl(string path)
+    {
+        var base_ = _options.CurrentValue.BaseUrl.TrimEnd('/');
+        return $"{base_}/{path}";
     }
 
     public async Task<bool> SendMetricsBatchAsync(MetricsBatchDto batch, CancellationToken ct)
     {
-        return await PostAsync("/api/v1/agent/metrics/batch", batch, ct);
+        return await PostAsync("api/v1/agent/metrics/batch", batch, ct);
     }
 
     public async Task<bool> SendEventAsync(AgentEventDto evt, CancellationToken ct)
     {
-        return await PostAsync("/api/v1/agent/events", evt, ct);
+        return await PostAsync("api/v1/agent/events", evt, ct);
     }
 
     public async Task<IReadOnlyList<AgentCommandDto>> PollCommandsAsync(CancellationToken ct)
@@ -57,7 +66,7 @@ public class HttpsPortalClient : IPortalClient
         try
         {
             var client = CreateClient();
-            var response = await client.GetAsync("/api/v1/agent/commands/pending", ct);
+            var response = await client.GetAsync(BuildUrl("api/v1/agent/commands/pending"), ct);
 
             if (response.StatusCode == HttpStatusCode.NoContent)
                 return Array.Empty<AgentCommandDto>();
@@ -83,14 +92,14 @@ public class HttpsPortalClient : IPortalClient
     public async Task<bool> AcknowledgeCommandAsync(AcknowledgeCommandDto ack, CancellationToken ct)
     {
         return await PostAsync(
-            $"/api/v1/agent/commands/{Uri.EscapeDataString(ack.CommandId)}/acknowledge",
+            $"api/v1/agent/commands/{Uri.EscapeDataString(ack.CommandId)}/acknowledge",
             ack, ct);
     }
 
     public async Task<bool> ReportCommandResultAsync(CommandResultDto result, CancellationToken ct)
     {
         return await PostAsync(
-            $"/api/v1/agent/commands/{Uri.EscapeDataString(result.CommandId)}/result",
+            $"api/v1/agent/commands/{Uri.EscapeDataString(result.CommandId)}/result",
             result, ct);
     }
 
@@ -100,7 +109,7 @@ public class HttpsPortalClient : IPortalClient
         try
         {
             var client = CreateClient();
-            var url = "/api/v1/agent/config";
+            var url = BuildUrl("api/v1/agent/config");
             if (!string.IsNullOrEmpty(currentVersion))
                 url += $"?version={Uri.EscapeDataString(currentVersion)}";
 
@@ -130,7 +139,7 @@ public class HttpsPortalClient : IPortalClient
 
     public async Task<bool> AcknowledgeConfigAsync(string version, CancellationToken ct)
     {
-        return await PostAsync("/api/v1/agent/config/acknowledge",
+        return await PostAsync("api/v1/agent/config/acknowledge",
             new { version }, ct);
     }
 
@@ -139,7 +148,7 @@ public class HttpsPortalClient : IPortalClient
         try
         {
             var client = CreateClient();
-            using var response = await client.PostAsJsonAsync(path, payload, JsonOpts, ct);
+            using var response = await client.PostAsJsonAsync(BuildUrl(path), payload, JsonOpts, ct);
 
             if (response.IsSuccessStatusCode)
                 return true;
