@@ -147,8 +147,8 @@ public class SystemMetricsProvider : ISystemMetricsProvider
     {
         try
         {
-            return CaptureProcessSamples()
-                .OrderByDescending(p => p!.MemoryMb)
+            return SampleProcesses()
+                .OrderByDescending(p => p.MemoryMb)
                 .Take(count)
                 .ToList();
         }
