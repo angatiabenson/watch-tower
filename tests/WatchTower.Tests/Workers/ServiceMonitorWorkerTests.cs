@@ -141,6 +141,7 @@ public class ServiceMonitorWorkerTests
         _metricsStore.Object,
         _emailService.Object,
         _reportBuilder.Object,
+        new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
         _reportingOptions.Object,
         _logger.Object);

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
 using WatchTower.Models;
+using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Workers;
@@ -12,6 +13,7 @@ public class ServiceMonitorWorker : BackgroundService
     private readonly IMetricsStore _metricsStore;
     private readonly IEmailService _emailService;
     private readonly IReportBuilder _reportBuilder;
+    private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<ServiceMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly ILogger<ServiceMonitorWorker> _logger;
@@ -25,6 +27,7 @@ public class ServiceMonitorWorker : BackgroundService
         IMetricsStore metricsStore,
         IEmailService emailService,
         IReportBuilder reportBuilder,
+        IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ServiceMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
         ILogger<ServiceMonitorWorker> logger
@@ -34,6 +37,7 @@ public class ServiceMonitorWorker : BackgroundService
         _metricsStore = metricsStore;
         _emailService = emailService;
         _reportBuilder = reportBuilder;
+        _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
         _logger = logger;
@@ -71,13 +75,13 @@ public class ServiceMonitorWorker : BackgroundService
 
                     if (_activeOutages.TryAdd(serviceName, 0))
                     {
-                        _metricsStore.AddIncident(
-                            new Incident(
-                                DateTime.UtcNow,
-                                IncidentType.ServiceDown,
-                                $"Service '{status.DisplayName}' ({serviceName}) is {status.Status}"
-                            )
+                        var downIncident = new Incident(
+                            DateTime.UtcNow,
+                            IncidentType.ServiceDown,
+                            $"Service '{status.DisplayName}' ({serviceName}) is {status.Status}"
                         );
+                        _metricsStore.AddIncident(downIncident);
+                        await _portalEventPublisher.PublishIncidentAsync(downIncident, stoppingToken);
                     }
 
                     _logger.LogWarning(
@@ -105,13 +109,13 @@ public class ServiceMonitorWorker : BackgroundService
                         var restartStatus = _serviceManager.GetServiceStatus(serviceName);
                         _metricsStore.AddServiceStatus(restartStatus);
 
-                        // Log successful restart as incident
                         var restartIncident = new Incident(
                             DateTime.UtcNow,
                             IncidentType.ServiceRestarted,
                             $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully"
                         );
                         _metricsStore.AddIncident(restartIncident);
+                        await _portalEventPublisher.PublishIncidentAsync(restartIncident, stoppingToken);
                     }
                     else
                     {
@@ -166,6 +170,7 @@ public class ServiceMonitorWorker : BackgroundService
         );
 
         _metricsStore.AddIncident(incident);
+        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);

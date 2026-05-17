@@ -1,5 +1,10 @@
 using Serilog;
 using WatchTower.Configuration;
+using WatchTower.Portal;
+using WatchTower.Portal.Actions;
+using WatchTower.Portal.Actions.Handlers;
+using WatchTower.Portal.Clients;
+using WatchTower.Portal.Storage;
 using WatchTower.Services;
 using WatchTower.Services.Abstractions;
 using WatchTower.Workers;
@@ -21,6 +26,13 @@ try
             (context, services, configuration) =>
                 configuration.ReadFrom.Configuration(context.Configuration)
         )
+        .ConfigureAppConfiguration((_, cfg) =>
+        {
+            cfg.AddJsonFile(
+                Path.Combine(AppContext.BaseDirectory, "remote-config.json"),
+                optional: true,
+                reloadOnChange: true);
+        })
         .ConfigureServices(
             (context, services) =>
             {
@@ -52,6 +64,9 @@ try
                 services.Configure<ReportingOptions>(
                     config.GetSection(ReportingOptions.SectionName)
                 );
+                services.Configure<PortalOptions>(
+                    config.GetSection(PortalOptions.SectionName)
+                );
 
                 // Services
                 var dbPath = Path.Combine(AppContext.BaseDirectory, "watchtower.db");
@@ -70,6 +85,67 @@ try
                         client.Timeout = TimeSpan.FromSeconds(30);
                     }
                 );
+
+                // Visibility Portal
+                var portalEnabled = config.GetValue<bool>($"{PortalOptions.SectionName}:Enabled");
+                if (portalEnabled)
+                {
+                    var protocol = config[$"{PortalOptions.SectionName}:Protocol"] ?? "Https";
+                    var baseUrl = config[$"{PortalOptions.SectionName}:BaseUrl"] ?? "";
+
+                    services.AddTransient<AgentAuthHandler>();
+                    services.AddHttpClient("PortalClient", client =>
+                    {
+                        client.BaseAddress = new Uri(baseUrl);
+                        client.Timeout = TimeSpan.FromSeconds(30);
+                    }).AddHttpMessageHandler<AgentAuthHandler>();
+
+                    if (protocol.Equals("Grpc", StringComparison.OrdinalIgnoreCase))
+                        services.AddSingleton<IPortalClient, GrpcPortalClient>();
+                    else
+                        services.AddSingleton<IPortalClient, HttpsPortalClient>();
+
+                    services.AddSingleton<SqliteOutboxStore>(
+                        _ => new SqliteOutboxStore(dbPath));
+                    services.AddSingleton<IOutboxStore>(
+                        sp => sp.GetRequiredService<SqliteOutboxStore>());
+                    services.AddSingleton<IPortalSyncState>(
+                        sp => sp.GetRequiredService<SqliteOutboxStore>());
+                    services.AddSingleton<ICommandStore>(
+                        _ => new SqliteCommandStore(dbPath));
+                    services.AddSingleton<IRemoteConfigStore>(
+                        _ => new SqliteRemoteConfigStore(dbPath));
+
+                    services.AddSingleton<IMetricSnapshotTrigger, MetricSnapshotTrigger>();
+                    services.AddSingleton<IConfigSyncTrigger, ConfigSyncTrigger>();
+
+                    services.AddSingleton<IActionHandler, ServiceStartHandler>();
+                    services.AddSingleton<IActionHandler, ServiceStopHandler>();
+                    services.AddSingleton<IActionHandler, ServiceRestartHandler>();
+                    services.AddSingleton<IActionHandler, AppPoolStartHandler>();
+                    services.AddSingleton<IActionHandler, AppPoolStopHandler>();
+                    services.AddSingleton<IActionHandler, AppPoolRestartHandler>();
+                    services.AddSingleton<IActionHandler, AppPoolRecycleHandler>();
+                    services.AddSingleton<IActionHandler, ForceMetricSnapshotHandler>();
+                    services.AddSingleton<IActionHandler, ForceConfigSyncHandler>();
+                    services.AddSingleton<IActionHandler, AgentRestartHandler>();
+                    services.AddSingleton<IActionHandler, ApplyConfigurationHandler>();
+                    services.AddSingleton<ActionHandlerRegistry>();
+
+                    services.AddSingleton<IPortalEventPublisher, PortalEventPublisher>();
+
+                    services.AddHostedService<OutboxDispatchWorker>();
+                    services.AddHostedService<CommandPollingWorker>();
+
+                    var remoteConfigEnabled = config.GetValue<bool>(
+                        $"{PortalOptions.SectionName}:RemoteConfig:Enabled");
+                    if (remoteConfigEnabled)
+                        services.AddHostedService<RemoteConfigWorker>();
+                }
+                else
+                {
+                    services.AddSingleton<IPortalEventPublisher, NullPortalEventPublisher>();
+                }
 
                 // Workers
                 services.AddHostedService<CpuMonitorWorker>();
@@ -95,6 +171,8 @@ try
         host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ServiceMonitorOptions>>();
     var applicationPoolConfig =
         host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ApplicationPoolMonitorOptions>>();
+    var portalConfig =
+        host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<PortalOptions>>();
 
     if (string.IsNullOrWhiteSpace(emailConfig.CurrentValue.SmtpHost))
         logger.LogWarning("SMTP host is not configured. Email notifications will be disabled.");
@@ -107,6 +185,21 @@ try
 
     if (applicationPoolConfig.CurrentValue.WatchedApplicationPools.Count == 0)
         logger.LogWarning("No watched IIS application pools configured. Application pool monitoring will be idle.");
+
+    var portalOpts = portalConfig.CurrentValue;
+    if (portalOpts.Enabled)
+    {
+        logger.LogInformation(
+            "Visibility Portal enabled: AgentId={AgentId}, Protocol={Protocol}, BaseUrl={BaseUrl}, TokenConfigured={TokenConfigured}",
+            portalOpts.AgentId,
+            portalOpts.Protocol,
+            portalOpts.BaseUrl,
+            !string.IsNullOrEmpty(portalOpts.AgentToken));
+    }
+    else
+    {
+        logger.LogInformation("Visibility Portal is disabled. Running in standalone mode.");
+    }
 
     await host.RunAsync();
 }

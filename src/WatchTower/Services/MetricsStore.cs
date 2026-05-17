@@ -81,4 +81,20 @@ public class MetricsStore : IMetricsStore
         while (_incidents.TryPeek(out var incident) && incident.Timestamp < cutoff)
             _incidents.TryDequeue(out _);
     }
+
+    public (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit)
+    {
+        var all = _cpuMetrics.ToArray();
+        var slice = all.Skip((int)afterRowId).Take(limit).ToList();
+        var lastRowId = afterRowId + slice.Count;
+        return (lastRowId, slice);
+    }
+
+    public (long LastRowId, IReadOnlyList<RamMetric> Metrics) GetRamMetricsSince(long afterRowId, int limit)
+    {
+        var all = _ramMetrics.ToArray();
+        var slice = all.Skip((int)afterRowId).Take(limit).ToList();
+        var lastRowId = afterRowId + slice.Count;
+        return (lastRowId, slice);
+    }
 }

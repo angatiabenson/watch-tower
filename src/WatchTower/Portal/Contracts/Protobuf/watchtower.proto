@@ -1,0 +1,122 @@
+syntax = "proto3";
+package watchtower.portal.v1;
+option csharp_namespace = "WatchTower.Portal.Contracts.Protobuf";
+
+service WatchTowerPortalService {
+  rpc SendMetricsBatch    (MetricsBatchRequest)   returns (MetricsBatchResponse);
+  rpc SendEvent           (AgentEventRequest)     returns (AgentEventResponse);
+  rpc PollCommands        (PollCommandsRequest)   returns (PollCommandsResponse);
+  rpc AcknowledgeCommand  (AckCommandRequest)     returns (AckCommandResponse);
+  rpc ReportCommandResult (CommandResultRequest)  returns (CommandResultResponse);
+  rpc FetchConfig         (FetchConfigRequest)    returns (FetchConfigResponse);
+  rpc AcknowledgeConfig   (AckConfigRequest)      returns (AckConfigResponse);
+}
+
+// ── Identity ────────────────────────────────────────────────────────────────
+
+message AgentIdentity {
+  string agent_id    = 1;
+  string agent_token = 2;
+}
+
+// ── Metrics Batch ────────────────────────────────────────────────────────────
+
+message MetricsBatchRequest {
+  AgentIdentity       identity = 1;
+  MetricsBatchPayload batch    = 2;
+}
+message MetricsBatchResponse { bool accepted = 1; }
+
+message MetricsBatchPayload {
+  string batched_at                          = 1;
+  repeated CpuMetricProto        cpu_metrics        = 2;
+  repeated RamMetricProto        ram_metrics        = 3;
+  repeated DiskMetricProto       disk_metrics       = 4;
+  repeated DiskQueueMetricProto  disk_queue_metrics = 5;
+  repeated NetworkMetricProto    network_metrics    = 6;
+  repeated ServiceStatusProto    service_statuses   = 7;
+  repeated AppPoolStatusProto    app_pool_statuses  = 8;
+}
+
+message CpuMetricProto       { string timestamp = 1; double usage_percent = 2; }
+message RamMetricProto       { string timestamp = 1; double usage_percent = 2; double available_mb = 3; double total_mb = 4; }
+message DiskMetricProto      { string timestamp = 1; string drive_name = 2; double total_gb = 3; double free_gb = 4; double usage_percent = 5; }
+message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; double queue_length = 3; }
+message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; }
+message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; }
+message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; }
+
+// ── Event ────────────────────────────────────────────────────────────────────
+
+message AgentEventRequest {
+  AgentIdentity identity = 1;
+  AgentEvent    event    = 2;
+}
+message AgentEventResponse { bool accepted = 1; }
+
+message AgentEvent {
+  string                   event_id      = 1;
+  string                   timestamp     = 2;
+  int32                    incident_type = 3;
+  string                   description   = 4;
+  repeated ProcessInfoProto top_processes = 5;
+}
+message ProcessInfoProto { string name = 1; int32 pid = 2; double cpu_seconds = 3; double memory_mb = 4; double cpu_percent = 5; }
+
+// ── Commands ─────────────────────────────────────────────────────────────────
+
+message PollCommandsRequest  { AgentIdentity identity = 1; }
+message PollCommandsResponse { repeated AgentCommand commands = 1; }
+
+message AgentCommand {
+  string              command_id  = 1;
+  int32               action_type = 2;
+  map<string, string> parameters  = 3;
+  string              scheduled_at = 4;
+  string              issued_at   = 5;
+}
+
+message AckCommandRequest  { AgentIdentity identity = 1; string command_id = 2; string acknowledged_at = 3; }
+message AckCommandResponse { bool ok = 1; }
+
+message CommandResultRequest {
+  AgentIdentity identity    = 1;
+  string        command_id  = 2;
+  bool          success     = 3;
+  string        message     = 4;
+  string        executed_at = 5;
+}
+message CommandResultResponse { bool ok = 1; }
+
+// ── Config ───────────────────────────────────────────────────────────────────
+
+message FetchConfigRequest {
+  AgentIdentity identity        = 1;
+  string        current_version = 2;
+}
+message FetchConfigResponse {
+  bool              has_update = 1;
+  RemoteAgentConfig config     = 2;
+  string            version    = 3;
+}
+
+message AckConfigRequest  { AgentIdentity identity = 1; string version = 2; }
+message AckConfigResponse { bool ok = 1; }
+
+message RemoteAgentConfig {
+  RemoteCpuConfig     cpu      = 1;
+  RemoteRamConfig     ram      = 2;
+  RemoteDiskConfig    disk     = 3;
+  RemoteNetworkConfig network  = 4;
+  RemoteServiceConfig services = 5;
+  RemoteAppPoolConfig app_pools = 6;
+  RemotePortalConfig  portal   = 7;
+}
+
+message RemoteCpuConfig     { int32 poll_interval_seconds = 1; double threshold_percent = 2; int32 sustained_seconds = 3; }
+message RemoteRamConfig     { int32 poll_interval_seconds = 1; double threshold_percent = 2; int32 sustained_seconds = 3; }
+message RemoteDiskConfig    { int32 poll_interval_seconds = 1; double warning_threshold_percent = 2; double critical_threshold_percent = 3; double queue_length_warning_threshold = 4; }
+message RemoteNetworkConfig { int32 poll_interval_seconds = 1; double output_queue_warning_threshold = 2; }
+message RemoteServiceConfig { int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
+message RemoteAppPoolConfig { int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
+message RemotePortalConfig  { int32 outbox_flush_interval_seconds = 1; int32 command_poll_interval_seconds = 2; int32 remote_config_poll_interval_seconds = 3; }
