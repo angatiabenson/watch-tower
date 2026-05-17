@@ -91,7 +91,7 @@ try
                 if (portalEnabled)
                 {
                     var protocol = config[$"{PortalOptions.SectionName}:Protocol"] ?? "Https";
-                    var baseUrl = config[$"{PortalOptions.SectionName}:BaseUrl"] ?? "";
+                    var baseUrl = (config[$"{PortalOptions.SectionName}:BaseUrl"] ?? "").TrimEnd('/') + "/";
 
                     services.AddTransient<AgentAuthHandler>();
                     services.AddHttpClient("PortalClient", client =>
