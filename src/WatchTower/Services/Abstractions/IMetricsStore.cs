@@ -23,4 +23,7 @@ public interface IMetricsStore
     IReadOnlyList<Incident> GetIncidents(TimeSpan period);
 
     void Purge(TimeSpan maxAge);
+
+    (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit);
+    (long LastRowId, IReadOnlyList<RamMetric> Metrics) GetRamMetricsSince(long afterRowId, int limit);
 }

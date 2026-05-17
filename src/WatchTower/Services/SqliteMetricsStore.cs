@@ -492,6 +492,62 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         }
     }
 
+    public (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit)
+    {
+        var results = new List<CpuMetric>();
+        long lastRowId = afterRowId;
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT rowid, timestamp, usage_percent FROM cpu_metrics WHERE rowid > @after ORDER BY rowid ASC LIMIT @limit";
+            cmd.Parameters.AddWithValue("@after", afterRowId);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                lastRowId = reader.GetInt64(0);
+                results.Add(new CpuMetric(
+                    DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                    reader.GetDouble(2)
+                ));
+            }
+        }
+        return (lastRowId, results);
+    }
+
+    public (long LastRowId, IReadOnlyList<RamMetric> Metrics) GetRamMetricsSince(long afterRowId, int limit)
+    {
+        var results = new List<RamMetric>();
+        long lastRowId = afterRowId;
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT rowid, timestamp, usage_percent, available_mb, total_mb FROM ram_metrics WHERE rowid > @after ORDER BY rowid ASC LIMIT @limit";
+            cmd.Parameters.AddWithValue("@after", afterRowId);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                lastRowId = reader.GetInt64(0);
+                results.Add(new RamMetric(
+                    DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                    reader.GetDouble(2),
+                    reader.GetDouble(3),
+                    reader.GetDouble(4)
+                ));
+            }
+        }
+        return (lastRowId, results);
+    }
+
     public void Dispose()
     {
         // SQLite connections are opened/closed per operation, nothing to dispose

@@ -61,4 +61,30 @@ public class WindowsServiceManager : IWindowsServiceManager
             return false;
         }
     }
+
+    public bool StopService(string serviceName, TimeSpan timeout)
+    {
+        try
+        {
+            using var sc = new ServiceController(serviceName);
+
+            if (sc.Status == ServiceControllerStatus.Stopped)
+            {
+                _logger.LogInformation("Service {ServiceName} is already stopped", serviceName);
+                return true;
+            }
+
+            _logger.LogInformation("Stopping service: {ServiceName}", serviceName);
+            sc.Stop();
+            sc.WaitForStatus(ServiceControllerStatus.Stopped, timeout);
+
+            _logger.LogInformation("Service stopped successfully: {ServiceName}", serviceName);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to stop service: {ServiceName}", serviceName);
+            return false;
+        }
+    }
 }
