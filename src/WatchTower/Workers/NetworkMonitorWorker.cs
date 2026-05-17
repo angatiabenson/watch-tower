@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
 using WatchTower.Models;
+using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Workers;
@@ -12,6 +13,7 @@ public class NetworkMonitorWorker : BackgroundService
     private readonly IMetricsStore _metricsStore;
     private readonly IEmailService _emailService;
     private readonly IReportBuilder _reportBuilder;
+    private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<NetworkMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly ILogger<NetworkMonitorWorker> _logger;
@@ -23,6 +25,7 @@ public class NetworkMonitorWorker : BackgroundService
         IMetricsStore metricsStore,
         IEmailService emailService,
         IReportBuilder reportBuilder,
+        IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<NetworkMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
         ILogger<NetworkMonitorWorker> logger
@@ -32,6 +35,7 @@ public class NetworkMonitorWorker : BackgroundService
         _metricsStore = metricsStore;
         _emailService = emailService;
         _reportBuilder = reportBuilder;
+        _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
         _logger = logger;
@@ -108,6 +112,7 @@ public class NetworkMonitorWorker : BackgroundService
         );
 
         _metricsStore.AddIncident(incident);
+        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);

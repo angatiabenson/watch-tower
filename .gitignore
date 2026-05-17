@@ -9,6 +9,7 @@
 # Project-specific
 docs/
 CLAUDE.md
+.claude/
 
 # User-specific files
 *.rsuser

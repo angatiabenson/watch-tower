@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
 using WatchTower.Models;
+using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Workers;
@@ -12,6 +13,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     private readonly IMetricsStore _metricsStore;
     private readonly IEmailService _emailService;
     private readonly IReportBuilder _reportBuilder;
+    private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly ILogger<ApplicationPoolMonitorWorker> _logger;
@@ -25,6 +27,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         IMetricsStore metricsStore,
         IEmailService emailService,
         IReportBuilder reportBuilder,
+        IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ApplicationPoolMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
         ILogger<ApplicationPoolMonitorWorker> logger
@@ -34,6 +37,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         _metricsStore = metricsStore;
         _emailService = emailService;
         _reportBuilder = reportBuilder;
+        _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
         _logger = logger;
@@ -76,13 +80,13 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
                     if (_activeOutages.TryAdd(applicationPoolName, 0))
                     {
-                        _metricsStore.AddIncident(
-                            new Incident(
-                                DateTime.UtcNow,
-                                IncidentType.ApplicationPoolDown,
-                                $"IIS application pool '{applicationPoolName}' is {status.Status}"
-                            )
+                        var downIncident = new Incident(
+                            DateTime.UtcNow,
+                            IncidentType.ApplicationPoolDown,
+                            $"IIS application pool '{applicationPoolName}' is {status.Status}"
                         );
+                        _metricsStore.AddIncident(downIncident);
+                        await _portalEventPublisher.PublishIncidentAsync(downIncident, stoppingToken);
                     }
 
                     _logger.LogWarning(
@@ -120,13 +124,13 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                                 applicationPoolName
                             );
 
-                            _metricsStore.AddIncident(
-                                new Incident(
-                                    DateTime.UtcNow,
-                                    IncidentType.ApplicationPoolStarted,
-                                    $"IIS application pool '{applicationPoolName}' was found stopped and started successfully"
-                                )
+                            var startedIncident = new Incident(
+                                DateTime.UtcNow,
+                                IncidentType.ApplicationPoolStarted,
+                                $"IIS application pool '{applicationPoolName}' was found stopped and started successfully"
                             );
+                            _metricsStore.AddIncident(startedIncident);
+                            await _portalEventPublisher.PublishIncidentAsync(startedIncident, stoppingToken);
 
                             continue;
                         }
@@ -193,6 +197,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         );
 
         _metricsStore.AddIncident(incident);
+        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);

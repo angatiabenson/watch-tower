@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
 using WatchTower.Models;
+using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Workers;
@@ -11,6 +12,7 @@ public class RamMonitorWorker : BackgroundService
     private readonly IMetricsStore _metricsStore;
     private readonly IEmailService _emailService;
     private readonly IReportBuilder _reportBuilder;
+    private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<RamMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly ILogger<RamMonitorWorker> _logger;
@@ -23,6 +25,7 @@ public class RamMonitorWorker : BackgroundService
         IMetricsStore metricsStore,
         IEmailService emailService,
         IReportBuilder reportBuilder,
+        IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<RamMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
         ILogger<RamMonitorWorker> logger
@@ -32,6 +35,7 @@ public class RamMonitorWorker : BackgroundService
         _metricsStore = metricsStore;
         _emailService = emailService;
         _reportBuilder = reportBuilder;
+        _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
         _logger = logger;
@@ -71,6 +75,7 @@ public class RamMonitorWorker : BackgroundService
                             topProcs
                         );
                         _metricsStore.AddIncident(spike);
+                        await _portalEventPublisher.PublishIncidentAsync(spike, stoppingToken);
                         _logger.LogWarning("RAM spike detected: {Description}", spike.Description);
                     }
 
@@ -123,6 +128,7 @@ public class RamMonitorWorker : BackgroundService
         );
 
         _metricsStore.AddIncident(incident);
+        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
         _logger.LogWarning("RAM EMERGENCY: {Description}", incident.Description);
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
