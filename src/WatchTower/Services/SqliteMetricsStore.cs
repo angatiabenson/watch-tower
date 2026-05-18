@@ -462,7 +462,10 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
 
             if (maxAge == TimeSpan.Zero)
             {
-                // Full purge — clear all data after daily report sent
+                // Full purge — clear all data after daily report sent.
+                // Also reset portal_sync_state cursors for cpu/ram so that the next
+                // batch correctly picks up the new rows (SQLite rowids restart from 1
+                // after a full DELETE, causing cursor > maxRowId and no data ever sent).
                 cmd.CommandText =
                     @"
                     DELETE FROM cpu_metrics;
@@ -473,6 +476,7 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                     DELETE FROM service_statuses;
                     DELETE FROM application_pool_statuses;
                     DELETE FROM incidents;
+                    DELETE FROM portal_sync_state WHERE metric_type IN ('cpu', 'ram');
                 ";
             }
             else
