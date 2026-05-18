@@ -6,14 +6,11 @@ namespace WatchTower.Workers;
 
 public class EmailReporterWorker : BackgroundService
 {
-    private static readonly TimeZoneInfo EatZone = TimeZoneInfo.FindSystemTimeZoneById(
-        "E. Africa Standard Time"
-    );
-
     private readonly IReportBuilder _reportBuilder;
     private readonly IEmailService _emailService;
     private readonly IMetricsStore _metricsStore;
     private readonly IOptionsMonitor<ReportingOptions> _options;
+    private readonly IOptionsMonitor<DisplayOptions> _displayOptions;
     private readonly ILogger<EmailReporterWorker> _logger;
 
     public EmailReporterWorker(
@@ -21,6 +18,7 @@ public class EmailReporterWorker : BackgroundService
         IEmailService emailService,
         IMetricsStore metricsStore,
         IOptionsMonitor<ReportingOptions> options,
+        IOptionsMonitor<DisplayOptions> displayOptions,
         ILogger<EmailReporterWorker> logger
     )
     {
@@ -28,7 +26,15 @@ public class EmailReporterWorker : BackgroundService
         _emailService = emailService;
         _metricsStore = metricsStore;
         _options = options;
+        _displayOptions = displayOptions;
         _logger = logger;
+    }
+
+    private TimeZoneInfo GetConfiguredZone()
+    {
+        var tzId = _displayOptions.CurrentValue.Timezone;
+        try { return TimeZoneInfo.FindSystemTimeZoneById(tzId); }
+        catch { return TimeZoneInfo.FindSystemTimeZoneById("E. Africa Standard Time"); }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -52,10 +58,11 @@ public class EmailReporterWorker : BackgroundService
                 var reportPeriod = TimeSpan.FromHours(24);
 
                 var report = _reportBuilder.BuildReport(reportPeriod);
-                var eatTime = TimeZoneInfo.ConvertTimeFromUtc(report.GeneratedAt, EatZone);
+                var zone = GetConfiguredZone();
+                var localTime = TimeZoneInfo.ConvertTimeFromUtc(report.GeneratedAt, zone);
                 var html = _reportBuilder.RenderScheduledReportHtml(report);
                 await _emailService.SendEmailAsync(
-                    $"[WatchTower] Daily Report - {eatTime:yyyy-MM-dd HH:mm} EAT",
+                    $"[WatchTower] Daily Report - {localTime:yyyy-MM-dd HH:mm}",
                     html,
                     stoppingToken
                 );
@@ -89,14 +96,15 @@ public class EmailReporterWorker : BackgroundService
         if (!TimeSpan.TryParse(opts.DailyReportTime, out var reportTimeOfDay))
             reportTimeOfDay = TimeSpan.FromHours(8);
 
+        var zone = GetConfiguredZone();
         var nowUtc = DateTime.UtcNow;
-        var nowEat = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, EatZone);
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, zone);
 
-        var nextReportEat = nowEat.Date + reportTimeOfDay;
-        if (nextReportEat <= nowEat)
-            nextReportEat = nextReportEat.AddDays(1);
+        var nextReportLocal = nowLocal.Date + reportTimeOfDay;
+        if (nextReportLocal <= nowLocal)
+            nextReportLocal = nextReportLocal.AddDays(1);
 
-        var nextReportUtc = TimeZoneInfo.ConvertTimeToUtc(nextReportEat, EatZone);
+        var nextReportUtc = TimeZoneInfo.ConvertTimeToUtc(nextReportLocal, zone);
         return nextReportUtc - nowUtc;
     }
 }
