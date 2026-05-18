@@ -67,6 +67,9 @@ try
                 services.Configure<PortalOptions>(
                     config.GetSection(PortalOptions.SectionName)
                 );
+                services.Configure<DisplayOptions>(
+                    config.GetSection(DisplayOptions.SectionName)
+                );
 
                 // Services
                 var dbPath = Path.Combine(AppContext.BaseDirectory, "watchtower.db");
