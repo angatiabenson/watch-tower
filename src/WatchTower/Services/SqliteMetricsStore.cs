@@ -72,6 +72,11 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             CREATE INDEX IF NOT EXISTS idx_cpu_timestamp ON cpu_metrics(timestamp);
             CREATE INDEX IF NOT EXISTS idx_ram_timestamp ON ram_metrics(timestamp);
             CREATE INDEX IF NOT EXISTS idx_incidents_timestamp ON incidents(timestamp);
+            CREATE TABLE IF NOT EXISTS portal_sync_state (
+                metric_type          TEXT PRIMARY KEY,
+                last_forwarded_rowid INTEGER NOT NULL DEFAULT 0,
+                updated_at           TEXT    NOT NULL
+            );
         ";
         cmd.ExecuteNonQuery();
     }
