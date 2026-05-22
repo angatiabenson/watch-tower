@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
 using WatchTower.Portal.Actions;
@@ -42,6 +43,7 @@ public class CommandPollingWorker : BackgroundService
                 if (opts.Enabled && opts.CommandPoll.PollIntervalSeconds > 0)
                 {
                     await PollAndExecuteCommandsAsync(opts, stoppingToken);
+                    await ExecuteDueScheduledCommandsAsync(opts, stoppingToken);
                     await RetryUnsentResultsAsync(stoppingToken);
                 }
 
@@ -178,6 +180,38 @@ public class CommandPollingWorker : BackgroundService
         {
             _logger.LogWarning(ex,
                 "Failed to send result for command {CommandId}, will retry", command.CommandId);
+        }
+    }
+
+    private async Task ExecuteDueScheduledCommandsAsync(PortalOptions opts, CancellationToken ct)
+    {
+        try
+        {
+            var due = await _commandStore.GetDueScheduledCommandsAsync();
+            if (due.Count == 0) return;
+
+            _logger.LogInformation("Executing {Count} due scheduled command(s)", due.Count);
+
+            foreach (var record in due)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                var parameters = JsonSerializer.Deserialize<Dictionary<string, string>>(record.ParamsJson)
+                    ?? new Dictionary<string, string>();
+
+                var command = new AgentCommandDto(
+                    record.CommandId,
+                    record.ActionType,
+                    parameters,
+                    record.ScheduledAt,
+                    record.IssuedAt ?? record.ReceivedAt);
+
+                await ExecuteCommandAsync(command, opts, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error executing due scheduled commands");
         }
     }
 
