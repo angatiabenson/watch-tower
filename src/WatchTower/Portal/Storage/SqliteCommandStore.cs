@@ -166,6 +166,29 @@ public class SqliteCommandStore : ICommandStore, IDisposable
         return Task.CompletedTask;
     }
 
+    public Task<IReadOnlyList<AgentCommandRecord>> GetDueScheduledCommandsAsync()
+    {
+        var results = new List<AgentCommandRecord>();
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"SELECT command_id, action_type, params_json, status, received_at, scheduled_at, issued_at, result_json
+                  FROM agent_commands
+                  WHERE status = 'Received'
+                    AND scheduled_at IS NOT NULL
+                    AND scheduled_at <= @now
+                  ORDER BY scheduled_at ASC";
+            cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(ReadRecord(reader));
+        }
+        return Task.FromResult<IReadOnlyList<AgentCommandRecord>>(results);
+    }
+
     private Task UpdateStatus(string commandId, string status, string? extraNullColumn = null)
     {
         lock (_lock)

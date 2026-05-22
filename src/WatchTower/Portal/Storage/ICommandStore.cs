@@ -11,6 +11,7 @@ public interface ICommandStore
     Task MarkFailedAsync(string commandId, string error);
     Task<IReadOnlyList<AgentCommandRecord>> GetUnsentResultsAsync();
     Task MarkResultSentAsync(string commandId);
+    Task<IReadOnlyList<AgentCommandRecord>> GetDueScheduledCommandsAsync();
 }
 
 public record AgentCommandRecord(
