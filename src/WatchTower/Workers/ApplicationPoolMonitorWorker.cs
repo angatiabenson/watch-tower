@@ -16,6 +16,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<ApplicationPoolMonitorWorker> _logger;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
@@ -30,6 +31,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ApplicationPoolMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
+        TimeProvider timeProvider,
         ILogger<ApplicationPoolMonitorWorker> logger
     )
     {
@@ -40,8 +42,11 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -51,113 +56,10 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-
-                if (opts.WatchedApplicationPools.Count == 0)
-                {
-                    _logger.LogDebug("No IIS application pools configured for monitoring");
-                    await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
-                    continue;
-                }
-
-                foreach (var applicationPoolName in opts.WatchedApplicationPools)
-                {
-                    var status = _applicationPoolManager.GetApplicationPoolStatus(
-                        applicationPoolName
-                    );
-                    _metricsStore.AddApplicationPoolStatus(status);
-
-                    if (status.IsRunning)
-                    {
-                        _consecutiveFailures.TryRemove(applicationPoolName, out _);
-                        _activeOutages.TryRemove(applicationPoolName, out _);
-                        _logger.LogDebug(
-                            "Application pool {ApplicationPoolName}: Started",
-                            applicationPoolName
-                        );
-                        continue;
-                    }
-
-                    if (_activeOutages.TryAdd(applicationPoolName, 0))
-                    {
-                        var downIncident = new Incident(
-                            DateTime.UtcNow,
-                            IncidentType.ApplicationPoolDown,
-                            $"IIS application pool '{applicationPoolName}' is {status.Status}"
-                        );
-                        _metricsStore.AddIncident(downIncident);
-                        await _portalEventPublisher.PublishIncidentAsync(downIncident, stoppingToken);
-                    }
-
-                    _logger.LogWarning(
-                        "Application pool {ApplicationPoolName} is {Status}, attempting start",
-                        applicationPoolName,
-                        status.Status
-                    );
-
-                    await Task.Delay(TimeSpan.FromSeconds(opts.StartDelaySeconds), stoppingToken);
-
-                    var started = _applicationPoolManager.StartApplicationPool(
-                        applicationPoolName,
-                        TimeSpan.FromSeconds(opts.StartTimeoutSeconds)
-                    );
-
-                    if (started)
-                    {
-                        await Task.Delay(
-                            TimeSpan.FromSeconds(opts.StableStateDelaySeconds),
-                            stoppingToken
-                        );
-
-                        var restartStatus = _applicationPoolManager.GetApplicationPoolStatus(
-                            applicationPoolName
-                        );
-                        _metricsStore.AddApplicationPoolStatus(restartStatus);
-
-                        if (restartStatus.IsRunning)
-                        {
-                            _consecutiveFailures.TryRemove(applicationPoolName, out _);
-                            _activeOutages.TryRemove(applicationPoolName, out _);
-
-                            _logger.LogInformation(
-                                "Application pool {ApplicationPoolName} started successfully",
-                                applicationPoolName
-                            );
-
-                            var startedIncident = new Incident(
-                                DateTime.UtcNow,
-                                IncidentType.ApplicationPoolStarted,
-                                $"IIS application pool '{applicationPoolName}' was found stopped and started successfully"
-                            );
-                            _metricsStore.AddIncident(startedIncident);
-                            await _portalEventPublisher.PublishIncidentAsync(startedIncident, stoppingToken);
-
-                            continue;
-                        }
-                    }
-
-                    var failures = _consecutiveFailures.AddOrUpdate(
-                        applicationPoolName,
-                        1,
-                        (_, count) => count + 1
-                    );
-
-                    _logger.LogError(
-                        "Failed to start application pool {ApplicationPoolName}. Consecutive failures: {Failures}",
-                        applicationPoolName,
-                        failures
-                    );
-
-                    if (failures >= opts.MaxStartAttempts)
-                    {
-                        await HandleEmergencyAsync(applicationPoolName, failures, stoppingToken);
-                    }
-                }
-
+                await PollOnceAsync(stoppingToken);
                 await Task.Delay(
-                    TimeSpan.FromSeconds(_options.CurrentValue.PollIntervalSeconds),
-                    stoppingToken
-                );
+                    TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
+                    _timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -166,11 +68,95 @@ public class ApplicationPoolMonitorWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Application Pool Monitor Worker");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(10), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("Application Pool Monitor Worker stopped");
+    }
+
+    /// <summary>Runs a single poll/evaluate cycle over all watched pools. Exposed for testing.</summary>
+    internal async Task PollOnceAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+
+        if (opts.WatchedApplicationPools.Count == 0)
+        {
+            _logger.LogDebug("No IIS application pools configured for monitoring");
+            return;
+        }
+
+        foreach (var applicationPoolName in opts.WatchedApplicationPools)
+        {
+            var status = _applicationPoolManager.GetApplicationPoolStatus(applicationPoolName);
+            _metricsStore.AddApplicationPoolStatus(status);
+
+            if (status.IsRunning)
+            {
+                _consecutiveFailures.TryRemove(applicationPoolName, out _);
+                _activeOutages.TryRemove(applicationPoolName, out _);
+                _logger.LogDebug("Application pool {ApplicationPoolName}: Started", applicationPoolName);
+                continue;
+            }
+
+            if (_activeOutages.TryAdd(applicationPoolName, 0))
+            {
+                var downIncident = new Incident(
+                    UtcNow,
+                    IncidentType.ApplicationPoolDown,
+                    $"IIS application pool '{applicationPoolName}' is {status.Status}"
+                );
+                _metricsStore.AddIncident(downIncident);
+                await _portalEventPublisher.PublishIncidentAsync(downIncident, ct);
+            }
+
+            _logger.LogWarning(
+                "Application pool {ApplicationPoolName} is {Status}, attempting start",
+                applicationPoolName, status.Status);
+
+            await Task.Delay(TimeSpan.FromSeconds(opts.StartDelaySeconds), _timeProvider, ct);
+
+            var started = _applicationPoolManager.StartApplicationPool(
+                applicationPoolName,
+                TimeSpan.FromSeconds(opts.StartTimeoutSeconds)
+            );
+
+            if (started)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(opts.StableStateDelaySeconds), _timeProvider, ct);
+
+                var restartStatus = _applicationPoolManager.GetApplicationPoolStatus(applicationPoolName);
+                _metricsStore.AddApplicationPoolStatus(restartStatus);
+
+                if (restartStatus.IsRunning)
+                {
+                    _consecutiveFailures.TryRemove(applicationPoolName, out _);
+                    _activeOutages.TryRemove(applicationPoolName, out _);
+
+                    _logger.LogInformation(
+                        "Application pool {ApplicationPoolName} started successfully", applicationPoolName);
+
+                    var startedIncident = new Incident(
+                        UtcNow,
+                        IncidentType.ApplicationPoolStarted,
+                        $"IIS application pool '{applicationPoolName}' was found stopped and started successfully"
+                    );
+                    _metricsStore.AddIncident(startedIncident);
+                    await _portalEventPublisher.PublishIncidentAsync(startedIncident, ct);
+
+                    continue;
+                }
+            }
+
+            var failures = _consecutiveFailures.AddOrUpdate(applicationPoolName, 1, (_, count) => count + 1);
+
+            _logger.LogError(
+                "Failed to start application pool {ApplicationPoolName}. Consecutive failures: {Failures}",
+                applicationPoolName, failures);
+
+            if (failures >= opts.MaxStartAttempts)
+                await HandleEmergencyAsync(applicationPoolName, failures, ct);
+        }
     }
 
     private async Task HandleEmergencyAsync(
@@ -179,19 +165,14 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         CancellationToken ct
     )
     {
-        var cooldown = TimeSpan.FromSeconds(
-            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
-        );
-        var lastEmail = _lastEmergencyPerPool.GetValueOrDefault(
-            applicationPoolName,
-            DateTime.MinValue
-        );
+        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
+        var lastEmail = _lastEmergencyPerPool.GetValueOrDefault(applicationPoolName, DateTime.MinValue);
 
-        if (DateTime.UtcNow - lastEmail < cooldown)
+        if (UtcNow - lastEmail < cooldown)
             return;
 
         var incident = new Incident(
-            DateTime.UtcNow,
+            UtcNow,
             IncidentType.ApplicationPoolStartFailed,
             $"IIS application pool '{applicationPoolName}' failed to start after {failures} attempts"
         );
@@ -201,12 +182,13 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] IIS App Pool Down: {applicationPoolName}",
             html,
             ct
         );
 
-        _lastEmergencyPerPool[applicationPoolName] = DateTime.UtcNow;
+        if (sent)
+            _lastEmergencyPerPool[applicationPoolName] = UtcNow;
     }
 }

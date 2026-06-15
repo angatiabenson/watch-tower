@@ -36,6 +36,7 @@ message MetricsBatchPayload {
   repeated NetworkMetricProto    network_metrics    = 6;
   repeated ServiceStatusProto    service_statuses   = 7;
   repeated AppPoolStatusProto    app_pool_statuses  = 8;
+  string batch_id                            = 9;  // idempotency key for de-duplicating retried batches
 }
 
 message CpuMetricProto       { string timestamp = 1; double usage_percent = 2; }

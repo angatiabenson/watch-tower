@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Moq;
 using WatchTower.Configuration;
 using WatchTower.Models;
@@ -17,6 +18,7 @@ public class CpuMonitorWorkerTests
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IOptionsMonitor<CpuMonitorOptions>> _options = new();
     private readonly Mock<IOptionsMonitor<ReportingOptions>> _reportingOptions = new();
+    private readonly FakeTimeProvider _time = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
     private readonly Mock<ILogger<CpuMonitorWorker>> _logger = new();
 
     public CpuMonitorWorkerTests()
@@ -25,109 +27,101 @@ public class CpuMonitorWorkerTests
         {
             PollIntervalSeconds = 1,
             ThresholdPercent = 99,
-            SustainedSeconds = 2,
+            SustainedSeconds = 300,
             TopProcessCount = 3
         });
-
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions
-        {
-            EmergencyCooldownSeconds = 300
-        });
+        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _metricsProvider.Setup(m => m.GetTopCpuProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ProcessInfo>());
+        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
+        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldStoreCpuMetrics()
+    public async Task PollOnce_ShouldStoreCpuMetric()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(50.0f);
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
-
-        _metricsStore.Verify(s => s.AddCpuMetric(It.IsAny<CpuMetric>()), Times.AtLeastOnce);
+        _metricsStore.Verify(s => s.AddCpuMetric(It.Is<CpuMetric>(m => m.UsagePercent == 50.0)), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_BelowThreshold_ShouldNotSendEmail()
+    public async Task PollOnce_BelowThreshold_ShouldNotSendEmail()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(50.0f);
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
-    public async Task ExecuteAsync_AboveThreshold_ShouldLogSpikeIncident()
+    public async Task PollOnce_AboveThreshold_ShouldLogSpikeIncidentOnce()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
-        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>
-        {
-            new("sqlservr", 1234, 500, 2048)
-        });
+        _metricsProvider.Setup(m => m.GetTopCpuProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ProcessInfo> { new("sqlservr", 1234, 500, 2048) });
 
         var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        await worker.PollOnceAsync(CancellationToken.None);
+        await worker.PollOnceAsync(CancellationToken.None); // still breaching, no new spike
 
         _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i =>
-            i.Type == IncidentType.CpuSpikeDetected &&
-            i.TopProcesses != null && i.TopProcesses.Count > 0)), Times.Once);
+            i.Type == IncidentType.CpuSpikeDetected && i.TopProcesses != null && i.TopProcesses.Count > 0)), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_AboveThreshold_ShouldUseConfiguredTopProcessCount()
+    public async Task PollOnce_AboveThreshold_ShouldUseConfiguredTopProcessCount()
     {
         _options.Setup(o => o.CurrentValue).Returns(new CpuMonitorOptions
         {
-            PollIntervalSeconds = 1,
-            ThresholdPercent = 99,
-            SustainedSeconds = 30,
-            TopProcessCount = 5
+            PollIntervalSeconds = 1, ThresholdPercent = 99, SustainedSeconds = 300, TopProcessCount = 5
         });
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
-        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>());
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
-
-        _metricsProvider.Verify(m => m.GetTopCpuProcesses(5), Times.Once);
+        _metricsProvider.Verify(m => m.GetTopCpuProcessesAsync(5, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_SustainedBreach_ShouldSendEmergencyEmail()
+    public async Task PollOnce_SustainedBreach_ShouldSendEmergencyEmail()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
-        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>());
-        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
-        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
-
         var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(4000);
-        await worker.StopAsync(CancellationToken.None);
+        // First breach starts the sustained window; advancing fake time past SustainedSeconds
+        // makes the next poll cross the threshold deterministically (no real waiting).
+        await worker.PollOnceAsync(CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(301));
+        await worker.PollOnceAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(
-            It.Is<string>(s => s.Contains("CPU Emergency")),
-            It.IsAny<string>(),
-            It.IsAny<CancellationToken>()), Times.AtLeastOnce);
+            It.Is<string>(s => s.Contains("CPU Emergency")), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_FailedEmergencySend_DoesNotStartCooldown()
+    {
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false); // send keeps failing
+
+        var worker = CreateWorker();
+        await worker.PollOnceAsync(CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(301));
+        await worker.PollOnceAsync(CancellationToken.None); // emergency #1 (fails)
+        _time.Advance(TimeSpan.FromSeconds(301));
+        await worker.PollOnceAsync(CancellationToken.None); // emergency #2 (cooldown not started -> retried)
+
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.Contains("CPU Emergency")), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(2));
     }
 
     private CpuMonitorWorker CreateWorker() => new(
@@ -138,5 +132,6 @@ public class CpuMonitorWorkerTests
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
         _reportingOptions.Object,
+        _time,
         _logger.Object);
 }

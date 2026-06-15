@@ -15,6 +15,7 @@ public class RamMonitorWorker : BackgroundService
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<RamMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<RamMonitorWorker> _logger;
 
     private DateTime? _firstBreachTime;
@@ -28,6 +29,7 @@ public class RamMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<RamMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
+        TimeProvider timeProvider,
         ILogger<RamMonitorWorker> logger
     )
     {
@@ -38,8 +40,11 @@ public class RamMonitorWorker : BackgroundService
         _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -49,49 +54,10 @@ public class RamMonitorWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-                var ramMetric = _metricsProvider.GetRamMetric();
-                _metricsStore.AddRamMetric(ramMetric);
-
-                _logger.LogDebug(
-                    "RAM: {Usage:F1}% ({Available:F0} MB available / {Total:F0} MB total)",
-                    ramMetric.UsagePercent,
-                    ramMetric.AvailableMb,
-                    ramMetric.TotalMb
-                );
-
-                if (ramMetric.UsagePercent >= opts.ThresholdPercent)
-                {
-                    if (_firstBreachTime == null)
-                    {
-                        _firstBreachTime = DateTime.UtcNow;
-
-                        // Log spike incident immediately with top processes
-                        var topProcs = _metricsProvider.GetTopMemoryProcesses(3).ToList();
-                        var spike = new Incident(
-                            DateTime.UtcNow,
-                            IncidentType.RamSpikeDetected,
-                            $"RAM hit {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available, threshold: {opts.ThresholdPercent}%)",
-                            topProcs
-                        );
-                        _metricsStore.AddIncident(spike);
-                        await _portalEventPublisher.PublishIncidentAsync(spike, stoppingToken);
-                        _logger.LogWarning("RAM spike detected: {Description}", spike.Description);
-                    }
-
-                    var elapsed = DateTime.UtcNow - _firstBreachTime.Value;
-                    if (elapsed.TotalSeconds >= opts.SustainedSeconds)
-                    {
-                        await HandleEmergencyAsync(ramMetric, opts, stoppingToken);
-                        _firstBreachTime = DateTime.UtcNow;
-                    }
-                }
-                else
-                {
-                    _firstBreachTime = null;
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
+                await PollOnceAsync(stoppingToken);
+                await Task.Delay(
+                    TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
+                    _timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -100,11 +66,57 @@ public class RamMonitorWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in RAM Monitor Worker");
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(5), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("RAM Monitor Worker stopped");
+    }
+
+    /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
+    internal async Task PollOnceAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+        var ramMetric = _metricsProvider.GetRamMetric();
+        _metricsStore.AddRamMetric(ramMetric);
+
+        _logger.LogDebug(
+            "RAM: {Usage:F1}% ({Available:F0} MB available / {Total:F0} MB total)",
+            ramMetric.UsagePercent,
+            ramMetric.AvailableMb,
+            ramMetric.TotalMb
+        );
+
+        if (ramMetric.UsagePercent >= opts.ThresholdPercent)
+        {
+            if (_firstBreachTime == null)
+            {
+                _firstBreachTime = UtcNow;
+
+                // Log spike incident immediately with top processes
+                var topProcs = (await _metricsProvider.GetTopMemoryProcessesAsync(3, ct)).ToList();
+                var spike = new Incident(
+                    UtcNow,
+                    IncidentType.RamSpikeDetected,
+                    $"RAM hit {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available, threshold: {opts.ThresholdPercent}%)",
+                    topProcs
+                );
+                _metricsStore.AddIncident(spike);
+                await _portalEventPublisher.PublishIncidentAsync(spike, ct);
+                _logger.LogWarning("RAM spike detected: {Description}", spike.Description);
+            }
+
+            var elapsed = UtcNow - _firstBreachTime.Value;
+            if (elapsed.TotalSeconds >= opts.SustainedSeconds)
+            {
+                await HandleEmergencyAsync(ramMetric, opts, ct);
+                _firstBreachTime = UtcNow;
+            }
+        }
+        else
+        {
+            _firstBreachTime = null;
+        }
     }
 
     private async Task HandleEmergencyAsync(
@@ -116,12 +128,12 @@ public class RamMonitorWorker : BackgroundService
         var cooldown = TimeSpan.FromSeconds(
             _reportingOptions.CurrentValue.EmergencyCooldownSeconds
         );
-        if (DateTime.UtcNow - _lastEmergencyEmail < cooldown)
+        if (UtcNow - _lastEmergencyEmail < cooldown)
             return;
 
-        var topProcesses = _metricsProvider.GetTopMemoryProcesses(opts.TopProcessCount).ToList();
+        var topProcesses = (await _metricsProvider.GetTopMemoryProcessesAsync(opts.TopProcessCount, ct)).ToList();
         var incident = new Incident(
-            DateTime.UtcNow,
+            UtcNow,
             IncidentType.RamThresholdBreached,
             $"RAM at {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available) for over {opts.SustainedSeconds}s",
             topProcesses
@@ -133,12 +145,15 @@ public class RamMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] RAM Emergency: {ramMetric.UsagePercent:F1}%",
             html,
             ct
         );
 
-        _lastEmergencyEmail = DateTime.UtcNow;
+        // Only start the cooldown if the alert was actually delivered, so a transient
+        // SMTP outage does not silently suppress alerts for the whole cooldown window.
+        if (sent)
+            _lastEmergencyEmail = UtcNow;
     }
 }

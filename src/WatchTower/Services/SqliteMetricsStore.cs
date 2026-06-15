@@ -86,9 +86,12 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         var conn = new SqliteConnection(_connectionString);
         conn.Open();
 
-        using var walCmd = conn.CreateCommand();
-        walCmd.CommandText = "PRAGMA journal_mode=WAL;";
-        walCmd.ExecuteNonQuery();
+        // WAL is a persistent DB property (idempotent here); busy_timeout is
+        // per-connection and MUST be set every open so concurrent writers from
+        // the other stores sharing this file wait instead of throwing SQLITE_BUSY.
+        using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
+        pragma.ExecuteNonQuery();
 
         return conn;
     }
@@ -460,45 +463,71 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
 
     public void Purge(TimeSpan maxAge)
     {
+        var cutoffStr = (DateTime.UtcNow - maxAge).ToString("O");
+
         lock (_lock)
         {
             using var conn = Open();
+            using var tx = conn.BeginTransaction();
             using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                @"
+                DELETE FROM cpu_metrics WHERE timestamp < @cutoff;
+                DELETE FROM ram_metrics WHERE timestamp < @cutoff;
+                DELETE FROM incidents WHERE timestamp < @cutoff;
+            ";
+            cmd.Parameters.AddWithValue("@cutoff", cutoffStr);
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+        }
+    }
 
-            if (maxAge == TimeSpan.Zero)
+    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+
+            // Delete cpu/ram rows only up to the confirmed-delivered rowid. Rows the
+            // portal has not yet acknowledged (rowid > forwarded cursor) are preserved
+            // so a later send failure can never cause silent data loss. Snapshot tables
+            // (latest-state) and incidents (already queued to the portal as events) are
+            // cleared in full. All in one transaction for atomicity.
+            using (var cmd = conn.CreateCommand())
             {
-                // Full purge — clear all data after daily report sent.
-                // Also reset portal_sync_state cursors for cpu/ram so that the next
-                // batch correctly picks up the new rows (SQLite rowids restart from 1
-                // after a full DELETE, causing cursor > maxRowId and no data ever sent).
+                cmd.Transaction = tx;
                 cmd.CommandText =
                     @"
-                    DELETE FROM cpu_metrics;
-                    DELETE FROM ram_metrics;
+                    DELETE FROM cpu_metrics WHERE rowid <= @cpuRow;
+                    DELETE FROM ram_metrics WHERE rowid <= @ramRow;
                     DELETE FROM disk_metrics;
                     DELETE FROM disk_queue_metrics;
                     DELETE FROM network_metrics;
                     DELETE FROM service_statuses;
                     DELETE FROM application_pool_statuses;
                     DELETE FROM incidents;
-                    DELETE FROM portal_sync_state WHERE metric_type IN ('cpu', 'ram');
                 ";
-            }
-            else
-            {
-                var cutoff = DateTime.UtcNow - maxAge;
-                var cutoffStr = cutoff.ToString("O");
-                cmd.CommandText =
-                    @"
-                    DELETE FROM cpu_metrics WHERE timestamp < @cutoff;
-                    DELETE FROM ram_metrics WHERE timestamp < @cutoff;
-                    DELETE FROM incidents WHERE timestamp < @cutoff;
-                ";
-                cmd.Parameters.AddWithValue("@cutoff", cutoffStr);
+                cmd.Parameters.AddWithValue("@cpuRow", cpuForwardedRowId);
+                cmd.Parameters.AddWithValue("@ramRow", ramForwardedRowId);
+                cmd.ExecuteNonQuery();
             }
 
-            cmd.ExecuteNonQuery();
+            bool cpuEmpty = CountRows(conn, tx, "cpu_metrics") == 0;
+            bool ramEmpty = CountRows(conn, tx, "ram_metrics") == 0;
+
+            tx.Commit();
+            return new PurgeReportResult(cpuEmpty, ramEmpty);
         }
+    }
+
+    private static long CountRows(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+        return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
     public (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit)

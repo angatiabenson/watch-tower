@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
@@ -14,6 +15,8 @@ public class CommandPollingWorker : BackgroundService
     private readonly ICommandStore _commandStore;
     private readonly ActionHandlerRegistry _registry;
     private readonly IOptionsMonitor<PortalOptions> _options;
+    private readonly IOptionsMonitor<ServiceMonitorOptions> _serviceOptions;
+    private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _appPoolOptions;
     private readonly ILogger<CommandPollingWorker> _logger;
 
     public CommandPollingWorker(
@@ -21,12 +24,16 @@ public class CommandPollingWorker : BackgroundService
         ICommandStore commandStore,
         ActionHandlerRegistry registry,
         IOptionsMonitor<PortalOptions> options,
+        IOptionsMonitor<ServiceMonitorOptions> serviceOptions,
+        IOptionsMonitor<ApplicationPoolMonitorOptions> appPoolOptions,
         ILogger<CommandPollingWorker> logger)
     {
         _portalClient = portalClient;
         _commandStore = commandStore;
         _registry = registry;
         _options = options;
+        _serviceOptions = serviceOptions;
+        _appPoolOptions = appPoolOptions;
         _logger = logger;
     }
 
@@ -47,9 +54,8 @@ public class CommandPollingWorker : BackgroundService
                     await RetryUnsentResultsAsync(stoppingToken);
                 }
 
-                await Task.Delay(
-                    TimeSpan.FromSeconds(_options.CurrentValue.CommandPoll.PollIntervalSeconds),
-                    stoppingToken);
+                var pollInterval = Math.Max(1, _options.CurrentValue.CommandPoll.PollIntervalSeconds);
+                await Task.Delay(TimeSpan.FromSeconds(pollInterval), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -86,6 +92,17 @@ public class CommandPollingWorker : BackgroundService
         {
             if (ct.IsCancellationRequested) break;
 
+            // Replay protection: reject stale commands at receipt (before persisting).
+            // Validated on IssuedAt, not ScheduledAt, so legitimately deferred commands
+            // (recent IssuedAt, future ScheduledAt) still pass.
+            if (!IsFresh(command, opts, out var freshnessReason))
+            {
+                _logger.LogWarning(
+                    "Rejecting command {CommandId} (ActionType={ActionType}): {Reason}",
+                    command.CommandId, command.ActionType, freshnessReason);
+                continue;
+            }
+
             // INSERT OR IGNORE: duplicate delivery is silently discarded
             await _commandStore.SaveCommandAsync(command);
 
@@ -102,9 +119,10 @@ public class CommandPollingWorker : BackgroundService
                     command.CommandId);
             }
 
-            // Check scheduled execution
+            // Check scheduled execution (parse as UTC regardless of portal formatting)
             if (!string.IsNullOrEmpty(command.ScheduledAt) &&
-                DateTime.TryParse(command.ScheduledAt, out var scheduled) &&
+                DateTime.TryParse(command.ScheduledAt, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var scheduled) &&
                 scheduled > DateTime.UtcNow.AddSeconds(10))
             {
                 _logger.LogInformation(
@@ -120,11 +138,29 @@ public class CommandPollingWorker : BackgroundService
     private async Task ExecuteCommandAsync(
         AgentCommandDto command, PortalOptions opts, CancellationToken ct)
     {
+        // Authorization: state-changing service/app-pool actions may only target names the
+        // operator has explicitly placed under WatchTower's watch. This bounds the blast
+        // radius of a compromised/buggy portal to resources already in scope.
+        if (!IsAuthorized(command, out var authReason))
+        {
+            _logger.LogWarning(
+                "Refusing unauthorized command {CommandId} (ActionType={ActionType}): {Reason}",
+                command.CommandId, command.ActionType, authReason);
+            await FailCommandAsync(command, $"Not authorized: {authReason}", ct);
+            return;
+        }
+
+        // Atomically claim the command so the poll path and the scheduled-due path cannot
+        // both execute it. If we did not win the claim, another path already handled it.
+        if (!await _commandStore.TryBeginExecutionAsync(command.CommandId))
+        {
+            _logger.LogDebug("Command {CommandId} already claimed; skipping", command.CommandId);
+            return;
+        }
+
         _logger.LogInformation(
             "Executing command {CommandId} ActionType={ActionType}",
             command.CommandId, command.ActionType);
-
-        await _commandStore.MarkExecutingAsync(command.CommandId);
 
         var executedAt = DateTime.UtcNow;
         Portal.Actions.ActionResult actionResult;
@@ -212,6 +248,95 @@ public class CommandPollingWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error executing due scheduled commands");
+        }
+    }
+
+    private bool IsFresh(AgentCommandDto command, PortalOptions opts, out string reason)
+    {
+        reason = string.Empty;
+        var maxAge = opts.CommandPoll.MaxCommandAgeSeconds;
+        if (maxAge <= 0)
+            return true; // freshness check disabled
+
+        if (string.IsNullOrWhiteSpace(command.IssuedAt))
+            return true; // cannot validate without an issue time
+
+        if (!DateTime.TryParse(command.IssuedAt, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var issued))
+        {
+            reason = $"unparseable IssuedAt '{command.IssuedAt}'";
+            return false;
+        }
+
+        var now = DateTime.UtcNow;
+        var skew = TimeSpan.FromSeconds(opts.CommandPoll.ClockSkewSeconds);
+
+        if (issued > now + skew)
+        {
+            reason = $"IssuedAt is in the future ({issued:O})";
+            return false;
+        }
+        if (now - issued > TimeSpan.FromSeconds(maxAge) + skew)
+        {
+            reason = $"command is stale (issued {issued:O}, max age {maxAge}s)";
+            return false;
+        }
+        return true;
+    }
+
+    private bool IsAuthorized(AgentCommandDto command, out string reason)
+    {
+        reason = string.Empty;
+        switch ((Portal.Actions.ActionType)command.ActionType)
+        {
+            case Portal.Actions.ActionType.ServiceStart:
+            case Portal.Actions.ActionType.ServiceStop:
+            case Portal.Actions.ActionType.ServiceRestart:
+                return IsTargetAllowed(command, "ServiceName",
+                    _serviceOptions.CurrentValue.WatchedServices, "watched service", out reason);
+
+            case Portal.Actions.ActionType.AppPoolStart:
+            case Portal.Actions.ActionType.AppPoolStop:
+            case Portal.Actions.ActionType.AppPoolRestart:
+            case Portal.Actions.ActionType.AppPoolRecycle:
+                return IsTargetAllowed(command, "AppPoolName",
+                    _appPoolOptions.CurrentValue.WatchedApplicationPools, "watched application pool", out reason);
+
+            default:
+                // Agent/config actions are not target-scoped; allowed.
+                return true;
+        }
+    }
+
+    private static bool IsTargetAllowed(
+        AgentCommandDto command, string paramKey, IReadOnlyList<string> allowList, string label, out string reason)
+    {
+        reason = string.Empty;
+        if (!command.Parameters.TryGetValue(paramKey, out var target) || string.IsNullOrWhiteSpace(target))
+        {
+            reason = $"missing {paramKey}";
+            return false;
+        }
+        target = target.Trim();
+        if (allowList.Any(s => string.Equals(s?.Trim(), target, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        reason = $"'{target}' is not a {label}";
+        return false;
+    }
+
+    private async Task FailCommandAsync(AgentCommandDto command, string message, CancellationToken ct)
+    {
+        await _commandStore.MarkFailedAsync(command.CommandId, message);
+        var result = new CommandResultDto(command.CommandId, false, message, DateTime.UtcNow.ToString("O"));
+        try
+        {
+            await _portalClient.ReportCommandResultAsync(result, ct);
+            await _commandStore.MarkResultSentAsync(command.CommandId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to report rejection of command {CommandId}", command.CommandId);
         }
     }
 

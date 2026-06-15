@@ -45,7 +45,7 @@ public class RemoteConfigWorker : BackgroundService
                     await AcknowledgePendingAsync(stoppingToken);
                 }
 
-                var intervalSeconds = _options.CurrentValue.RemoteConfig.PollIntervalSeconds;
+                var intervalSeconds = Math.Max(1, _options.CurrentValue.RemoteConfig.PollIntervalSeconds);
 
                 // Check sync trigger (triggered by ForceConfigSync action)
                 var triggered = _syncTrigger.TryConsume();
@@ -78,7 +78,7 @@ public class RemoteConfigWorker : BackgroundService
             if (!hasUpdate || config == null || version == null)
                 return;
 
-            if (!ValidateConfig(config, out var validationError))
+            if (!RemoteConfigValidator.Validate(config, out var validationError))
             {
                 _logger.LogWarning(
                     "Remote config version {Version} failed validation: {Error}", version, validationError);

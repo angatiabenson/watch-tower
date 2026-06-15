@@ -127,11 +127,11 @@ public class SystemMetricsProvider : ISystemMetricsProvider
         return metrics;
     }
 
-    public IReadOnlyList<ProcessInfo> GetTopCpuProcesses(int count)
+    public async Task<IReadOnlyList<ProcessInfo>> GetTopCpuProcessesAsync(int count, CancellationToken ct = default)
     {
         try
         {
-            return SampleProcesses()
+            return (await SampleProcessesAsync(ct))
                 .OrderByDescending(p => p.CpuPercent)
                 .Take(count)
                 .ToList();
@@ -143,11 +143,11 @@ public class SystemMetricsProvider : ISystemMetricsProvider
         }
     }
 
-    public IReadOnlyList<ProcessInfo> GetTopMemoryProcesses(int count)
+    public async Task<IReadOnlyList<ProcessInfo>> GetTopMemoryProcessesAsync(int count, CancellationToken ct = default)
     {
         try
         {
-            return SampleProcesses()
+            return (await SampleProcessesAsync(ct))
                 .OrderByDescending(p => p.MemoryMb)
                 .Take(count)
                 .ToList();
@@ -159,13 +159,13 @@ public class SystemMetricsProvider : ISystemMetricsProvider
         }
     }
 
-    private IReadOnlyList<ProcessInfo> SampleProcesses()
+    private async Task<IReadOnlyList<ProcessInfo>> SampleProcessesAsync(CancellationToken ct)
     {
         var initialSamples = CaptureProcessSamples()
             .ToDictionary(p => p.Pid, p => p);
 
         var startedAt = DateTime.UtcNow;
-        Thread.Sleep(ProcessCpuSampleMilliseconds);
+        await Task.Delay(ProcessCpuSampleMilliseconds, ct);
         var elapsedSeconds = Math.Max((DateTime.UtcNow - startedAt).TotalSeconds, 0.001);
 
         var processorCount = Math.Max(Environment.ProcessorCount, 1);
@@ -215,12 +215,46 @@ public class SystemMetricsProvider : ISystemMetricsProvider
         return samples;
     }
 
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+    private sealed class MEMORYSTATUSEX
+    {
+        public uint dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MEMORYSTATUSEX>();
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx([System.Runtime.InteropServices.In, System.Runtime.InteropServices.Out] MEMORYSTATUSEX lpBuffer);
+
     private double GetTotalPhysicalMemoryMb()
     {
         try
         {
-            var gcInfo = GC.GetGCMemoryInfo();
-            return gcInfo.TotalAvailableMemoryBytes / (1024.0 * 1024.0);
+            // Use the machine-wide installed physical RAM (GlobalMemoryStatusEx) so the
+            // percentage is correct on memory-limited/containerised hosts. The previous
+            // GC.GetGCMemoryInfo().TotalAvailableMemoryBytes is process/GC-scoped and does
+            // not match the machine-scoped "Available MBytes" counter used for availableMb.
+            var status = new MEMORYSTATUSEX();
+            if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
+                return status.ullTotalPhys / (1024.0 * 1024.0);
+
+            _logger.LogWarning("GlobalMemoryStatusEx failed; falling back to GC memory info");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to query physical memory via GlobalMemoryStatusEx");
+        }
+
+        try
+        {
+            return GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024.0 * 1024.0);
         }
         catch (Exception ex)
         {

@@ -19,7 +19,7 @@
 
 <p align="center">
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/deploy.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/deploy.yml/badge.svg" alt="Build and Deploy"></a>
-  <img src="https://img.shields.io/badge/tests-41%20passing-brightgreen?logo=checkmarx" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-77%20passing-brightgreen?logo=checkmarx" alt="Tests">
   <img src="https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet" alt=".NET 8">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
@@ -411,7 +411,7 @@ WatchTower uses GitHub Actions with a self-hosted runner for automated deploymen
 **What the pipeline does:**
 
 1. **Version detection** — auto-increments patch version from the latest git tag (e.g., `v1.0.0` -> `v1.0.1`)
-2. **Build & Test** — compiles and runs all 41 unit tests
+2. **Build & Test** — compiles and runs all 77 unit tests
 3. **Publish** — creates a Windows x64 deployment package
 4. **Backup** — saves the current deployment to `C:\Services\WatchTower.backups\v{version}_{timestamp}`
 5. **Deploy** — copies new files, preserves `appsettings.json` and `watchtower.db`
@@ -476,7 +476,7 @@ Start-Service WatchTower
 
 ## Testing
 
-WatchTower has **41 unit tests** covering all workers, services, and the SQLite store.
+WatchTower has **77 unit tests** covering the workers, services, the SQLite metrics store, the portal outbox/command stores, and remote-config validation. Worker tests are deterministic — they drive a single iteration directly with a `FakeTimeProvider`, so there are no real-time sleeps or scheduling races.
 
 ```bash
 # Run all tests

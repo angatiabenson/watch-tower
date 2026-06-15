@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using WatchTower.Models;
 
@@ -5,15 +6,16 @@ namespace WatchTower.Templates;
 
 public static class EmailTemplates
 {
-    private static readonly TimeZoneInfo EatZone = TimeZoneInfo.FindSystemTimeZoneById(
-        "E. Africa Standard Time"
-    );
+    private static string ToLocal(DateTime utcTime, TimeZoneInfo zone) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utcTime, zone).ToString("HH:mm:ss");
 
-    private static string ToEat(DateTime utcTime) =>
-        TimeZoneInfo.ConvertTimeFromUtc(utcTime, EatZone).ToString("HH:mm:ss");
+    private static string ToLocalFull(DateTime utcTime, TimeZoneInfo zone) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utcTime, zone).ToString("yyyy-MM-dd HH:mm:ss");
 
-    private static string ToEatFull(DateTime utcTime) =>
-        TimeZoneInfo.ConvertTimeFromUtc(utcTime, EatZone).ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>HTML-encode any value that originates from the system or external input
+    /// (process/service/pool/drive names, incident descriptions) before placing it in the
+    /// HTML email body, to prevent markup/script injection.</summary>
+    private static string H(string? value) => WebUtility.HtmlEncode(value ?? string.Empty);
 
     private static string GetStatusColor(double percent, double warning, double critical) =>
         percent >= critical ? "#e74c3c"
@@ -32,9 +34,11 @@ public static class EmailTemplates
         : percent >= 40 ? "MODERATE"
         : "LOW";
 
-    public static string RenderReport(ServerReport report, Incident? emergencyIncident)
+    public static string RenderReport(
+        ServerReport report, Incident? emergencyIncident, TimeZoneInfo zone, string zoneLabel)
     {
         var sb = new StringBuilder();
+        zoneLabel = H(zoneLabel);
 
         sb.AppendLine(
             @"<!DOCTYPE html>
@@ -58,7 +62,7 @@ public static class EmailTemplates
         );
         sb.AppendLine(
             $@"<td align='right' style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:rgba(255,255,255,0.7);vertical-align:top;'>
-{ToEatFull(report.GeneratedAt)} EAT<br>Period: {FormatDuration(report.ReportPeriod)}</td>"
+{ToLocalFull(report.GeneratedAt, zone)} {zoneLabel}<br>Period: {FormatDuration(report.ReportPeriod)}</td>"
         );
         sb.AppendLine("</tr></table></td></tr>");
 
@@ -73,9 +77,9 @@ public static class EmailTemplates
 <td style='width:40px;vertical-align:top;'><span style='font-size:28px;'>&#9888;</span></td>
 <td style='font-family:Segoe UI,Arial,sans-serif;'>
 <span style='font-size:16px;font-weight:700;color:#c0392b;'>EMERGENCY ALERT</span><br>
-<span style='font-size:14px;font-weight:600;color:#333;'>{emergencyIncident.Type}</span><br>
-<span style='font-size:13px;color:#555;'>{emergencyIncident.Description}</span><br>
-<span style='font-size:11px;color:#999;'>Detected at {ToEat(emergencyIncident.Timestamp)} EAT</span>
+<span style='font-size:14px;font-weight:600;color:#333;'>{H(FormatIncidentType(emergencyIncident.Type))}</span><br>
+<span style='font-size:13px;color:#555;'>{H(emergencyIncident.Description)}</span><br>
+<span style='font-size:11px;color:#999;'>Detected at {ToLocal(emergencyIncident.Timestamp, zone)} {zoneLabel}</span>
 </td></tr></table>"
             );
 
@@ -93,7 +97,7 @@ public static class EmailTemplates
                 {
                     sb.AppendLine(
                         $@"<tr>
-<td style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#333;border-top:1px solid #f5e0e0;'>{p.Name}</td>
+<td style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#333;border-top:1px solid #f5e0e0;'>{H(p.Name)}</td>
 <td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.Pid}</td>
 <td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuPercent:F1}%</td>
 <td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #f5e0e0;'>{p.MemoryMb:F0} MB</td></tr>"
@@ -169,7 +173,7 @@ public static class EmailTemplates
                 var statusText = net.OutputQueueLength > 0 ? "SATURATED" : "OK";
                 sb.AppendLine(
                     $@"<tr>
-<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{net.InterfaceName}</td>
+<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{H(net.InterfaceName)}</td>
 <td align='right' style='padding:6px 0;font-family:monospace;font-size:12px;color:{netColor};font-weight:600;'>{net.OutputQueueLength:F0}</td>
 <td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:{netColor};width:60px;'>{statusText}</td></tr>"
                 );
@@ -207,7 +211,7 @@ public static class EmailTemplates
                     : "#27ae60";
                 sb.AppendLine(
                     $@"<tr>
-<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{queue.InstanceName}</td>
+<td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{H(queue.InstanceName)}</td>
 <td align='right' style='padding:6px 0;font-family:monospace;font-size:13px;font-weight:600;color:{queueColor};'>{queue.QueueLength:F1}</td></tr>"
                 );
             }
@@ -251,7 +255,7 @@ public static class EmailTemplates
                 var barWidth = Math.Min(100, Math.Max(0, (int)disk.UsagePercent));
                 sb.AppendLine(
                     $@"<tr style='border-top:1px solid #f0f2f5;'>
-<td style='padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;font-weight:600;color:#333;'>{disk.DriveName}</td>
+<td style='padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;font-weight:600;color:#333;'>{H(disk.DriveName)}</td>
 <td align='right' style='padding:10px 14px;font-family:monospace;font-size:12px;color:#666;'>{disk.TotalGb:F1} GB</td>
 <td align='right' style='padding:10px 14px;font-family:monospace;font-size:12px;color:#666;'>{disk.FreeGb:F1} GB</td>
 <td align='right' style='padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;font-weight:700;color:{color};'>{disk.UsagePercent:F1}%</td>
@@ -278,11 +282,11 @@ public static class EmailTemplates
             foreach (var svc in report.ServiceSnapshots)
             {
                 var dotColor = svc.IsRunning ? "#27ae60" : "#e74c3c";
-                var statusText = svc.IsRunning ? "Running" : svc.Status;
+                var statusText = svc.IsRunning ? "Running" : H(svc.Status);
                 sb.AppendLine(
                     $@"<tr>
 <td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>
-<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{svc.DisplayName}</td>
+<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{H(svc.DisplayName)}</td>
 <td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:{dotColor};'>{statusText}</td></tr>"
                 );
             }
@@ -301,11 +305,11 @@ public static class EmailTemplates
             foreach (var pool in report.ApplicationPoolSnapshots)
             {
                 var dotColor = pool.IsRunning ? "#27ae60" : "#e74c3c";
-                var statusText = pool.IsRunning ? "Started" : pool.Status;
+                var statusText = pool.IsRunning ? "Started" : H(pool.Status);
                 sb.AppendLine(
                     $@"<tr>
 <td style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>
-<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{pool.ApplicationPoolName}</td>
+<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{dotColor};margin-right:8px;vertical-align:middle;'></span>{H(pool.ApplicationPoolName)}</td>
 <td align='right' style='padding:6px 0;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:{dotColor};'>{statusText}</td></tr>"
                 );
             }
@@ -326,10 +330,10 @@ public static class EmailTemplates
             {
                 sb.AppendLine(
                     $@"<tr style='border-top:1px solid #fce4e4;'>
-<td style='padding:10px 14px;width:70px;vertical-align:top;font-family:monospace;font-size:12px;color:#999;white-space:nowrap;'>{ToEat(incident.Timestamp)} EAT</td>
+<td style='padding:10px 14px;width:70px;vertical-align:top;font-family:monospace;font-size:12px;color:#999;white-space:nowrap;'>{ToLocal(incident.Timestamp, zone)} {zoneLabel}</td>
 <td style='padding:10px 14px;vertical-align:top;'>
-<span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#c0392b;'>{FormatIncidentType(incident.Type)}</span><br>
-<span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#555;'>{incident.Description}</span></td></tr>"
+<span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#c0392b;'>{H(FormatIncidentType(incident.Type))}</span><br>
+<span style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#555;'>{H(incident.Description)}</span></td></tr>"
                 );
 
                 // Show top processes for CPU/RAM spike and threshold incidents
@@ -349,7 +353,7 @@ public static class EmailTemplates
                     {
                         sb.AppendLine(
                             $@"<tr>
-<td style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#333;border-top:1px solid #f5e0e0;'>{p.Name}</td>
+<td style='padding:4px 8px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#333;border-top:1px solid #f5e0e0;'>{H(p.Name)}</td>
 <td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.Pid}</td>
 <td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.CpuPercent:F1}%</td>
 <td align='right' style='padding:4px 8px;font-family:monospace;font-size:11px;color:#666;border-top:1px solid #f5e0e0;'>{p.MemoryMb:F0} MB</td></tr>"

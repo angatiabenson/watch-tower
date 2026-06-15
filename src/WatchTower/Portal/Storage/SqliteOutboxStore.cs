@@ -29,7 +29,9 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
                 last_error     TEXT,
                 created_at     TEXT    NOT NULL,
                 sent_at        TEXT,
-                next_retry_at  TEXT
+                next_retry_at  TEXT,
+                cpu_rowid      INTEGER,
+                ram_rowid      INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_outbox_status_priority
                 ON outbox_messages(status, priority DESC, next_retry_at);
@@ -41,33 +43,53 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
             );
             ";
         cmd.ExecuteNonQuery();
+
+        // Migrate older databases that predate the rowid-coverage columns.
+        EnsureColumn(conn, "outbox_messages", "cpu_rowid", "INTEGER");
+        EnsureColumn(conn, "outbox_messages", "ram_rowid", "INTEGER");
+    }
+
+    private static void EnsureColumn(SqliteConnection conn, string table, string column, string type)
+    {
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = @col";
+            check.Parameters.AddWithValue("@col", column);
+            if (Convert.ToInt64(check.ExecuteScalar()) > 0)
+                return;
+        }
+        using var alter = conn.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {type}";
+        alter.ExecuteNonQuery();
     }
 
     private SqliteConnection Open()
     {
         var conn = new SqliteConnection(_connectionString);
         conn.Open();
-        using var wal = conn.CreateCommand();
-        wal.CommandText = "PRAGMA journal_mode=WAL;";
-        wal.ExecuteNonQuery();
+        using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
+        pragma.ExecuteNonQuery();
         return conn;
     }
 
     // ── IOutboxStore ─────────────────────────────────────────────────────────
 
-    public Task AddMessageAsync(string messageType, string payloadJson, int priority = 0)
+    public Task AddMessageAsync(string messageType, string payloadJson, int priority = 0, long? cpuRowId = null, long? ramRowId = null)
     {
         lock (_lock)
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                @"INSERT INTO outbox_messages (message_type, payload_json, priority, created_at)
-                  VALUES (@type, @payload, @priority, @created)";
+                @"INSERT INTO outbox_messages (message_type, payload_json, priority, created_at, cpu_rowid, ram_rowid)
+                  VALUES (@type, @payload, @priority, @created, @cpuRow, @ramRow)";
             cmd.Parameters.AddWithValue("@type", messageType);
             cmd.Parameters.AddWithValue("@payload", payloadJson);
             cmd.Parameters.AddWithValue("@priority", priority);
             cmd.Parameters.AddWithValue("@created", DateTime.UtcNow.ToString("O"));
+            cmd.Parameters.AddWithValue("@cpuRow", cpuRowId.HasValue ? cpuRowId.Value : (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@ramRow", ramRowId.HasValue ? ramRowId.Value : (object)DBNull.Value);
             cmd.ExecuteNonQuery();
         }
         return Task.CompletedTask;
@@ -83,7 +105,7 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
             using var conn = Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                @"SELECT id, message_type, payload_json, priority, attempts
+                @"SELECT id, message_type, payload_json, priority, attempts, cpu_rowid, ram_rowid
                   FROM outbox_messages
                   WHERE status = 'Pending'
                     AND (next_retry_at IS NULL OR next_retry_at <= @now)
@@ -100,7 +122,9 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
                     reader.GetString(1),
                     reader.GetString(2),
                     reader.GetInt32(3),
-                    reader.GetInt32(4)
+                    reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                    reader.IsDBNull(6) ? null : reader.GetInt64(6)
                 ));
             }
         }
@@ -122,7 +146,7 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task MarkFailedAsync(long id, string error, DateTime? nextRetryAt)
+    public Task MarkFailedAsync(long id, string error, DateTime? nextRetryAt, int maxAttempts)
     {
         lock (_lock)
         {
@@ -137,7 +161,7 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
                   WHERE id = @id";
             cmd.Parameters.AddWithValue("@error", error);
             cmd.Parameters.AddWithValue("@retry", nextRetryAt.HasValue ? nextRetryAt.Value.ToString("O") : (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@maxAttempts", 5);
+            cmd.Parameters.AddWithValue("@maxAttempts", maxAttempts);
             cmd.Parameters.AddWithValue("@id", id);
             cmd.ExecuteNonQuery();
         }

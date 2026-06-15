@@ -9,6 +9,6 @@ public interface ISystemMetricsProvider : IDisposable
     IReadOnlyList<DiskMetric> GetDiskMetrics();
     IReadOnlyList<DiskQueueMetric> GetDiskQueueMetrics();
     IReadOnlyList<NetworkMetric> GetNetworkMetrics();
-    IReadOnlyList<ProcessInfo> GetTopCpuProcesses(int count);
-    IReadOnlyList<ProcessInfo> GetTopMemoryProcesses(int count);
+    Task<IReadOnlyList<ProcessInfo>> GetTopCpuProcessesAsync(int count, CancellationToken ct = default);
+    Task<IReadOnlyList<ProcessInfo>> GetTopMemoryProcessesAsync(int count, CancellationToken ct = default);
 }

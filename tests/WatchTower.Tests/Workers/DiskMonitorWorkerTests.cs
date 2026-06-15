@@ -1,6 +1,6 @@
-using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Moq;
 using WatchTower.Configuration;
 using WatchTower.Models;
@@ -17,6 +17,7 @@ public class DiskMonitorWorkerTests
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IOptionsMonitor<DiskMonitorOptions>> _options = new();
     private readonly Mock<IOptionsMonitor<ReportingOptions>> _reportingOptions = new();
+    private readonly FakeTimeProvider _time = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
     private readonly Mock<ILogger<DiskMonitorWorker>> _logger = new();
 
     public DiskMonitorWorkerTests()
@@ -28,100 +29,55 @@ public class DiskMonitorWorkerTests
             CriticalThresholdPercent = 85,
             QueueLengthWarningThreshold = 2.0
         });
-
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions
-        {
-            EmergencyCooldownSeconds = 300
-        });
-
-        // Default: return empty disk queue metrics
+        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
         _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(new List<DiskQueueMetric>());
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_ShouldStoreDiskMetrics()
-    {
-        var disks = new List<DiskMetric>
-        {
-            new(DateTime.UtcNow, "C:\\", 500, 300, 40)
-        };
-        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(disks);
-
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
-
-        _metricsStore.Verify(s => s.AddDiskMetric(It.IsAny<DiskMetric>()), Times.AtLeastOnce);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_CriticalDisk_ShouldSendEmail()
-    {
-        var disks = new List<DiskMetric>
-        {
-            new(DateTime.UtcNow, "C:\\", 500, 50, 90)
-        };
-        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(disks);
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
         _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
-
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
-
-        _emailService.Verify(e => e.SendEmailAsync(
-            It.Is<string>(s => s.Contains("Disk Critical")),
-            It.IsAny<string>(),
-            It.IsAny<CancellationToken>()), Times.AtLeastOnce);
     }
 
     [Fact]
-    public async Task ExecuteAsync_BelowWarning_ShouldNotSendEmail()
+    public async Task PollOnce_ShouldStoreDiskMetrics()
     {
-        var disks = new List<DiskMetric>
-        {
-            new(DateTime.UtcNow, "C:\\", 500, 300, 40)
-        };
-        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(disks);
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(new List<DiskMetric> { new(_time.GetUtcNow().UtcDateTime, "C:\\", 500, 300, 40) });
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        _metricsStore.Verify(s => s.AddDiskMetric(It.IsAny<DiskMetric>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_CriticalDisk_ShouldSendEmail()
+    {
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(new List<DiskMetric> { new(_time.GetUtcNow().UtcDateTime, "C:\\", 500, 50, 90) });
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.Contains("Disk Critical")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_BelowWarning_ShouldNotSendEmail()
+    {
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(new List<DiskMetric> { new(_time.GetUtcNow().UtcDateTime, "C:\\", 500, 300, 40) });
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
-    public async Task ExecuteAsync_HighDiskQueue_ShouldSendEmail()
+    public async Task PollOnce_HighDiskQueue_ShouldSendEmail()
     {
-        var disks = new List<DiskMetric> { new(DateTime.UtcNow, "C:\\", 500, 300, 40) };
-        var queues = new List<DiskQueueMetric> { new(DateTime.UtcNow, "0 C:", 5.0) };
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(new List<DiskMetric> { new(_time.GetUtcNow().UtcDateTime, "C:\\", 500, 300, 40) });
+        _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(new List<DiskQueueMetric> { new(_time.GetUtcNow().UtcDateTime, "0 C:", 5.0) });
 
-        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(disks);
-        _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(queues);
-        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
-        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
-
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(
-            It.Is<string>(s => s.Contains("Disk Queue High")),
-            It.IsAny<string>(),
-            It.IsAny<CancellationToken>()), Times.AtLeastOnce);
+            It.Is<string>(s => s.Contains("Disk Queue High")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     private DiskMonitorWorker CreateWorker() => new(
@@ -132,5 +88,6 @@ public class DiskMonitorWorkerTests
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
         _reportingOptions.Object,
+        _time,
         _logger.Object);
 }

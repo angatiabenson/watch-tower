@@ -1,5 +1,6 @@
 using Grpc.Core;
 using Grpc.Net.Client;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using WatchTower.Configuration;
 using WatchTower.Portal.Contracts;
@@ -9,6 +10,8 @@ namespace WatchTower.Portal.Clients;
 
 public class GrpcPortalClient : IPortalClient, IDisposable
 {
+    private const int DeadlineSeconds = 30;
+
     private readonly GrpcChannel _channel;
     private readonly WatchTowerPortalService.WatchTowerPortalServiceClient _client;
     private readonly IOptionsMonitor<PortalOptions> _options;
@@ -16,6 +19,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
 
     public GrpcPortalClient(
         IOptionsMonitor<PortalOptions> options,
+        IHostEnvironment environment,
         ILogger<GrpcPortalClient> logger)
     {
         _options = options;
@@ -26,7 +30,16 @@ public class GrpcPortalClient : IPortalClient, IDisposable
 
         if (opts.Tls.AllowUntrustedCert)
         {
-            // Dev-only: disable TLS verification.
+            // Disabling TLS verification is a development convenience that is unsafe in
+            // production (enables MITM injection of remote commands). Refuse to start.
+            if (environment.IsProduction())
+                throw new InvalidOperationException(
+                    "VisibilityPortal.Tls.AllowUntrustedCert must not be enabled in Production.");
+
+            _logger.LogWarning(
+                "TLS certificate validation is DISABLED for the portal connection (AllowUntrustedCert=true). " +
+                "This is unsafe and must only be used in development.");
+
             var handler = new HttpClientHandler
             {
                 ServerCertificateCustomValidationCallback =
@@ -38,6 +51,8 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         _channel = GrpcChannel.ForAddress(opts.BaseUrl, channelOptions);
         _client = new WatchTowerPortalService.WatchTowerPortalServiceClient(_channel);
     }
+
+    private static DateTime Deadline() => DateTime.UtcNow.AddSeconds(DeadlineSeconds);
 
     private Metadata BuildMetadata()
     {
@@ -59,7 +74,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
     {
         try
         {
-            var payload = new MetricsBatchPayload { BatchedAt = batch.BatchedAt };
+            var payload = new MetricsBatchPayload { BatchedAt = batch.BatchedAt, BatchId = batch.BatchId };
             payload.CpuMetrics.AddRange(
                 batch.CpuMetrics.Select(m => new CpuMetricProto
                     { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent }));
@@ -89,7 +104,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                       Status = m.Status, IsRunning = m.IsRunning }));
 
             var req = new MetricsBatchRequest { Identity = BuildIdentity(), Batch = payload };
-            var reply = await _client.SendMetricsBatchAsync(req, headers: BuildMetadata(),
+            var reply = await _client.SendMetricsBatchAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
             return reply.Accepted;
         }
@@ -120,7 +135,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                     }));
 
             var req = new AgentEventRequest { Identity = BuildIdentity(), Event = protoEvt };
-            var reply = await _client.SendEventAsync(req, headers: BuildMetadata(),
+            var reply = await _client.SendEventAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
             return reply.Accepted;
         }
@@ -136,7 +151,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         try
         {
             var req = new PollCommandsRequest { Identity = BuildIdentity() };
-            var reply = await _client.PollCommandsAsync(req, headers: BuildMetadata(),
+            var reply = await _client.PollCommandsAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
 
             return reply.Commands.Select(c => new AgentCommandDto(
@@ -164,7 +179,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 CommandId = ack.CommandId,
                 AcknowledgedAt = ack.AcknowledgedAt,
             };
-            var reply = await _client.AcknowledgeCommandAsync(req, headers: BuildMetadata(),
+            var reply = await _client.AcknowledgeCommandAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
             return reply.Ok;
         }
@@ -187,7 +202,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 Message = result.Message,
                 ExecutedAt = result.ExecutedAt,
             };
-            var reply = await _client.ReportCommandResultAsync(req, headers: BuildMetadata(),
+            var reply = await _client.ReportCommandResultAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
             return reply.Ok;
         }
@@ -208,7 +223,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 Identity = BuildIdentity(),
                 CurrentVersion = currentVersion ?? string.Empty,
             };
-            var reply = await _client.FetchConfigAsync(req, headers: BuildMetadata(),
+            var reply = await _client.FetchConfigAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
 
             if (!reply.HasUpdate)
@@ -233,7 +248,7 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 Identity = BuildIdentity(),
                 Version = version,
             };
-            var reply = await _client.AcknowledgeConfigAsync(req, headers: BuildMetadata(),
+            var reply = await _client.AcknowledgeConfigAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
             return reply.Ok;
         }

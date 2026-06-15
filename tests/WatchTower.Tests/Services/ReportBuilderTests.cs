@@ -1,5 +1,7 @@
 using FluentAssertions;
+using Microsoft.Extensions.Options;
 using Moq;
+using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services;
 using WatchTower.Services.Abstractions;
@@ -9,10 +11,13 @@ namespace WatchTower.Tests.Services;
 public class ReportBuilderTests
 {
     private readonly Mock<IMetricsStore> _storeMock = new();
+    private readonly Mock<IOptionsMonitor<DisplayOptions>> _displayOptions = new();
     private readonly ReportBuilder _builder;
 
     public ReportBuilderTests()
     {
+        _displayOptions.Setup(o => o.CurrentValue).Returns(new DisplayOptions());
+
         // Default empty returns for all store methods
         _storeMock.Setup(s => s.GetCpuMetrics(It.IsAny<TimeSpan>())).Returns(new List<CpuMetric>());
         _storeMock.Setup(s => s.GetRamMetrics(It.IsAny<TimeSpan>())).Returns(new List<RamMetric>());
@@ -23,7 +28,7 @@ public class ReportBuilderTests
         _storeMock.Setup(s => s.GetLatestApplicationPoolStatuses()).Returns(new List<ApplicationPoolStatus>());
         _storeMock.Setup(s => s.GetIncidents(It.IsAny<TimeSpan>())).Returns(new List<Incident>());
 
-        _builder = new ReportBuilder(_storeMock.Object);
+        _builder = new ReportBuilder(_storeMock.Object, _displayOptions.Object);
     }
 
     [Fact]
@@ -116,12 +121,38 @@ public class ReportBuilderTests
         var html = _builder.RenderEmergencyReportHtml(report, incident);
 
         html.Should().Contain("EMERGENCY");
-        html.Should().Contain("CpuThresholdBreached");
+        html.Should().Contain("CPU Threshold Breached");
         html.Should().Contain("CPU at 99.5%");
         html.Should().Contain("CPU %");
         html.Should().Contain("42.5%");
         html.Should().NotContain("CPU TIME");
         html.Should().Contain("EAT");
+    }
+
+    [Fact]
+    public void RenderEmergencyReportHtml_ShouldHtmlEncodeDynamicValues()
+    {
+        var report = new ServerReport
+        {
+            GeneratedAt = DateTime.UtcNow,
+            ReportPeriod = TimeSpan.FromHours(2)
+        };
+
+        // A malicious/odd process name and incident description must not appear raw in the
+        // HTML body (markup injection); they should be HTML-encoded.
+        var incident = new Incident(
+            DateTime.UtcNow,
+            IncidentType.CpuThresholdBreached,
+            "CPU at 99.5% <script>alert(1)</script>",
+            [new ProcessInfo("<img src=x onerror=alert(1)>", 1234, 500, 2048, 42.5)]
+        );
+
+        var html = _builder.RenderEmergencyReportHtml(report, incident);
+
+        html.Should().NotContain("<script>alert(1)</script>");
+        html.Should().NotContain("<img src=x onerror=alert(1)>");
+        html.Should().Contain("&lt;script&gt;");
+        html.Should().Contain("&lt;img src=x onerror=alert(1)&gt;");
     }
 
     [Fact]

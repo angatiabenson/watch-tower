@@ -2,6 +2,7 @@ namespace WatchTower.Portal.Contracts;
 
 public record MetricsBatchDto(
     string AgentId,
+    string BatchId,
     string BatchedAt,
     List<CpuMetricDto> CpuMetrics,
     List<RamMetricDto> RamMetrics,

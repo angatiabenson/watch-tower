@@ -173,15 +173,10 @@ public class HttpsPortalClient : IPortalClient
 
     private HttpClient CreateClient()
     {
-        var client = _httpClientFactory.CreateClient("PortalClient");
-
-        if (_options.CurrentValue.Tls.AllowUntrustedCert)
-        {
-            // Dev-only: bypass certificate validation.
-            // AllowUntrustedCert must never be true in production.
-        }
-
-        return client;
+        // Note: the HTTPS transport always validates server certificates. AllowUntrustedCert
+        // is intentionally NOT honored here (it only affects the gRPC transport, guarded to
+        // non-production there) so HTTPS fails closed.
+        return _httpClientFactory.CreateClient("PortalClient");
     }
 
     private record ConfigFetchResponse(RemoteAgentConfigDto? Config, string? Version);

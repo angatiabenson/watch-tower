@@ -16,6 +16,7 @@ public class ServiceMonitorWorker : BackgroundService
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<ServiceMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<ServiceMonitorWorker> _logger;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
@@ -30,6 +31,7 @@ public class ServiceMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ServiceMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
+        TimeProvider timeProvider,
         ILogger<ServiceMonitorWorker> logger
     )
     {
@@ -40,8 +42,11 @@ public class ServiceMonitorWorker : BackgroundService
         _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -51,93 +56,10 @@ public class ServiceMonitorWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-
-                if (opts.WatchedServices.Count == 0)
-                {
-                    _logger.LogDebug("No services configured for monitoring");
-                    await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
-                    continue;
-                }
-
-                foreach (var serviceName in opts.WatchedServices)
-                {
-                    var status = _serviceManager.GetServiceStatus(serviceName);
-                    _metricsStore.AddServiceStatus(status);
-
-                    if (status.IsRunning)
-                    {
-                        _consecutiveFailures.TryRemove(serviceName, out _);
-                        _activeOutages.TryRemove(serviceName, out _);
-                        _logger.LogDebug("Service {ServiceName}: Running", serviceName);
-                        continue;
-                    }
-
-                    if (_activeOutages.TryAdd(serviceName, 0))
-                    {
-                        var downIncident = new Incident(
-                            DateTime.UtcNow,
-                            IncidentType.ServiceDown,
-                            $"Service '{status.DisplayName}' ({serviceName}) is {status.Status}"
-                        );
-                        _metricsStore.AddIncident(downIncident);
-                        await _portalEventPublisher.PublishIncidentAsync(downIncident, stoppingToken);
-                    }
-
-                    _logger.LogWarning(
-                        "Service {ServiceName} is {Status}, attempting restart",
-                        serviceName,
-                        status.Status
-                    );
-
-                    await Task.Delay(TimeSpan.FromSeconds(opts.RestartDelaySeconds), stoppingToken);
-
-                    var restarted = _serviceManager.RestartService(
-                        serviceName,
-                        TimeSpan.FromSeconds(opts.RestartTimeoutSeconds)
-                    );
-
-                    if (restarted)
-                    {
-                        _consecutiveFailures.TryRemove(serviceName, out _);
-                        _activeOutages.TryRemove(serviceName, out _);
-                        _logger.LogInformation(
-                            "Service {ServiceName} restarted successfully",
-                            serviceName
-                        );
-
-                        var restartStatus = _serviceManager.GetServiceStatus(serviceName);
-                        _metricsStore.AddServiceStatus(restartStatus);
-
-                        var restartIncident = new Incident(
-                            DateTime.UtcNow,
-                            IncidentType.ServiceRestarted,
-                            $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully"
-                        );
-                        _metricsStore.AddIncident(restartIncident);
-                        await _portalEventPublisher.PublishIncidentAsync(restartIncident, stoppingToken);
-                    }
-                    else
-                    {
-                        var failures = _consecutiveFailures.AddOrUpdate(
-                            serviceName,
-                            1,
-                            (_, count) => count + 1
-                        );
-                        _logger.LogError(
-                            "Failed to restart {ServiceName}. Consecutive failures: {Failures}",
-                            serviceName,
-                            failures
-                        );
-
-                        if (failures >= opts.MaxRestartAttempts)
-                        {
-                            await HandleEmergencyAsync(serviceName, failures, stoppingToken);
-                        }
-                    }
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
+                await PollOnceAsync(stoppingToken);
+                await Task.Delay(
+                    TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
+                    _timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -146,25 +68,107 @@ public class ServiceMonitorWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Service Monitor Worker");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(10), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("Service Monitor Worker stopped");
     }
 
+    /// <summary>Runs a single poll/evaluate cycle over all watched services. Exposed for testing.</summary>
+    internal async Task PollOnceAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+
+        if (opts.WatchedServices.Count == 0)
+        {
+            _logger.LogDebug("No services configured for monitoring");
+            return;
+        }
+
+        foreach (var serviceName in opts.WatchedServices)
+        {
+            var status = _serviceManager.GetServiceStatus(serviceName);
+            _metricsStore.AddServiceStatus(status);
+
+            if (status.IsRunning)
+            {
+                _consecutiveFailures.TryRemove(serviceName, out _);
+                _activeOutages.TryRemove(serviceName, out _);
+                _logger.LogDebug("Service {ServiceName}: Running", serviceName);
+                continue;
+            }
+
+            if (_activeOutages.TryAdd(serviceName, 0))
+            {
+                var downIncident = new Incident(
+                    UtcNow,
+                    IncidentType.ServiceDown,
+                    $"Service '{status.DisplayName}' ({serviceName}) is {status.Status}"
+                );
+                _metricsStore.AddIncident(downIncident);
+                await _portalEventPublisher.PublishIncidentAsync(downIncident, ct);
+            }
+
+            _logger.LogWarning("Service {ServiceName} is {Status}, attempting restart", serviceName, status.Status);
+
+            await Task.Delay(TimeSpan.FromSeconds(opts.RestartDelaySeconds), _timeProvider, ct);
+
+            var restarted = _serviceManager.RestartService(
+                serviceName,
+                TimeSpan.FromSeconds(opts.RestartTimeoutSeconds)
+            );
+
+            // Treat the restart as successful only if the service is STILL running
+            // after a stabilisation delay. A crash-looping service that comes up
+            // then immediately dies would otherwise report "restarted successfully"
+            // every cycle and never escalate to an emergency.
+            var recovered = false;
+            if (restarted)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(opts.StableStateDelaySeconds), _timeProvider, ct);
+                var restartStatus = _serviceManager.GetServiceStatus(serviceName);
+                _metricsStore.AddServiceStatus(restartStatus);
+                recovered = restartStatus.IsRunning;
+            }
+
+            if (recovered)
+            {
+                _consecutiveFailures.TryRemove(serviceName, out _);
+                _activeOutages.TryRemove(serviceName, out _);
+                _logger.LogInformation("Service {ServiceName} restarted successfully", serviceName);
+
+                var restartIncident = new Incident(
+                    UtcNow,
+                    IncidentType.ServiceRestarted,
+                    $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully"
+                );
+                _metricsStore.AddIncident(restartIncident);
+                await _portalEventPublisher.PublishIncidentAsync(restartIncident, ct);
+            }
+            else
+            {
+                var failures = _consecutiveFailures.AddOrUpdate(serviceName, 1, (_, count) => count + 1);
+                _logger.LogError(
+                    "Service {ServiceName} did not recover (restart returned {Restarted}, stayed running=false). Consecutive failures: {Failures}",
+                    serviceName, restarted, failures);
+
+                if (failures >= opts.MaxRestartAttempts)
+                    await HandleEmergencyAsync(serviceName, failures, ct);
+            }
+        }
+    }
+
     private async Task HandleEmergencyAsync(string serviceName, int failures, CancellationToken ct)
     {
-        var cooldown = TimeSpan.FromSeconds(
-            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
-        );
+        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
         var lastEmail = _lastEmergencyPerService.GetValueOrDefault(serviceName, DateTime.MinValue);
 
-        if (DateTime.UtcNow - lastEmail < cooldown)
+        if (UtcNow - lastEmail < cooldown)
             return;
 
         var incident = new Incident(
-            DateTime.UtcNow,
+            UtcNow,
             IncidentType.ServiceRestartFailed,
             $"Service '{serviceName}' failed to restart after {failures} attempts"
         );
@@ -174,8 +178,9 @@ public class ServiceMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] Service Down: {serviceName}", html, ct);
+        var sent = await _emailService.SendEmailAsync($"[WatchTower] Service Down: {serviceName}", html, ct);
 
-        _lastEmergencyPerService[serviceName] = DateTime.UtcNow;
+        if (sent)
+            _lastEmergencyPerService[serviceName] = UtcNow;
     }
 }

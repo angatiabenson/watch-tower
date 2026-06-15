@@ -1,4 +1,5 @@
-using System.Text;
+using Microsoft.Extensions.Options;
+using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 using WatchTower.Templates;
@@ -8,10 +9,19 @@ namespace WatchTower.Services;
 public class ReportBuilder : IReportBuilder
 {
     private readonly IMetricsStore _metricsStore;
+    private readonly IOptionsMonitor<DisplayOptions> _displayOptions;
 
-    public ReportBuilder(IMetricsStore metricsStore)
+    public ReportBuilder(IMetricsStore metricsStore, IOptionsMonitor<DisplayOptions> displayOptions)
     {
         _metricsStore = metricsStore;
+        _displayOptions = displayOptions;
+    }
+
+    private (TimeZoneInfo Zone, string Label) ResolveZone()
+    {
+        var display = _displayOptions.CurrentValue;
+        try { return (TimeZoneInfo.FindSystemTimeZoneById(display.Timezone), display.TimezoneLabel); }
+        catch { return (TimeZoneInfo.FindSystemTimeZoneById("E. Africa Standard Time"), display.TimezoneLabel); }
     }
 
     public ServerReport BuildReport(TimeSpan period)
@@ -60,11 +70,13 @@ public class ReportBuilder : IReportBuilder
 
     public string RenderScheduledReportHtml(ServerReport report)
     {
-        return EmailTemplates.RenderReport(report, emergencyIncident: null);
+        var (zone, label) = ResolveZone();
+        return EmailTemplates.RenderReport(report, emergencyIncident: null, zone, label);
     }
 
     public string RenderEmergencyReportHtml(ServerReport report, Incident emergencyIncident)
     {
-        return EmailTemplates.RenderReport(report, emergencyIncident);
+        var (zone, label) = ResolveZone();
+        return EmailTemplates.RenderReport(report, emergencyIncident, zone, label);
     }
 }
