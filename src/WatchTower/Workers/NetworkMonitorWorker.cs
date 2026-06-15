@@ -116,12 +116,13 @@ public class NetworkMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] Network Saturated: {metric.InterfaceName}",
             html,
             ct
         );
 
-        _lastEmergencyPerInterface[metric.InterfaceName] = DateTime.UtcNow;
+        if (sent)
+            _lastEmergencyPerInterface[metric.InterfaceName] = DateTime.UtcNow;
     }
 }

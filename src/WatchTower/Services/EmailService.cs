@@ -18,7 +18,7 @@ public class EmailService : IEmailService
         _logger = logger;
     }
 
-    public async Task SendEmailAsync(
+    public async Task<bool> SendEmailAsync(
         string subject,
         string htmlBody,
         CancellationToken cancellationToken = default
@@ -29,23 +29,54 @@ public class EmailService : IEmailService
         if (string.IsNullOrWhiteSpace(opts.SmtpHost))
         {
             _logger.LogWarning("SMTP host is not configured. Email will not be sent.");
-            return;
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(opts.FromAddress))
+        {
+            _logger.LogWarning("From address is not configured. Email will not be sent.");
+            return false;
         }
 
         if (opts.ToAddresses.Count == 0)
         {
             _logger.LogWarning("No recipient addresses configured. Email will not be sent.");
-            return;
+            return false;
         }
 
         var message = new MimeMessage();
-        message.From.Add(new MailboxAddress(opts.FromName, opts.FromAddress));
-        foreach (var to in opts.ToAddresses)
-            message.To.Add(MailboxAddress.Parse(to));
+        try
+        {
+            message.From.Add(new MailboxAddress(opts.FromName, opts.FromAddress));
+            foreach (var to in opts.ToAddresses)
+            {
+                if (MailboxAddress.TryParse(to, out var recipient))
+                    message.To.Add(recipient);
+                else
+                    _logger.LogWarning("Skipping malformed recipient address: {Address}", to);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Invalid sender/recipient configuration; email not sent: {Subject}", subject);
+            return false;
+        }
+
+        if (message.To.Count == 0)
+        {
+            _logger.LogWarning("No valid recipient addresses after parsing. Email will not be sent.");
+            return false;
+        }
+
         message.Subject = subject;
         message.Body = new TextPart("html") { Text = htmlBody };
 
-        using var client = new SmtpClient();
+        using var client = new SmtpClient
+        {
+            // Bound each SMTP operation so a hung server cannot block a worker
+            // loop for MailKit's ~120s-per-stage default.
+            Timeout = (int)TimeSpan.FromSeconds(opts.TimeoutSeconds).TotalMilliseconds,
+        };
         try
         {
             var secureOption = opts.Security?.ToLowerInvariant() switch
@@ -69,10 +100,12 @@ public class EmailService : IEmailService
             await client.DisconnectAsync(true, cancellationToken);
 
             _logger.LogInformation("Email sent: {Subject}", subject);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to send email: {Subject}", subject);
+            return false;
         }
     }
 }

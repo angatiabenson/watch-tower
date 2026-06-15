@@ -63,7 +63,7 @@ public class CpuMonitorWorker : BackgroundService
                         _firstBreachTime = DateTime.UtcNow;
 
                         // Log spike incident immediately with top processes
-                        var topProcs = _metricsProvider.GetTopCpuProcesses(opts.TopProcessCount).ToList();
+                        var topProcs = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, stoppingToken)).ToList();
                         var spike = new Incident(
                             DateTime.UtcNow,
                             IncidentType.CpuSpikeDetected,
@@ -115,7 +115,7 @@ public class CpuMonitorWorker : BackgroundService
         if (DateTime.UtcNow - _lastEmergencyEmail < cooldown)
             return;
 
-        var topProcesses = _metricsProvider.GetTopCpuProcesses(opts.TopProcessCount).ToList();
+        var topProcesses = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, ct)).ToList();
         var incident = new Incident(
             DateTime.UtcNow,
             IncidentType.CpuThresholdBreached,
@@ -129,8 +129,11 @@ public class CpuMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] CPU Emergency: {cpuUsage:F1}%", html, ct);
+        var sent = await _emailService.SendEmailAsync($"[WatchTower] CPU Emergency: {cpuUsage:F1}%", html, ct);
 
-        _lastEmergencyEmail = DateTime.UtcNow;
+        // Only start the cooldown if the alert was actually delivered, so a transient
+        // SMTP outage does not silently suppress alerts for the whole cooldown window.
+        if (sent)
+            _lastEmergencyEmail = DateTime.UtcNow;
     }
 }

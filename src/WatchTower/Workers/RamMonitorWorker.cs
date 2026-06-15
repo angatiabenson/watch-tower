@@ -67,7 +67,7 @@ public class RamMonitorWorker : BackgroundService
                         _firstBreachTime = DateTime.UtcNow;
 
                         // Log spike incident immediately with top processes
-                        var topProcs = _metricsProvider.GetTopMemoryProcesses(3).ToList();
+                        var topProcs = (await _metricsProvider.GetTopMemoryProcessesAsync(3, stoppingToken)).ToList();
                         var spike = new Incident(
                             DateTime.UtcNow,
                             IncidentType.RamSpikeDetected,
@@ -119,7 +119,7 @@ public class RamMonitorWorker : BackgroundService
         if (DateTime.UtcNow - _lastEmergencyEmail < cooldown)
             return;
 
-        var topProcesses = _metricsProvider.GetTopMemoryProcesses(opts.TopProcessCount).ToList();
+        var topProcesses = (await _metricsProvider.GetTopMemoryProcessesAsync(opts.TopProcessCount, ct)).ToList();
         var incident = new Incident(
             DateTime.UtcNow,
             IncidentType.RamThresholdBreached,
@@ -133,12 +133,15 @@ public class RamMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] RAM Emergency: {ramMetric.UsagePercent:F1}%",
             html,
             ct
         );
 
-        _lastEmergencyEmail = DateTime.UtcNow;
+        // Only start the cooldown if the alert was actually delivered, so a transient
+        // SMTP outage does not silently suppress alerts for the whole cooldown window.
+        if (sent)
+            _lastEmergencyEmail = DateTime.UtcNow;
     }
 }

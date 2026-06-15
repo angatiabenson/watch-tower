@@ -201,12 +201,13 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] IIS App Pool Down: {applicationPoolName}",
             html,
             ct
         );
 
-        _lastEmergencyPerPool[applicationPoolName] = DateTime.UtcNow;
+        if (sent)
+            _lastEmergencyPerPool[applicationPoolName] = DateTime.UtcNow;
     }
 }

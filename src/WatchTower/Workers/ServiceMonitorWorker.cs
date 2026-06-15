@@ -97,7 +97,20 @@ public class ServiceMonitorWorker : BackgroundService
                         TimeSpan.FromSeconds(opts.RestartTimeoutSeconds)
                     );
 
+                    // Treat the restart as successful only if the service is STILL running
+                    // after a stabilisation delay. A crash-looping service that comes up
+                    // then immediately dies would otherwise report "restarted successfully"
+                    // every cycle and never escalate to an emergency.
+                    var recovered = false;
                     if (restarted)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(opts.StableStateDelaySeconds), stoppingToken);
+                        var restartStatus = _serviceManager.GetServiceStatus(serviceName);
+                        _metricsStore.AddServiceStatus(restartStatus);
+                        recovered = restartStatus.IsRunning;
+                    }
+
+                    if (recovered)
                     {
                         _consecutiveFailures.TryRemove(serviceName, out _);
                         _activeOutages.TryRemove(serviceName, out _);
@@ -105,9 +118,6 @@ public class ServiceMonitorWorker : BackgroundService
                             "Service {ServiceName} restarted successfully",
                             serviceName
                         );
-
-                        var restartStatus = _serviceManager.GetServiceStatus(serviceName);
-                        _metricsStore.AddServiceStatus(restartStatus);
 
                         var restartIncident = new Incident(
                             DateTime.UtcNow,
@@ -125,8 +135,9 @@ public class ServiceMonitorWorker : BackgroundService
                             (_, count) => count + 1
                         );
                         _logger.LogError(
-                            "Failed to restart {ServiceName}. Consecutive failures: {Failures}",
+                            "Service {ServiceName} did not recover (restart returned {Restarted}, stayed running=false). Consecutive failures: {Failures}",
                             serviceName,
+                            restarted,
                             failures
                         );
 
@@ -174,8 +185,9 @@ public class ServiceMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync($"[WatchTower] Service Down: {serviceName}", html, ct);
+        var sent = await _emailService.SendEmailAsync($"[WatchTower] Service Down: {serviceName}", html, ct);
 
-        _lastEmergencyPerService[serviceName] = DateTime.UtcNow;
+        if (sent)
+            _lastEmergencyPerService[serviceName] = DateTime.UtcNow;
     }
 }

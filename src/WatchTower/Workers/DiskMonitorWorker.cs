@@ -148,13 +148,14 @@ public class DiskMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%",
             html,
             ct
         );
 
-        _lastEmergencyPerDrive[disk.DriveName] = DateTime.UtcNow;
+        if (sent)
+            _lastEmergencyPerDrive[disk.DriveName] = DateTime.UtcNow;
     }
 
     private async Task HandleQueueEmergencyAsync(DiskQueueMetric queue, CancellationToken ct)
@@ -181,12 +182,13 @@ public class DiskMonitorWorker : BackgroundService
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
         var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        await _emailService.SendEmailAsync(
+        var sent = await _emailService.SendEmailAsync(
             $"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}",
             html,
             ct
         );
 
-        _lastQueueEmergencyPerDisk[queue.InstanceName] = DateTime.UtcNow;
+        if (sent)
+            _lastQueueEmergencyPerDisk[queue.InstanceName] = DateTime.UtcNow;
     }
 }
