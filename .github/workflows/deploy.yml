@@ -142,34 +142,37 @@ jobs:
             New-Item -ItemType Directory -Path $deployPath -Force
           }
 
-          # Preserve production config and database
-          $configBackup = $null
-          $configPath = "$deployPath\appsettings.json"
-          if (Test-Path $configPath) {
-            $configBackup = Get-Content $configPath -Raw
+          # Runtime state to carry across the deploy (config, DB + WAL sidecars, the
+          # portal-applied overlay, and the last-report marker).
+          $preserve = @(
+            'appsettings.json',
+            'watchtower.db', 'watchtower.db-wal', 'watchtower.db-shm',
+            'remote-config.json',
+            'last-report.txt'
+          )
+
+          $stage = Join-Path $env:TEMP "wt-preserve"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          foreach ($f in $preserve) {
+            if (Test-Path "$deployPath\$f") { Copy-Item "$deployPath\$f" "$stage\$f" -Force }
           }
 
-          $dbBackup = $null
-          $dbPath = "$deployPath\watchtower.db"
-          if (Test-Path $dbPath) {
-            $dbBackup = "$env:TEMP\watchtower.db.bak"
-            Copy-Item -Path $dbPath -Destination $dbBackup -Force
-          }
+          # Clear stale binaries from the previous version (renamed/removed DLLs would
+          # otherwise linger and could be loaded). Keep the Logs directory for history.
+          Get-ChildItem -Path $deployPath -Force -Exclude 'Logs' |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
           Copy-Item -Path ./publish/* -Destination $deployPath -Recurse -Force
 
-          # Restore production config
-          if ($configBackup) {
-            Set-Content -Path $configPath -Value $configBackup -NoNewline
-            Write-Host "Production appsettings.json preserved"
+          # Restore preserved runtime state, overwriting any published defaults.
+          foreach ($f in $preserve) {
+            if (Test-Path "$stage\$f") {
+              Copy-Item "$stage\$f" "$deployPath\$f" -Force
+              Write-Host "Preserved $f"
+            }
           }
-
-          # Restore metrics database
-          if ($dbBackup -and (Test-Path $dbBackup)) {
-            Copy-Item -Path $dbBackup -Destination $dbPath -Force
-            Remove-Item $dbBackup -Force
-            Write-Host "Production watchtower.db preserved"
-          }
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Create service (if not exists)
         shell: powershell
@@ -184,22 +187,58 @@ jobs:
         shell: powershell
         run: Start-Service -Name $env:SERVICE_NAME
 
-      - name: Verify service status
+      - name: Verify service readiness
         id: verify
         shell: powershell
         run: |
-          Start-Sleep -Seconds 5
-          $service = Get-Service -Name $env:SERVICE_NAME
-          if ($service.Status -ne 'Running') {
-            Write-Host "::error::Service failed to start. Status: $($service.Status)"
+          # A Windows service reports 'Running' the instant StartAsync returns, before any
+          # worker has done useful work. Gate on a real readiness signal instead: poll the
+          # log for a worker "started" line, fail fast on a fatal/config error, and confirm
+          # the service is still running at the end (catches crash-on-start loops).
+          $deployPath = "${{ env.DEPLOY_PATH }}"
+          $logDir = "$deployPath\Logs"
+          $healthy = $false
+          $fatal = $false
+
+          for ($i = 0; $i -lt 12; $i++) {
+            Start-Sleep -Seconds 5
+            $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
+            if ($null -eq $service) { continue }
+
+            $log = $null
+            if (Test-Path $logDir) {
+              $log = Get-ChildItem "$logDir\watchtower-*.log" -ErrorAction SilentlyContinue |
+                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            }
+            if ($log) {
+              $tail = Get-Content $log.FullName -Tail 300 -ErrorAction SilentlyContinue
+              if ($tail -match 'terminated unexpectedly' -or $tail -match 'Invalid configuration:') {
+                Write-Host "::error::Fatal startup error detected in log"
+                $fatal = $true
+                break
+              }
+              if (($service.Status -eq 'Running') -and ($tail -match 'Worker started')) {
+                $healthy = $true
+                break
+              }
+            }
+          }
+
+          # Final confirmation that the service did not crash after coming up.
+          $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
+          if ($fatal -or -not $healthy -or $null -eq $service -or $service.Status -ne 'Running') {
+            Write-Host "::error::Service failed readiness check. Status: $($service.Status)"
             echo "HEALTHY=false" >> $env:GITHUB_OUTPUT
             exit 1
           }
-          Write-Host "Service is running successfully"
+          Write-Host "Service is running and a worker reported ready"
           echo "HEALTHY=true" >> $env:GITHUB_OUTPUT
 
       - name: Auto-rollback on failure
-        if: failure() && steps.verify.outputs.HEALTHY == 'false' && steps.backup.outputs.HAS_BACKUP == 'true'
+        # Roll back on ANY failure once a backup exists — not only when the verify step
+        # set HEALTHY=false. An earlier step (e.g. Start service) can fail before verify
+        # runs, leaving the new (broken) binaries in place with no rollback.
+        if: failure() && steps.backup.outputs.HAS_BACKUP == 'true'
         shell: powershell
         run: |
           $backupPath = "${{ steps.backup.outputs.BACKUP_PATH }}"
@@ -214,7 +253,10 @@ jobs:
             Start-Sleep -Seconds 3
           }
 
-          # Restore from backup
+          # Restore from backup. Clear the failed deploy's files first (keep Logs) so no
+          # stale binaries from the bad version remain alongside the restored ones.
+          Get-ChildItem -Path $deployPath -Force -Exclude 'Logs' |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item -Path "$backupPath\*" -Destination $deployPath -Recurse -Force
           Write-Host "Files restored from backup"
 
