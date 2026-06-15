@@ -36,6 +36,12 @@ public class CommandPollOptions
 {
     public int PollIntervalSeconds { get; set; } = 30;
     public int ExecutionTimeoutSeconds { get; set; } = 120;
+
+    /// <summary>Reject commands whose IssuedAt is older than this (replay protection). 0 disables the check.</summary>
+    public int MaxCommandAgeSeconds { get; set; } = 3600;
+
+    /// <summary>Tolerance for clock differences between agent and portal when validating IssuedAt.</summary>
+    public int ClockSkewSeconds { get; set; } = 300;
 }
 
 public class RemoteConfigOptions

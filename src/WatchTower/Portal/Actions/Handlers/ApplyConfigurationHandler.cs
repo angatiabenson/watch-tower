@@ -45,8 +45,11 @@ public class ApplyConfigurationHandler : IActionHandler
         if (config == null)
             return new ActionResult(false, "ConfigJson deserialised to null");
 
-        if (!ValidateConfig(config, out var validationError))
+        if (!RemoteConfigValidator.Validate(config, out var validationError))
+        {
+            _logger.LogWarning("ApplyConfiguration rejected: {Error}", validationError);
             return new ActionResult(false, validationError);
+        }
 
         var version = parameters.TryGetValue("Version", out var v) ? v : Guid.NewGuid().ToString();
 
@@ -55,32 +58,6 @@ public class ApplyConfigurationHandler : IActionHandler
 
         _logger.LogInformation("Remote configuration applied (version {Version})", version);
         return new ActionResult(true, $"Configuration applied (version {version})");
-    }
-
-    private static bool ValidateConfig(RemoteAgentConfigDto config, out string error)
-    {
-        error = string.Empty;
-
-        if (config.Cpu?.PollIntervalSeconds < 1)
-            return Fail(out error, "Cpu.PollIntervalSeconds must be >= 1");
-        if (config.Cpu?.ThresholdPercent is < 1 or > 100)
-            return Fail(out error, "Cpu.ThresholdPercent must be 1–100");
-
-        if (config.Ram?.PollIntervalSeconds < 1)
-            return Fail(out error, "Ram.PollIntervalSeconds must be >= 1");
-        if (config.Ram?.ThresholdPercent is < 1 or > 100)
-            return Fail(out error, "Ram.ThresholdPercent must be 1–100");
-
-        if (config.Disk?.CriticalThresholdPercent is < 1 or > 100)
-            return Fail(out error, "Disk.CriticalThresholdPercent must be 1–100");
-
-        return true;
-    }
-
-    private static bool Fail(out string error, string message)
-    {
-        error = message;
-        return false;
     }
 
     internal static async Task WriteRemoteConfigFileAsync(RemoteAgentConfigDto config, CancellationToken ct)

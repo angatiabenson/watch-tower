@@ -43,9 +43,9 @@ public class SqliteCommandStore : ICommandStore, IDisposable
     {
         var conn = new SqliteConnection(_connectionString);
         conn.Open();
-        using var wal = conn.CreateCommand();
-        wal.CommandText = "PRAGMA journal_mode=WAL;";
-        wal.ExecuteNonQuery();
+        using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
+        pragma.ExecuteNonQuery();
         return conn;
     }
 
@@ -63,11 +63,23 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             cmd.Parameters.AddWithValue("@type", command.ActionType);
             cmd.Parameters.AddWithValue("@params", JsonSerializer.Serialize(command.Parameters));
             cmd.Parameters.AddWithValue("@received", DateTime.UtcNow.ToString("O"));
-            cmd.Parameters.AddWithValue("@scheduled", command.ScheduledAt ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@issued", command.IssuedAt ?? (object)DBNull.Value);
+            // Normalise to UTC "O" so the lexicographic scheduled_at <= now comparison in
+            // GetDueScheduledCommandsAsync is always correct regardless of portal formatting.
+            cmd.Parameters.AddWithValue("@scheduled", NormalizeUtc(command.ScheduledAt) ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@issued", NormalizeUtc(command.IssuedAt) ?? (object)DBNull.Value);
             cmd.ExecuteNonQuery();
         }
         return Task.CompletedTask;
+    }
+
+    private static string? NormalizeUtc(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        return DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                out var dt)
+            ? dt.ToUniversalTime().ToString("O")
+            : value;
     }
 
     public Task<IReadOnlyList<AgentCommandRecord>> GetPendingCommandsAsync()
@@ -90,8 +102,22 @@ public class SqliteCommandStore : ICommandStore, IDisposable
         return Task.FromResult<IReadOnlyList<AgentCommandRecord>>(results);
     }
 
-    public Task MarkExecutingAsync(string commandId)
-        => UpdateStatus(commandId, "Executing", "acked_at");
+    public Task<bool> TryBeginExecutionAsync(string commandId)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"UPDATE agent_commands
+                  SET status='Executing', acked_at=@now
+                  WHERE command_id=@id AND status IN ('Received','Acknowledged')";
+            cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+            cmd.Parameters.AddWithValue("@id", commandId);
+            var rows = cmd.ExecuteNonQuery();
+            return Task.FromResult(rows > 0);
+        }
+    }
 
     public Task MarkCompletedAsync(string commandId, CommandResultDto result)
     {
@@ -187,20 +213,6 @@ public class SqliteCommandStore : ICommandStore, IDisposable
                 results.Add(ReadRecord(reader));
         }
         return Task.FromResult<IReadOnlyList<AgentCommandRecord>>(results);
-    }
-
-    private Task UpdateStatus(string commandId, string status, string? extraNullColumn = null)
-    {
-        lock (_lock)
-        {
-            using var conn = Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"UPDATE agent_commands SET status=@status WHERE command_id=@id";
-            cmd.Parameters.AddWithValue("@status", status);
-            cmd.Parameters.AddWithValue("@id", commandId);
-            cmd.ExecuteNonQuery();
-        }
-        return Task.CompletedTask;
     }
 
     private static AgentCommandRecord ReadRecord(SqliteDataReader r) =>
