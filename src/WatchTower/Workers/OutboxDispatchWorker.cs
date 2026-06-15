@@ -55,7 +55,6 @@ public class OutboxDispatchWorker : BackgroundService
                 {
                     await CollectAndEnqueueMetricsAsync(opts, stoppingToken);
                     await FlushOutboxAsync(opts, stoppingToken);
-                    await MaybeRetryUnsentCommandResultsAsync(stoppingToken);
 
                     _flushCycleCount++;
                     if (_flushCycleCount % 100 == 0)
@@ -63,9 +62,8 @@ public class OutboxDispatchWorker : BackgroundService
                             TimeSpan.FromHours(opts.Outbox.PurgeDeliveredAfterHours));
                 }
 
-                await Task.Delay(
-                    TimeSpan.FromSeconds(_options.CurrentValue.Outbox.FlushIntervalSeconds),
-                    stoppingToken);
+                var flushInterval = Math.Max(1, _options.CurrentValue.Outbox.FlushIntervalSeconds);
+                await Task.Delay(TimeSpan.FromSeconds(flushInterval), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -88,6 +86,7 @@ public class OutboxDispatchWorker : BackgroundService
             var maxBatch = opts.Outbox.MaxBatchSize;
             var agentId = opts.AgentId;
             var batchedAt = DateTime.UtcNow.ToString("O");
+            var batchId = Guid.NewGuid().ToString();
 
             // Cursor-based append tables
             var cpuCursor = await _syncState.GetLastForwardedRowIdAsync("cpu");
@@ -112,6 +111,7 @@ public class OutboxDispatchWorker : BackgroundService
 
             var batch = new MetricsBatchDto(
                 agentId,
+                batchId,
                 batchedAt,
                 cpuMetrics.Select(m => new CpuMetricDto(m.Timestamp.ToString("O"), m.UsagePercent)).ToList(),
                 ramMetrics.Select(m => new RamMetricDto(m.Timestamp.ToString("O"), m.UsagePercent, m.AvailableMb, m.TotalMb)).ToList(),
@@ -125,8 +125,13 @@ public class OutboxDispatchWorker : BackgroundService
             await _outboxStore.AddMessageAsync(
                 "MetricsBatch",
                 JsonSerializer.Serialize(batch, JsonOpts),
-                priority: 0);
+                priority: 0,
+                cpuRowId: cpuMetrics.Count > 0 ? cpuLastRowId : null,
+                ramRowId: ramMetrics.Count > 0 ? ramLastRowId : null);
 
+            // Advance the READ cursor at enqueue so the same rows are not collected
+            // again on the next cycle. The SENT cursor (cpu_sent/ram_sent), which gates
+            // purging, is only advanced once the portal confirms delivery (see FlushOutboxAsync).
             if (cpuLastRowId > cpuCursor)
                 await _syncState.SetLastForwardedRowIdAsync("cpu", cpuLastRowId);
             if (ramLastRowId > ramCursor)
@@ -168,17 +173,41 @@ public class OutboxDispatchWorker : BackgroundService
             if (sent)
             {
                 await _outboxStore.MarkSentAsync(msg.Id);
+                await AdvanceSentCursorAsync(msg);
             }
             else
             {
                 var nextAttempt = msg.Attempts + 1;
-                DateTime? nextRetry = nextAttempt < opts.Outbox.MaxRetryAttempts
-                    ? DateTime.UtcNow.AddSeconds(opts.Outbox.RetryBackoffSeconds * nextAttempt)
-                    : null;
+                bool terminal = nextAttempt >= opts.Outbox.MaxRetryAttempts;
+                DateTime? nextRetry = terminal
+                    ? null
+                    : DateTime.UtcNow.AddSeconds(opts.Outbox.RetryBackoffSeconds * nextAttempt);
 
-                await _outboxStore.MarkFailedAsync(msg.Id, "Send failed", nextRetry);
+                await _outboxStore.MarkFailedAsync(msg.Id, "Send failed", nextRetry, opts.Outbox.MaxRetryAttempts);
+
+                if (terminal && msg.MessageType == "MetricsBatch")
+                {
+                    // The batch exhausted all retries (portal unreachable for the whole
+                    // window). Advance the sent cursor so these rows become purgeable and
+                    // the pipeline does not stall — but log loudly: this is dropped data.
+                    _logger.LogError(
+                        "Dropping metrics batch {Id} after {Attempts} failed attempts; cpu<= {Cpu}, ram<= {Ram} will not reach the portal",
+                        msg.Id, nextAttempt, msg.CpuRowId, msg.RamRowId);
+                    await AdvanceSentCursorAsync(msg);
+                }
             }
         }
+    }
+
+    private async Task AdvanceSentCursorAsync(OutboxMessage msg)
+    {
+        if (msg.MessageType != "MetricsBatch")
+            return;
+
+        if (msg.CpuRowId is long cpu && cpu > await _syncState.GetLastForwardedRowIdAsync("cpu_sent"))
+            await _syncState.SetLastForwardedRowIdAsync("cpu_sent", cpu);
+        if (msg.RamRowId is long ram && ram > await _syncState.GetLastForwardedRowIdAsync("ram_sent"))
+            await _syncState.SetLastForwardedRowIdAsync("ram_sent", ram);
     }
 
     private async Task<bool> SendMetricsBatchAsync(OutboxMessage msg, CancellationToken ct)
@@ -195,22 +224,4 @@ public class OutboxDispatchWorker : BackgroundService
         return await _portalClient.SendEventAsync(dto, ct);
     }
 
-    private async Task MaybeRetryUnsentCommandResultsAsync(CancellationToken ct)
-    {
-        // Retry command results that couldn't be sent immediately after execution
-        if (_flushCycleCount % 10 != 0) return;
-
-        try
-        {
-            var commandStore = _outboxStore as ICommandResultRetry;
-            // Command result retry is handled by CommandPollingWorker; nothing to do here
-            await Task.CompletedTask;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Command result retry check skipped");
-        }
-    }
-
-    private interface ICommandResultRetry { }
 }
