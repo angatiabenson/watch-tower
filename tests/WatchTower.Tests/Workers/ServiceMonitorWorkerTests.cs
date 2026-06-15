@@ -72,8 +72,28 @@ public class ServiceMonitorWorkerTests
     [Fact]
     public async Task ExecuteAsync_SuccessfulRestart_ShouldLogIncident()
     {
+        // No stabilisation delay in the test, and the service is reported Running once the
+        // recheck happens so it counts as a genuine (stable) recovery.
+        _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions
+        {
+            PollIntervalSeconds = 1,
+            MaxRestartAttempts = 3,
+            RestartDelaySeconds = 0,
+            RestartTimeoutSeconds = 1,
+            StableStateDelaySeconds = 0,
+            WatchedServices = new List<string> { "TestService" }
+        });
+
+        var calls = 0;
         _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false));
+            .Returns(() =>
+            {
+                // First read sees it stopped (triggers restart); the post-restart recheck
+                // and subsequent reads see it running.
+                var running = System.Threading.Interlocked.Increment(ref calls) > 1;
+                return new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service",
+                    running ? "Running" : "Stopped", running);
+            });
         _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
 
         var worker = CreateWorker();

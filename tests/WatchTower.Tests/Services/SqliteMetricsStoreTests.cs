@@ -52,6 +52,38 @@ public class SqliteMetricsStoreTests : IDisposable
     }
 
     [Fact]
+    public void PurgeReportedData_PreservesUnacknowledgedRows()
+    {
+        for (var i = 0; i < 5; i++)
+            _store.AddCpuMetric(new CpuMetric(DateTime.UtcNow, i));
+
+        // The portal has only confirmed delivery up to rowid 3.
+        var (lastRowId, all) = _store.GetCpuMetricsSince(0, 100);
+        all.Should().HaveCount(5);
+        lastRowId.Should().Be(5);
+
+        var result = _store.PurgeReportedData(cpuForwardedRowId: 3, ramForwardedRowId: 0);
+
+        // Rows 1-3 (acknowledged) removed; rows 4-5 (un-acked) preserved -> no data loss.
+        var (_, remaining) = _store.GetCpuMetricsSince(0, 100);
+        remaining.Should().HaveCount(2);
+        result.CpuTableEmptied.Should().BeFalse();
+    }
+
+    [Fact]
+    public void PurgeReportedData_FullForward_EmptiesTable()
+    {
+        _store.AddCpuMetric(new CpuMetric(DateTime.UtcNow, 1));
+        _store.AddCpuMetric(new CpuMetric(DateTime.UtcNow, 2));
+
+        var result = _store.PurgeReportedData(cpuForwardedRowId: long.MaxValue, ramForwardedRowId: long.MaxValue);
+
+        _store.GetCpuMetrics(TimeSpan.FromHours(1)).Should().BeEmpty();
+        result.CpuTableEmptied.Should().BeTrue();
+        result.RamTableEmptied.Should().BeTrue();
+    }
+
+    [Fact]
     public void AddDiskMetric_ShouldUpsertByDrive()
     {
         _store.AddDiskMetric(new DiskMetric(DateTime.UtcNow, "C:\\", 500, 300, 40));

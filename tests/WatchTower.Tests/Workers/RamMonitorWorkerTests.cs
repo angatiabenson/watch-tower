@@ -69,7 +69,7 @@ public class RamMonitorWorkerTests
     public async Task ExecuteAsync_AboveThreshold_ShouldLogSpikeIncident()
     {
         _metricsProvider.Setup(m => m.GetRamMetric()).Returns(new RamMetric(DateTime.UtcNow, 95, 1600, 32000));
-        _metricsProvider.Setup(m => m.GetTopMemoryProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>
+        _metricsProvider.Setup(m => m.GetTopMemoryProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(new List<ProcessInfo>
         {
             new("sqlservr", 1234, 500, 4096)
         });

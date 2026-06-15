@@ -69,7 +69,7 @@ public class CpuMonitorWorkerTests
     public async Task ExecuteAsync_AboveThreshold_ShouldLogSpikeIncident()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
-        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>
+        _metricsProvider.Setup(m => m.GetTopCpuProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(new List<ProcessInfo>
         {
             new("sqlservr", 1234, 500, 2048)
         });
@@ -97,7 +97,7 @@ public class CpuMonitorWorkerTests
             TopProcessCount = 5
         });
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
-        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>());
+        _metricsProvider.Setup(m => m.GetTopCpuProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(new List<ProcessInfo>());
 
         var worker = CreateWorker();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -106,14 +106,14 @@ public class CpuMonitorWorkerTests
         await Task.Delay(1500);
         await worker.StopAsync(CancellationToken.None);
 
-        _metricsProvider.Verify(m => m.GetTopCpuProcesses(5), Times.Once);
+        _metricsProvider.Verify(m => m.GetTopCpuProcessesAsync(5, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
     public async Task ExecuteAsync_SustainedBreach_ShouldSendEmergencyEmail()
     {
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
-        _metricsProvider.Setup(m => m.GetTopCpuProcesses(It.IsAny<int>())).Returns(new List<ProcessInfo>());
+        _metricsProvider.Setup(m => m.GetTopCpuProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(new List<ProcessInfo>());
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
         _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
 
