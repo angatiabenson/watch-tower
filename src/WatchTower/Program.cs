@@ -38,6 +38,12 @@ try
             {
                 var config = context.Configuration;
 
+                // Give workers time to finish the current cycle / flush in-flight DB writes on stop.
+                services.Configure<HostOptions>(o =>
+                {
+                    o.ShutdownTimeout = TimeSpan.FromSeconds(30);
+                });
+
                 // Configuration options
                 services.Configure<CpuMonitorOptions>(
                     config.GetSection(CpuMonitorOptions.SectionName)
@@ -177,6 +183,50 @@ try
     var portalConfig =
         host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<PortalOptions>>();
 
+    // Fail fast on configuration that would otherwise create a "zombie" service
+    // (e.g. a zero/negative poll interval busy-loops or error-spins a worker forever).
+    var fatalConfigErrors = new List<string>();
+
+    void RequirePositive(string name, int value)
+    {
+        if (value < 1) fatalConfigErrors.Add($"{name} must be >= 1 (was {value}).");
+    }
+
+    var cpu = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<CpuMonitorOptions>>().CurrentValue;
+    var ram = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<RamMonitorOptions>>().CurrentValue;
+    var disk = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<DiskMonitorOptions>>().CurrentValue;
+    var network = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<NetworkMonitorOptions>>().CurrentValue;
+    var heartbeat = heartbeatConfig.CurrentValue;
+
+    RequirePositive("Monitoring:Cpu:PollIntervalSeconds", cpu.PollIntervalSeconds);
+    RequirePositive("Monitoring:Ram:PollIntervalSeconds", ram.PollIntervalSeconds);
+    RequirePositive("Monitoring:Disk:PollIntervalSeconds", disk.PollIntervalSeconds);
+    RequirePositive("Monitoring:Network:PollIntervalSeconds", network.PollIntervalSeconds);
+    RequirePositive("Monitoring:Services:PollIntervalSeconds", serviceConfig.CurrentValue.PollIntervalSeconds);
+    RequirePositive("Monitoring:ApplicationPools:PollIntervalSeconds", applicationPoolConfig.CurrentValue.PollIntervalSeconds);
+    RequirePositive("Heartbeat:IntervalSeconds", heartbeat.IntervalSeconds);
+
+    var portalOpts = portalConfig.CurrentValue;
+    if (portalOpts.Enabled)
+    {
+        if (string.IsNullOrWhiteSpace(portalOpts.AgentId))
+            fatalConfigErrors.Add("VisibilityPortal.AgentId is required when the portal is enabled.");
+        if (string.IsNullOrWhiteSpace(portalOpts.AgentToken))
+            fatalConfigErrors.Add("VisibilityPortal.AgentToken is required when the portal is enabled.");
+        if (string.IsNullOrWhiteSpace(portalOpts.BaseUrl))
+            fatalConfigErrors.Add("VisibilityPortal.BaseUrl is required when the portal is enabled.");
+        RequirePositive("VisibilityPortal:Outbox:FlushIntervalSeconds", portalOpts.Outbox.FlushIntervalSeconds);
+        RequirePositive("VisibilityPortal:CommandPoll:PollIntervalSeconds", portalOpts.CommandPoll.PollIntervalSeconds);
+        RequirePositive("VisibilityPortal:RemoteConfig:PollIntervalSeconds", portalOpts.RemoteConfig.PollIntervalSeconds);
+    }
+
+    if (fatalConfigErrors.Count > 0)
+    {
+        var message = "Invalid configuration:\n - " + string.Join("\n - ", fatalConfigErrors);
+        logger.LogCritical("{Message}", message);
+        throw new InvalidOperationException(message);
+    }
+
     if (string.IsNullOrWhiteSpace(emailConfig.CurrentValue.SmtpHost))
         logger.LogWarning("SMTP host is not configured. Email notifications will be disabled.");
 
@@ -189,7 +239,6 @@ try
     if (applicationPoolConfig.CurrentValue.WatchedApplicationPools.Count == 0)
         logger.LogWarning("No watched IIS application pools configured. Application pool monitoring will be idle.");
 
-    var portalOpts = portalConfig.CurrentValue;
     if (portalOpts.Enabled)
     {
         logger.LogInformation(
