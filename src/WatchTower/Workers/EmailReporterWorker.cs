@@ -14,6 +14,7 @@ public class EmailReporterWorker : BackgroundService
     private readonly IOptionsMonitor<ReportingOptions> _options;
     private readonly IOptionsMonitor<DisplayOptions> _displayOptions;
     private readonly IOptionsMonitor<PortalOptions> _portalOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<EmailReporterWorker> _logger;
 
     // Persisted marker (survives restarts and purges) recording the local date of the
@@ -34,6 +35,7 @@ public class EmailReporterWorker : BackgroundService
         IOptionsMonitor<ReportingOptions> options,
         IOptionsMonitor<DisplayOptions> displayOptions,
         IOptionsMonitor<PortalOptions> portalOptions,
+        TimeProvider timeProvider,
         ILogger<EmailReporterWorker> logger
     )
     {
@@ -44,8 +46,11 @@ public class EmailReporterWorker : BackgroundService
         _options = options;
         _displayOptions = displayOptions;
         _portalOptions = portalOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     private TimeZoneInfo GetConfiguredZone()
     {
@@ -88,7 +93,7 @@ public class EmailReporterWorker : BackgroundService
                 var delay = GetDelayUntilNextReport();
                 _logger.LogInformation("Next daily report scheduled in {Hours:F1} hours", delay.TotalHours);
 
-                await Task.Delay(delay, stoppingToken);
+                await Task.Delay(delay, _timeProvider, stoppingToken);
 
                 await RunDailyReportAsync(stoppingToken);
             }
@@ -99,14 +104,15 @@ public class EmailReporterWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Email Reporter Worker");
-                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(30), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("Email Reporter Worker stopped");
     }
 
-    private async Task RunDailyReportAsync(CancellationToken stoppingToken)
+    /// <summary>Builds and sends the daily report, purging only on confirmed delivery. Exposed for testing.</summary>
+    internal async Task RunDailyReportAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Generating daily scheduled report");
 
@@ -171,8 +177,8 @@ public class EmailReporterWorker : BackgroundService
         }
     }
 
-    private static DateOnly LocalToday(TimeZoneInfo zone) =>
-        DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone));
+    private DateOnly LocalToday(TimeZoneInfo zone) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(UtcNow, zone));
 
     private bool IsReportOwed()
     {
@@ -181,7 +187,7 @@ public class EmailReporterWorker : BackgroundService
             reportTimeOfDay = TimeSpan.FromHours(8);
 
         var zone = GetConfiguredZone();
-        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(UtcNow, zone);
         var scheduledToday = nowLocal.Date + reportTimeOfDay;
 
         // Owed only if today's scheduled time has passed and we have not reported today.
@@ -223,7 +229,7 @@ public class EmailReporterWorker : BackgroundService
             reportTimeOfDay = TimeSpan.FromHours(8);
 
         var zone = GetConfiguredZone();
-        var nowUtc = DateTime.UtcNow;
+        var nowUtc = UtcNow;
         var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, zone);
 
         var nextReportLocal = nowLocal.Date + reportTimeOfDay;

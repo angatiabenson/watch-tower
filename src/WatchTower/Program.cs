@@ -44,6 +44,9 @@ try
                     o.ShutdownTimeout = TimeSpan.FromSeconds(30);
                 });
 
+                // Single clock abstraction so worker timing is testable with a fake provider.
+                services.AddSingleton(TimeProvider.System);
+
                 // Configuration options
                 services.Configure<CpuMonitorOptions>(
                     config.GetSection(CpuMonitorOptions.SectionName)

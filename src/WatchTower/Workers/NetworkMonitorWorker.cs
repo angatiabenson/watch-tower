@@ -16,6 +16,7 @@ public class NetworkMonitorWorker : BackgroundService
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<NetworkMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<NetworkMonitorWorker> _logger;
 
     private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerInterface = new();
@@ -28,6 +29,7 @@ public class NetworkMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<NetworkMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
+        TimeProvider timeProvider,
         ILogger<NetworkMonitorWorker> logger
     )
     {
@@ -38,8 +40,11 @@ public class NetworkMonitorWorker : BackgroundService
         _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -49,34 +54,10 @@ public class NetworkMonitorWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-                var networkMetrics = _metricsProvider.GetNetworkMetrics();
-
-                foreach (var metric in networkMetrics)
-                {
-                    _metricsStore.AddNetworkMetric(metric);
-
-                    if (metric.OutputQueueLength > opts.OutputQueueWarningThreshold)
-                    {
-                        _logger.LogWarning(
-                            "NETWORK QUEUE SATURATED: {Interface} output queue {Queue:F0} (threshold: > {Threshold})",
-                            metric.InterfaceName,
-                            metric.OutputQueueLength,
-                            opts.OutputQueueWarningThreshold
-                        );
-                        await HandleEmergencyAsync(metric, stoppingToken);
-                    }
-                    else
-                    {
-                        _logger.LogDebug(
-                            "Network {Interface}: output queue {Queue:F0}",
-                            metric.InterfaceName,
-                            metric.OutputQueueLength
-                        );
-                    }
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
+                await PollOnceAsync(stoppingToken);
+                await Task.Delay(
+                    TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
+                    _timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -85,28 +66,49 @@ public class NetworkMonitorWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Network Monitor Worker");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(10), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("Network Monitor Worker stopped");
     }
 
+    /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
+    internal async Task PollOnceAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+        var networkMetrics = _metricsProvider.GetNetworkMetrics();
+
+        foreach (var metric in networkMetrics)
+        {
+            _metricsStore.AddNetworkMetric(metric);
+
+            if (metric.OutputQueueLength > opts.OutputQueueWarningThreshold)
+            {
+                _logger.LogWarning(
+                    "NETWORK QUEUE SATURATED: {Interface} output queue {Queue:F0} (threshold: > {Threshold})",
+                    metric.InterfaceName, metric.OutputQueueLength, opts.OutputQueueWarningThreshold);
+                await HandleEmergencyAsync(metric, ct);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Network {Interface}: output queue {Queue:F0}",
+                    metric.InterfaceName, metric.OutputQueueLength);
+            }
+        }
+    }
+
     private async Task HandleEmergencyAsync(NetworkMetric metric, CancellationToken ct)
     {
-        var cooldown = TimeSpan.FromSeconds(
-            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
-        );
-        var lastEmail = _lastEmergencyPerInterface.GetValueOrDefault(
-            metric.InterfaceName,
-            DateTime.MinValue
-        );
+        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
+        var lastEmail = _lastEmergencyPerInterface.GetValueOrDefault(metric.InterfaceName, DateTime.MinValue);
 
-        if (DateTime.UtcNow - lastEmail < cooldown)
+        if (UtcNow - lastEmail < cooldown)
             return;
 
         var incident = new Incident(
-            DateTime.UtcNow,
+            UtcNow,
             IncidentType.NetworkQueueSaturated,
             $"Network interface '{metric.InterfaceName}' output queue at {metric.OutputQueueLength:F0} (threshold: > {_options.CurrentValue.OutputQueueWarningThreshold})"
         );
@@ -123,6 +125,6 @@ public class NetworkMonitorWorker : BackgroundService
         );
 
         if (sent)
-            _lastEmergencyPerInterface[metric.InterfaceName] = DateTime.UtcNow;
+            _lastEmergencyPerInterface[metric.InterfaceName] = UtcNow;
     }
 }

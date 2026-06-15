@@ -15,6 +15,7 @@ public class CpuMonitorWorker : BackgroundService
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<CpuMonitorOptions> _options;
     private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<CpuMonitorWorker> _logger;
 
     private DateTime? _firstBreachTime;
@@ -28,6 +29,7 @@ public class CpuMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<CpuMonitorOptions> options,
         IOptionsMonitor<ReportingOptions> reportingOptions,
+        TimeProvider timeProvider,
         ILogger<CpuMonitorWorker> logger
     )
     {
@@ -38,8 +40,11 @@ public class CpuMonitorWorker : BackgroundService
         _portalEventPublisher = portalEventPublisher;
         _options = options;
         _reportingOptions = reportingOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -49,45 +54,10 @@ public class CpuMonitorWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-                var cpuUsage = _metricsProvider.GetCpuUsage();
-                var metric = new CpuMetric(DateTime.UtcNow, cpuUsage);
-                _metricsStore.AddCpuMetric(metric);
-
-                _logger.LogDebug("CPU: {Usage:F1}%", cpuUsage);
-
-                if (cpuUsage >= opts.ThresholdPercent)
-                {
-                    if (_firstBreachTime == null)
-                    {
-                        _firstBreachTime = DateTime.UtcNow;
-
-                        // Log spike incident immediately with top processes
-                        var topProcs = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, stoppingToken)).ToList();
-                        var spike = new Incident(
-                            DateTime.UtcNow,
-                            IncidentType.CpuSpikeDetected,
-                            $"CPU hit {cpuUsage:F1}% (threshold: {opts.ThresholdPercent}%)",
-                            topProcs
-                        );
-                        _metricsStore.AddIncident(spike);
-                        await _portalEventPublisher.PublishIncidentAsync(spike, stoppingToken);
-                        _logger.LogWarning("CPU spike detected: {Description}", spike.Description);
-                    }
-
-                    var elapsed = DateTime.UtcNow - _firstBreachTime.Value;
-                    if (elapsed.TotalSeconds >= opts.SustainedSeconds)
-                    {
-                        await HandleEmergencyAsync(cpuUsage, opts, stoppingToken);
-                        _firstBreachTime = DateTime.UtcNow;
-                    }
-                }
-                else
-                {
-                    _firstBreachTime = null;
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(opts.PollIntervalSeconds), stoppingToken);
+                await PollOnceAsync(stoppingToken);
+                await Task.Delay(
+                    TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
+                    _timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -96,11 +66,53 @@ public class CpuMonitorWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in CPU Monitor Worker");
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(5), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("CPU Monitor Worker stopped");
+    }
+
+    /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
+    internal async Task PollOnceAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+        var cpuUsage = _metricsProvider.GetCpuUsage();
+        var metric = new CpuMetric(UtcNow, cpuUsage);
+        _metricsStore.AddCpuMetric(metric);
+
+        _logger.LogDebug("CPU: {Usage:F1}%", cpuUsage);
+
+        if (cpuUsage >= opts.ThresholdPercent)
+        {
+            if (_firstBreachTime == null)
+            {
+                _firstBreachTime = UtcNow;
+
+                // Log spike incident immediately with top processes
+                var topProcs = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, ct)).ToList();
+                var spike = new Incident(
+                    UtcNow,
+                    IncidentType.CpuSpikeDetected,
+                    $"CPU hit {cpuUsage:F1}% (threshold: {opts.ThresholdPercent}%)",
+                    topProcs
+                );
+                _metricsStore.AddIncident(spike);
+                await _portalEventPublisher.PublishIncidentAsync(spike, ct);
+                _logger.LogWarning("CPU spike detected: {Description}", spike.Description);
+            }
+
+            var elapsed = UtcNow - _firstBreachTime.Value;
+            if (elapsed.TotalSeconds >= opts.SustainedSeconds)
+            {
+                await HandleEmergencyAsync(cpuUsage, opts, ct);
+                _firstBreachTime = UtcNow;
+            }
+        }
+        else
+        {
+            _firstBreachTime = null;
+        }
     }
 
     private async Task HandleEmergencyAsync(
@@ -112,12 +124,12 @@ public class CpuMonitorWorker : BackgroundService
         var cooldown = TimeSpan.FromSeconds(
             _reportingOptions.CurrentValue.EmergencyCooldownSeconds
         );
-        if (DateTime.UtcNow - _lastEmergencyEmail < cooldown)
+        if (UtcNow - _lastEmergencyEmail < cooldown)
             return;
 
         var topProcesses = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, ct)).ToList();
         var incident = new Incident(
-            DateTime.UtcNow,
+            UtcNow,
             IncidentType.CpuThresholdBreached,
             $"CPU at {cpuUsage:F1}% for over {opts.SustainedSeconds}s",
             topProcesses
@@ -134,6 +146,6 @@ public class CpuMonitorWorker : BackgroundService
         // Only start the cooldown if the alert was actually delivered, so a transient
         // SMTP outage does not silently suppress alerts for the whole cooldown window.
         if (sent)
-            _lastEmergencyEmail = DateTime.UtcNow;
+            _lastEmergencyEmail = UtcNow;
     }
 }

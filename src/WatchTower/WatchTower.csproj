@@ -30,4 +30,9 @@
   <ItemGroup>
     <Protobuf Include="Portal\Contracts\Protobuf\watchtower.proto" GrpcServices="Client" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Expose internal worker iteration methods (PollOnceAsync etc.) for deterministic unit tests. -->
+    <InternalsVisibleTo Include="WatchTower.Tests" />
+  </ItemGroup>
 </Project>
