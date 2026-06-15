@@ -21,59 +21,7 @@ public class ServiceMonitorWorkerTests
 
     public ServiceMonitorWorkerTests()
     {
-        _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions
-        {
-            PollIntervalSeconds = 1,
-            MaxRestartAttempts = 3,
-            RestartDelaySeconds = 0,
-            RestartTimeoutSeconds = 1,
-            WatchedServices = new List<string> { "TestService" }
-        });
-
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions
-        {
-            EmergencyCooldownSeconds = 300
-        });
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_RunningService_ShouldStoreStatus()
-    {
-        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Running", true));
-
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
-
-        _metricsStore.Verify(s => s.AddServiceStatus(It.Is<ServiceStatus>(st => st.IsRunning)), Times.AtLeastOnce);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_StoppedService_ShouldAttemptRestart()
-    {
-        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false));
-        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
-
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(2000);
-        await worker.StopAsync(CancellationToken.None);
-
-        _serviceManager.Verify(s => s.RestartService("TestService", It.IsAny<TimeSpan>()), Times.AtLeastOnce);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_SuccessfulRestart_ShouldLogIncident()
-    {
-        // No stabilisation delay in the test, and the service is reported Running once the
-        // recheck happens so it counts as a genuine (stable) recovery.
+        // Zero intra-iteration delays so a single PollOnceAsync completes immediately.
         _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions
         {
             PollIntervalSeconds = 1,
@@ -83,77 +31,86 @@ public class ServiceMonitorWorkerTests
             StableStateDelaySeconds = 0,
             WatchedServices = new List<string> { "TestService" }
         });
+        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
+        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
+    }
 
-        var calls = 0;
-        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(() =>
-            {
-                // First read sees it stopped (triggers restart); the post-restart recheck
-                // and subsequent reads see it running.
-                var running = System.Threading.Interlocked.Increment(ref calls) > 1;
-                return new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service",
-                    running ? "Running" : "Stopped", running);
-            });
+    private static ServiceStatus Status(string state, bool running) =>
+        new(DateTime.UtcNow, "TestService", "Test Service", state, running);
+
+    [Fact]
+    public async Task PollOnce_RunningService_ShouldStoreStatus()
+    {
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Running", true));
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddServiceStatus(It.Is<ServiceStatus>(st => st.IsRunning)), Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task PollOnce_StoppedService_ShouldAttemptRestart()
+    {
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Stopped", false));
         _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(2000);
-        await worker.StopAsync(CancellationToken.None);
+        _serviceManager.Verify(s => s.RestartService("TestService", It.IsAny<TimeSpan>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_StoppedService_ShouldLogDownIncident()
+    {
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Stopped", false));
+        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i =>
-            i.Type == IncidentType.ServiceRestarted &&
-            i.Description.Contains("Test Service"))), Times.AtLeastOnce);
+            i.Type == IncidentType.ServiceDown && i.Description.Contains("Test Service"))), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_NoWatchedServices_ShouldNotQueryServices()
+    public async Task PollOnce_RestartThatStaysUp_ShouldLogRestartedIncident()
     {
-        _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions
-        {
-            PollIntervalSeconds = 1,
-            RestartTimeoutSeconds = 1,
-            WatchedServices = new List<string>()
-        });
+        // First read sees it stopped (triggers restart); the recheck sees it running.
+        var calls = 0;
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
+            .Returns(() => System.Threading.Interlocked.Increment(ref calls) > 1
+                ? Status("Running", true)
+                : Status("Stopped", false));
+        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i =>
+            i.Type == IncidentType.ServiceRestarted && i.Description.Contains("Test Service"))), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_RestartThatImmediatelyDies_DoesNotReportSuccess()
+    {
+        // Reaches Running once but the stabilisation recheck still sees it stopped: a crash loop.
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Stopped", false));
+        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(true);
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i => i.Type == IncidentType.ServiceRestarted)), Times.Never);
+    }
+
+    [Fact]
+    public async Task PollOnce_NoWatchedServices_ShouldNotQueryServices()
+    {
+        _options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions { WatchedServices = new List<string>() });
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _serviceManager.Verify(s => s.GetServiceStatus(It.IsAny<string>()), Times.Never);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_StoppedService_ShouldLogDownIncident()
-    {
-        _serviceManager.Setup(s => s.GetServiceStatus("TestService"))
-            .Returns(
-                new ServiceStatus(DateTime.UtcNow, "TestService", "Test Service", "Stopped", false)
-            );
-        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>()))
-            .Returns(true);
-
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(2000);
-        await worker.StopAsync(CancellationToken.None);
-
-        _metricsStore.Verify(
-            s => s.AddIncident(
-                It.Is<Incident>(i =>
-                    i.Type == IncidentType.ServiceDown
-                    && i.Description.Contains("Test Service")
-                )
-            ),
-            Times.AtLeastOnce
-        );
     }
 
     private ServiceMonitorWorker CreateWorker() => new(
@@ -164,5 +121,6 @@ public class ServiceMonitorWorkerTests
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
         _reportingOptions.Object,
+        TimeProvider.System,
         _logger.Object);
 }

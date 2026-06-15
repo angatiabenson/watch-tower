@@ -1,6 +1,6 @@
-using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Moq;
 using WatchTower.Configuration;
 using WatchTower.Models;
@@ -17,6 +17,7 @@ public class NetworkMonitorWorkerTests
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IOptionsMonitor<NetworkMonitorOptions>> _options = new();
     private readonly Mock<IOptionsMonitor<ReportingOptions>> _reportingOptions = new();
+    private readonly FakeTimeProvider _time = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
     private readonly Mock<ILogger<NetworkMonitorWorker>> _logger = new();
 
     public NetworkMonitorWorkerTests()
@@ -26,73 +27,42 @@ public class NetworkMonitorWorkerTests
             PollIntervalSeconds = 1,
             OutputQueueWarningThreshold = 0.0
         });
-
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions
-        {
-            EmergencyCooldownSeconds = 300
-        });
+        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
+        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
     }
 
     [Fact]
-    public async Task ExecuteAsync_ShouldStoreNetworkMetrics()
+    public async Task PollOnce_ShouldStoreNetworkMetrics()
     {
-        var metrics = new List<NetworkMetric>
-        {
-            new(DateTime.UtcNow, "Ethernet", 0)
-        };
-        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Returns(metrics);
+        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Returns(new List<NetworkMetric> { new(_time.GetUtcNow().UtcDateTime, "Ethernet", 0) });
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
-
-        _metricsStore.Verify(s => s.AddNetworkMetric(It.IsAny<NetworkMetric>()), Times.AtLeastOnce);
+        _metricsStore.Verify(s => s.AddNetworkMetric(It.IsAny<NetworkMetric>()), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_QueueZero_ShouldNotSendEmail()
+    public async Task PollOnce_QueueZero_ShouldNotSendEmail()
     {
-        var metrics = new List<NetworkMetric>
-        {
-            new(DateTime.UtcNow, "Ethernet", 0)
-        };
-        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Returns(metrics);
+        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Returns(new List<NetworkMetric> { new(_time.GetUtcNow().UtcDateTime, "Ethernet", 0) });
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
-    public async Task ExecuteAsync_QueueAboveThreshold_ShouldSendEmergencyEmail()
+    public async Task PollOnce_QueueAboveThreshold_ShouldSendEmergencyEmail()
     {
-        var metrics = new List<NetworkMetric>
-        {
-            new(DateTime.UtcNow, "Ethernet", 5)
-        };
-        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Returns(metrics);
-        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
-        _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
+        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Returns(new List<NetworkMetric> { new(_time.GetUtcNow().UtcDateTime, "Ethernet", 5) });
 
-        var worker = CreateWorker();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        await worker.StartAsync(cts.Token);
-        await Task.Delay(1500);
-        await worker.StopAsync(CancellationToken.None);
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
 
         _emailService.Verify(e => e.SendEmailAsync(
-            It.Is<string>(s => s.Contains("Network Saturated")),
-            It.IsAny<string>(),
-            It.IsAny<CancellationToken>()), Times.AtLeastOnce);
+            It.Is<string>(s => s.Contains("Network Saturated")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     private NetworkMonitorWorker CreateWorker() => new(
@@ -103,5 +73,6 @@ public class NetworkMonitorWorkerTests
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
         _reportingOptions.Object,
+        _time,
         _logger.Object);
 }
