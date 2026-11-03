@@ -86,6 +86,52 @@ public class EnrollmentCodeTests
     }
 }
 
+public class PortalContractTests
+{
+    [Fact]
+    public void Enrollment_AlwaysSelectsTheHttpsJsonTransport()
+    {
+        // The portal only serves the HTTPS/JSON agent API; an agent left on gRPC would fail silently.
+        var patch = new EnrollmentCode("http://portal.corp.local:8080", "a", "t", false).ToSettingsPatch();
+
+        patch["VisibilityPortal"]!["Protocol"]!.GetValue<string>().Should().Be("Https");
+    }
+
+    [Theory]
+    [InlineData("https://host.example/watchtower")]
+    [InlineData("https://host.example/watchtower/")]
+    public async Task BaseUrlWithAPathPrefix_IsJoinedUnderThatPrefix(string baseUrl)
+    {
+        var handler = new CapturingHandler();
+        var options = new WatchTower.Configuration.PortalOptions { BaseUrl = baseUrl, AgentId = "a", AgentToken = "t" };
+        var client = new WatchTower.Portal.Clients.HttpsPortalClient(
+            new SingleClientFactory(handler),
+            Moq.Mock.Of<Microsoft.Extensions.Options.IOptionsMonitor<WatchTower.Configuration.PortalOptions>>(m => m.CurrentValue == options),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<WatchTower.Portal.Clients.HttpsPortalClient>.Instance);
+
+        await client.SendMetricsBatchAsync(
+            new MetricsBatchDto("a", "b", "now", [], [], [], [], [], [], []), TestContext.Current.CancellationToken);
+
+        handler.LastUri!.AbsoluteUri.Should().Be("https://host.example/watchtower/api/v1/agent/metrics/batch");
+    }
+
+    private sealed class CapturingHandler : HttpMessageHandler
+    {
+        public Uri? LastUri { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            LastUri = request.RequestUri;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
+    }
+
+    private sealed class SingleClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+    }
+}
+
 public class AgentTelemetryWireTests
 {
     [Fact]

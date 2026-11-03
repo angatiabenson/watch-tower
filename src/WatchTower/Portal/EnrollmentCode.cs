@@ -76,6 +76,8 @@ public sealed record EnrollmentCode(string Url, string AgentId, string Token, bo
         ["VisibilityPortal"] = new JsonObject
         {
             ["Enabled"] = true,
+            // Portals pair agents over the HTTPS/JSON transport; never leave an agent on gRPC.
+            ["Protocol"] = "Https",
             ["BaseUrl"] = Url,
             ["AgentId"] = AgentId,
             ["AgentToken"] = Token,

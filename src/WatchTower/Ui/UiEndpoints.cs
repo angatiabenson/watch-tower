@@ -116,6 +116,7 @@ public static class UiEndpoints
             var changes = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.OrdinalIgnoreCase)
             {
                 ["VisibilityPortal:Enabled"] = System.Text.Json.JsonSerializer.SerializeToElement(true),
+                ["VisibilityPortal:Protocol"] = System.Text.Json.JsonSerializer.SerializeToElement("Https"),
                 ["VisibilityPortal:BaseUrl"] = System.Text.Json.JsonSerializer.SerializeToElement(code.Url),
                 ["VisibilityPortal:AgentId"] = System.Text.Json.JsonSerializer.SerializeToElement(code.AgentId),
                 ["VisibilityPortal:AgentToken"] = System.Text.Json.JsonSerializer.SerializeToElement(code.Token),
