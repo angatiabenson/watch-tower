@@ -42,7 +42,10 @@ public sealed class UpdateWorker(
     {
         if (updates.CountdownElapsed())
         {
-            updates.TryInstallNow(out var message);
+            // A transient refusal (a check in progress) is retried next second; a permanent one
+            // (e.g. console mode) cancels the countdown instead of retrying forever.
+            if (!updates.TryInstallNow(out var message) && !updates.GetStatus().CanInstall)
+                updates.CancelCountdown();
             logger.LogInformation("{Message}", message);
             return;
         }

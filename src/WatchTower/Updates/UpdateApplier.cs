@@ -87,7 +87,7 @@ public sealed class UpdateApplier
             BackUp();
             backedUp = true;
 
-            CopyDirectory(r.SourceDirectory, r.TargetDirectory, retries: 10);
+            InstallPackage(r.SourceDirectory, r.TargetDirectory, retries: 10);
             Log("New files copied");
 
             var beacon = HealthBeacon.PathFor(r.Paths);
@@ -102,9 +102,11 @@ public sealed class UpdateApplier
             }
 
             Log("The new version did not report healthy in time; rolling back");
-            await RollBackAsync();
-            return Finish(false, $"Version {r.ToVersion} did not start correctly, so {r.FromVersion} was restored. " +
-                                 "See Logs/update-*.log for details.");
+            return await RollBackAsync()
+                ? Finish(false, $"Version {r.ToVersion} did not start correctly, so {r.FromVersion} was restored. " +
+                                "See Logs/update-*.log for details.")
+                : Finish(false, $"Version {r.ToVersion} did not start correctly. {r.FromVersion} was restored but " +
+                                "has not reported healthy yet; check the service and Logs/update-*.log.");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException
                                        or System.ServiceProcess.TimeoutException or System.ComponentModel.Win32Exception)
@@ -114,7 +116,9 @@ public sealed class UpdateApplier
             {
                 try
                 {
-                    await RollBackAsync();
+                    if (!await RollBackAsync())
+                        return Finish(false, $"The update to {r.ToVersion} failed ({ex.Message}). {r.FromVersion} was " +
+                                             "restored but has not reported healthy yet; check the service.");
                 }
                 catch (Exception rollbackError) when (rollbackError is IOException or UnauthorizedAccessException
                                                           or InvalidOperationException or System.ServiceProcess.TimeoutException)
@@ -184,7 +188,8 @@ public sealed class UpdateApplier
         Log($"Backed up {_request.FromVersion} to {BackupDirectory}");
     }
 
-    private async Task RollBackAsync()
+    /// <summary>Restores the backup and returns whether the restored version reported healthy.</summary>
+    private async Task<bool> RollBackAsync()
     {
         Log("Rolling back");
         try { await StopServiceAsync(); }
@@ -195,8 +200,44 @@ public sealed class UpdateApplier
         // Restore the exact previous file set: files the failed release ADDED (e.g. a new
         // appsettings.Production.json) would otherwise survive and break the restored version.
         MirrorDirectory(BackupDirectory, _request.TargetDirectory, retries: 10);
+
+        var beacon = HealthBeacon.PathFor(_request.Paths);
+        if (File.Exists(beacon))
+            Try(() => File.Delete(beacon));
         await StartServiceAsync();
-        Log("Rollback complete");
+
+        var healthy = await WaitForHealthAsync(_request.FromVersion);
+        Log(healthy ? "Rollback complete; the previous version is healthy" : "Rollback done, but the previous version has not reported healthy");
+        return healthy;
+    }
+
+    private const string PackageListFile = ".watchtower-files";
+
+    /// <summary>
+    /// Copies the new package over the install folder, then deletes files that belonged to the
+    /// PREVIOUS package but not to the new one (tracked in <c>.watchtower-files</c>). Files the
+    /// package never shipped — data from very old installs, operator files — are never touched.
+    /// </summary>
+    internal static void InstallPackage(string source, string target, int retries)
+    {
+        var listPath = Path.Combine(target, PackageListFile);
+        var previous = File.Exists(listPath) ? File.ReadAllLines(listPath) : [];
+
+        CopyDirectory(source, target, retries);
+
+        var current = Directory.GetFiles(source, "*", SearchOption.AllDirectories)
+            .Select(f => Path.GetRelativePath(source, f))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var relative in previous.Where(p => p.Length > 0 && !current.Contains(p)))
+        {
+            var full = Path.GetFullPath(Path.Combine(target, relative));
+            // Never follow a crafted list outside the install folder.
+            if (full.StartsWith(Path.GetFullPath(target).TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(full))
+                File.Delete(full);
+        }
+
+        File.WriteAllLines(listPath, current.Order(StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>Makes <paramref name="target"/> identical to <paramref name="source"/> (copy + delete extras).</summary>
@@ -218,14 +259,16 @@ public sealed class UpdateApplier
         }
     }
 
-    private async Task<bool> WaitForHealthAsync()
+    private Task<bool> WaitForHealthAsync() => WaitForHealthAsync(_request.ToVersion);
+
+    private async Task<bool> WaitForHealthAsync(string version)
     {
         var deadline = DateTime.UtcNow + _request.HealthTimeout;
         while (DateTime.UtcNow < deadline)
         {
             await _delay(TimeSpan.FromSeconds(2));
             var health = HealthBeacon.Read(_request.Paths);
-            if (health is null || !string.Equals(health.Version, _request.ToVersion, StringComparison.OrdinalIgnoreCase))
+            if (health is null || !string.Equals(health.Version, version, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             // Healthy once started — and still running a little later (no crash loop).
@@ -235,7 +278,7 @@ public sealed class UpdateApplier
                 Log($"Version {health.Version} is running (pid {health.ProcessId})");
                 return true;
             }
-            Log("The new version started but did not stay up");
+            Log($"Version {version} started but did not stay up");
             return false;
         }
         return false;

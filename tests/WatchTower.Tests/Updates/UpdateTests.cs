@@ -227,7 +227,7 @@ public class UpdateServiceTests : IDisposable
     public async Task Install_IsRefusedOutsideAWindowsService()
     {
         _http.Json(_options.FeedUrl, UpdateFeedClientTests.Manifest("9.0.0", Sha(_package)));
-        var service = CreateService();
+        var service = CreateService(asWindowsService: false);
         await service.CheckAsync(Ct);
         service.TryStartDownload(countdown: false, out _);
         await WaitForAsync(service, s => s.Phase == UpdatePhase.ReadyToInstall);
@@ -266,10 +266,10 @@ public class UpdateServiceTests : IDisposable
         service.GetStatus().LastResult!.ToVersion.Should().Be("1.1.0");
     }
 
-    private UpdateService CreateService()
+    private UpdateService CreateService(bool asWindowsService = true)
     {
         var monitor = Mock.Of<IOptionsMonitor<UpdateOptions>>(m => m.CurrentValue == _options);
-        var agent = new AgentInfo(_dir.Paths, _time);
+        var agent = new AgentInfo(_dir.Paths, _time) { IsWindowsService = asWindowsService };
         return new UpdateService(
             new UpdateFeedClient(_http.Factory(), NullLogger<UpdateFeedClient>.Instance),
             _http.Factory(), monitor, _dir.Paths, agent, new InstanceIdentity("WatchTowerTest"), _time,

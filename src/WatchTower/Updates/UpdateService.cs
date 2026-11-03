@@ -139,10 +139,20 @@ public sealed class UpdateService
                     _available = manifest;
                     _phase = alreadyStaged ? UpdatePhase.ReadyToInstall : UpdatePhase.Available;
                     if (!alreadyStaged) _stagedDirectory = null;
+
+                    // Offered, but not installable automatically: explain why instead of failing later.
+                    _blockedReason = BlockedReason(manifest);
+                    if (_blockedReason is not null)
+                    {
+                        _error = _blockedReason;
+                        _stagedDirectory = null;
+                        _phase = UpdatePhase.Available;
+                    }
                 }
                 else
                 {
                     _available = null;
+                    _blockedReason = null;
                     _stagedDirectory = null;
                     _phase = UpdatePhase.UpToDate;
                 }
@@ -182,6 +192,11 @@ public sealed class UpdateService
             if (manifest is null)
             {
                 message = "No update is available. Check for updates first.";
+                return false;
+            }
+            if (_blockedReason is not null)
+            {
+                message = _blockedReason;
                 return false;
             }
             if (_phase == UpdatePhase.ReadyToInstall)
@@ -447,8 +462,29 @@ public sealed class UpdateService
         return (true, null);
     }
 
+    /// <summary>Newest manifest schema this version understands.</summary>
+    internal const int SupportedManifestSchema = 1;
+
+    private string? _blockedReason;
+
+    /// <summary>Why <paramref name="manifest"/> cannot be installed automatically, or null.</summary>
+    internal static string? BlockedReason(UpdateManifest manifest)
+    {
+        if (manifest.Schema > SupportedManifestSchema)
+            return $"WatchTower {manifest.Version} uses a newer release format than this version understands. " +
+                   "Install it manually from the release page.";
+        if (!string.IsNullOrWhiteSpace(manifest.MinimumVersion) &&
+            SemanticVersion.TryParse(manifest.MinimumVersion, out var minimum) && CurrentVersion < minimum)
+            return $"WatchTower {manifest.Version} can only be installed over version {minimum} or later " +
+                   $"(this server runs {CurrentVersion}). Upgrade to {minimum} first, or install manually.";
+        return null;
+    }
+
     private void StartCountdownLocked()
     {
+        // No countdown when nothing could be installed at the end of it (e.g. console mode).
+        if (!_agent.IsWindowsService)
+            return;
         var seconds = Math.Clamp(_options.CurrentValue.RestartCountdownSeconds, 5, 3600);
         _restartAt = _time.GetUtcNow().AddSeconds(seconds);
         _logger.LogInformation("WatchTower will restart to install {Version} in {Seconds}s", _available?.Version, seconds);
@@ -531,7 +567,9 @@ public sealed class UpdateService
                 {
                     _available = available;
                     _phase = UpdatePhase.Available;
-                    if (state.StagedDirectory is { } staged && Directory.Exists(staged))
+                    _blockedReason = BlockedReason(available);
+                    _error = _blockedReason;
+                    if (_blockedReason is null && state.StagedDirectory is { } staged && Directory.Exists(staged))
                     {
                         _stagedDirectory = staged;
                         _phase = UpdatePhase.ReadyToInstall;
