@@ -19,7 +19,7 @@
   /* Text (warm off-white) */
   --fg-1: #F2EFEA;
   --fg-2: #B8B3A8;
-  --fg-3: #7A766E;
+  --fg-3: #8F8A81;
   --fg-dim: #4A4843;
 
   /* Brand — WatchTower Green (emerald). 7.4–7.8:1 on dark surfaces. */
@@ -55,7 +55,7 @@
 
   --fg-1: #1A1714;
   --fg-2: #3D3A36;
-  --fg-3: #6B6762;
+  --fg-3: #625E59;
   --fg-dim: #A8A49E;
 
   /* Deep emerald for light surfaces. 4.6–5.3:1 on light surfaces; white on it 5.5:1 */
