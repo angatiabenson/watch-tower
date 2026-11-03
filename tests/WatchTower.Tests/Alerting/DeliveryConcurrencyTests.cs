@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
 using Moq;
@@ -8,6 +9,8 @@ using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 using WatchTower.Services.Alerting;
+using WatchTower.Tests.Hosting;
+using WatchTower.Workers;
 
 namespace WatchTower.Tests.Alerting;
 
@@ -218,6 +221,123 @@ public class DeliveryConcurrencyTests
         }
     }
 
+    // ── Shutdown while a channel is still sending ──────────────────────────
+
+    /// <summary>
+    /// Webhook sender whose channel <c>fast</c> delivers at once and whose channel <c>slow</c>
+    /// waits for <see cref="SlowResult"/> (or the dispatch's cancellation).
+    /// </summary>
+    private sealed class TwoSpeedSender : INotificationChannel
+    {
+        private readonly Dictionary<string, int> _sends = new(StringComparer.OrdinalIgnoreCase);
+
+        public TaskCompletionSource SlowEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes the slow channel's sends; never completed means it hangs until cancelled.</summary>
+        public TaskCompletionSource<ChannelSendResult> SlowResult { get; set; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public NotificationChannelType Type => NotificationChannelType.Webhook;
+
+        public bool IsAvailable(NotificationChannel channel) => true;
+
+        public int Sends(string channel)
+        {
+            lock (_sends)
+                return _sends.GetValueOrDefault(channel);
+        }
+
+        public async Task<ChannelSendResult> SendAsync(NotificationChannel channel, AlertNotification notification, CancellationToken ct)
+        {
+            lock (_sends)
+                _sends[channel.Name] = _sends.GetValueOrDefault(channel.Name) + 1;
+            if (channel.Name == "fast")
+                return ChannelSendResult.Ok();
+            SlowEntered.TrySetResult();
+            return await SlowResult.Task.WaitAsync(ct);
+        }
+    }
+
+    private static NotificationDispatcher TwoSpeedDispatcher(TwoSpeedSender sender) => new(
+        [sender],
+        new TestOptionsMonitor<NotificationOptions>(new NotificationOptions
+        {
+            Email = new EmailNotificationSettings { Enabled = false },
+            TimeoutSeconds = 120, // the shutdown, not the channel timeout, cuts the slow send short
+            Channels =
+            [
+                new NotificationChannelOptions { Name = "fast", Type = "Webhook", Url = "https://example.org/fast" },
+                new NotificationChannelOptions { Name = "slow", Type = "Webhook", Url = "https://example.org/slow" },
+            ],
+        }),
+        NullLogger<NotificationDispatcher>.Instance);
+
+    private AlertManager Persistent(string dbPath, INotificationDispatcher dispatcher) =>
+        TestAlerts.Create(_metrics.Object, _time, dispatcher, state: new SqliteAlertStateStore(dbPath), maintenance: _maintenance);
+
+    [Fact]
+    public async Task ShutdownDuringASend_KeepsTheChannelsThatDelivered_AndARestartDoesNotResendThem()
+    {
+        // The reviewer's probe: one channel delivered, the other is still sending when the
+        // graceful shutdown cancels the dispatch.
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var sender = new TwoSpeedSender();
+        var alerts = Persistent(dir.Paths.DatabasePath, TwoSpeedDispatcher(sender));
+        using var shutdown = new CancellationTokenSource();
+
+        var raising = alerts.RaiseAsync(Key, AlertSeverity.Critical, "Down", Down(), shutdown.Token);
+        await sender.SlowEntered.Task.Bounded();
+        await shutdown.CancelAsync();
+        var act = () => raising.Bounded();
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        var persisted = new SqliteAlertStateStore(dir.Paths.DatabasePath);
+        persisted.LoadDeliveries().Should().ContainSingle().Which.DeliveredChannels.Should().Equal("fast");
+        persisted.LoadAll().Single().NotifyCount.Should().Be(1, "the alert reached an operator before the shutdown");
+
+        // New process: the slow channel answers this time.
+        sender.SlowResult.SetResult(ChannelSendResult.Ok());
+        var restarted = Persistent(dir.Paths.DatabasePath, TwoSpeedDispatcher(sender));
+        await restarted.ProcessPendingAsync(Ct).Bounded();
+
+        sender.Sends("fast").Should().Be(1, "a channel that acknowledged the notice never gets it again");
+        sender.Sends("slow").Should().Be(2);
+        restarted.GetPendingDeliveries().Should().BeEmpty();
+        new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Should().BeEmpty();
+        restarted.GetOpenAlerts().Single().NotifyCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task DeliveryWorkerStoppedDuringASend_StopsPromptly_AndKeepsTheChannelsThatDelivered()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var sender = new TwoSpeedSender();
+        var alerts = Persistent(dir.Paths.DatabasePath, TwoSpeedDispatcher(sender));
+        _maintenance.Active = true;
+        await Raise(alerts); // held
+        _maintenance.Active = false;
+
+        using var worker = new NotificationDeliveryWorker(alerts, _time, NullLogger<NotificationDeliveryWorker>.Instance);
+        await worker.StartAsync(Ct);
+        await sender.SlowEntered.Task.Bounded();
+        await worker.StopAsync(Ct).Bounded(); // no deadlock with the in-flight send
+
+        var pending = new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Should().ContainSingle().Subject;
+        pending.DeliveredChannels.Should().Equal("fast");
+        pending.Held.Should().BeFalse("it was released when the window ended");
+
+        sender.SlowResult = new TaskCompletionSource<ChannelSendResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sender.SlowResult.SetResult(ChannelSendResult.Ok());
+        var restarted = Persistent(dir.Paths.DatabasePath, TwoSpeedDispatcher(sender));
+        await restarted.ProcessPendingAsync(Ct).Bounded();
+
+        sender.Sends("fast").Should().Be(1);
+        sender.Sends("slow").Should().Be(2);
+        restarted.GetPendingDeliveries().Should().BeEmpty();
+    }
+
     /// <summary>Delivers to <c>ch1</c> after yielding, so sends overlap with the caller's next step.</summary>
     private sealed class AutoDispatcher : INotificationDispatcher
     {
@@ -232,12 +352,16 @@ public class DeliveryConcurrencyTests
             }
         }
 
-        public async Task<DispatchResult> DispatchAsync(AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
+        public async Task<DispatchResult> DispatchAsync(
+            AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted,
+            CancellationToken ct)
         {
             lock (_sent)
                 _sent.Add(notification);
             await Task.Yield();
-            return new DispatchResult([new ChannelDelivery("ch1", true, "Delivered")]);
+            var delivery = new ChannelDelivery("ch1", true, "Delivered");
+            onChannelCompleted?.Invoke(delivery);
+            return new DispatchResult([delivery]);
         }
     }
 }

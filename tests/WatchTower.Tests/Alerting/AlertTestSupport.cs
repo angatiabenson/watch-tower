@@ -109,7 +109,16 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
         }
     }
 
-    public Task<DispatchResult> DispatchAsync(AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
+    public Task<DispatchResult> DispatchAsync(
+        AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted, CancellationToken ct)
+    {
+        var results = DispatchCore(notification, skipChannels);
+        foreach (var result in results)
+            onChannelCompleted?.Invoke(result);
+        return Task.FromResult(new DispatchResult(results));
+    }
+
+    private List<ChannelDelivery> DispatchCore(AlertNotification notification, IReadOnlySet<string>? skipChannels)
     {
         var results = new List<ChannelDelivery>();
         lock (_sent)
@@ -126,7 +135,7 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
                     _delivered.Add((name, notification));
             }
         }
-        return Task.FromResult(new DispatchResult(results));
+        return results;
     }
 }
 
@@ -151,9 +160,10 @@ internal sealed class GatedDispatcher : INotificationDispatcher
         }
     }
 
-    public Task<DispatchResult> DispatchAsync(AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
+    public Task<DispatchResult> DispatchAsync(
+        AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted, CancellationToken ct)
     {
-        var call = new GatedCall(notification, skipChannels);
+        var call = new GatedCall(notification, skipChannels, onChannelCompleted);
         lock (_sent)
             _sent.Add(notification);
         ct.Register(() => call.Result.TrySetCanceled(ct));
@@ -180,7 +190,8 @@ internal static class BoundedWait
 }
 
 /// <summary>One dispatch held by <see cref="GatedDispatcher"/>.</summary>
-internal sealed class GatedCall(AlertNotification notification, IReadOnlySet<string>? skipChannels)
+internal sealed class GatedCall(
+    AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted)
 {
     public AlertNotification Notification { get; } = notification;
     public IReadOnlySet<string>? SkipChannels { get; } = skipChannels;
@@ -188,12 +199,19 @@ internal sealed class GatedCall(AlertNotification notification, IReadOnlySet<str
     public TaskCompletionSource<DispatchResult> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>Completes the send: every named channel delivered it.</summary>
-    public void Deliver(params string[] channels) =>
-        Result.SetResult(new DispatchResult(channels.Select(c => new ChannelDelivery(c, true, "Delivered")).ToList()));
+    public void Deliver(params string[] channels) => Complete(channels.Select(c => new ChannelDelivery(c, true, "Delivered")));
 
     /// <summary>Completes the send: every named channel failed.</summary>
     public void Fail(params string[] channels) =>
-        Result.SetResult(new DispatchResult(channels.Select(c => new ChannelDelivery(c, false, "Rejected with HTTP 503")).ToList()));
+        Complete(channels.Select(c => new ChannelDelivery(c, false, "Rejected with HTTP 503")));
+
+    private void Complete(IEnumerable<ChannelDelivery> outcomes)
+    {
+        var list = outcomes.ToList();
+        foreach (var outcome in list)
+            onChannelCompleted?.Invoke(outcome);
+        Result.SetResult(new DispatchResult(list));
+    }
 }
 
 internal static class TestAlerts

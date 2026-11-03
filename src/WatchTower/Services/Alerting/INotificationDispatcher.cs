@@ -8,9 +8,16 @@ public interface INotificationDispatcher
     /// <paramref name="skipChannels"/> (channels that already received it) and reports the outcome
     /// per channel. No channels in the result means none is configured or available for it.
     /// Never throws for channel failures.
+    /// <paramref name="onChannelCompleted"/> is invoked as soon as each channel has its outcome,
+    /// before the slower channels finish, and also when <paramref name="ct"/> later cancels the
+    /// dispatch (a channel cut off by the cancellation reports nothing), so a caller can record
+    /// what was delivered even if the whole dispatch never completes. It must not throw.
     /// </summary>
     Task<DispatchResult> DispatchAsync(
-        AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct);
+        AlertNotification notification,
+        IReadOnlySet<string>? skipChannels,
+        Action<ChannelDelivery>? onChannelCompleted,
+        CancellationToken ct);
 }
 
 /// <summary>Outcome of one channel for one notification. <paramref name="Message"/> has no URLs or secrets.</summary>

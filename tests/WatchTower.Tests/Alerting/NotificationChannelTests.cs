@@ -110,14 +110,14 @@ public class NotificationChannelTests
         };
         var dispatcher = Dispatcher(options, email, teams, slack);
 
-        var warning = await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Warning), null, Ct);
+        var warning = await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Warning), null, null, Ct);
         warning.Channels.Select(c => (c.Channel, c.Success)).Should().BeEquivalentTo([("email", false), ("teams", true)]);
         warning.Failed.Single().Message.Should().Be("Failed (InvalidOperationException)");
         email.Calls.Should().ContainSingle();
         teams.Calls.Should().ContainSingle();
         slack.Calls.Should().BeEmpty("Warning is below Slack's Critical minimum");
 
-        var critical = await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Critical), null, Ct);
+        var critical = await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Critical), null, null, Ct);
         critical.Delivered.Should().BeEquivalentTo("teams", "slack");
         critical.Failed.Select(f => f.Channel).Should().Equal("email");
     }
@@ -129,7 +129,7 @@ public class NotificationChannelTests
         var teams = new FakeChannel(NotificationChannelType.Teams, _ => Task.FromResult(ChannelSendResult.Ok()));
         var dispatcher = Dispatcher(new NotificationOptions { Teams = new WebhookNotificationSettings { Url = SecretUrl } }, email, teams);
 
-        var result = await dispatcher.DispatchAsync(Notification(), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "EMAIL" }, Ct);
+        var result = await dispatcher.DispatchAsync(Notification(), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "EMAIL" }, null, Ct);
 
         result.Channels.Should().ContainSingle().Which.Channel.Should().Be("teams");
         email.Calls.Should().BeEmpty();
@@ -137,11 +137,43 @@ public class NotificationChannelTests
     }
 
     [Fact]
+    public async Task Dispatch_ReportsEachChannelAsItCompletes_EvenWhenCancelledWhileAnotherIsSending()
+    {
+        var slowEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var email = new FakeChannel(NotificationChannelType.Email, _ => Task.FromResult(ChannelSendResult.Ok()));
+        var slack = new FakeChannel(NotificationChannelType.Slack, async ct =>
+        {
+            slowEntered.TrySetResult();
+            await Task.Delay(Timeout.Infinite, ct);
+            return ChannelSendResult.Ok();
+        });
+        var options = new NotificationOptions { TimeoutSeconds = 120, Slack = new WebhookNotificationSettings { Url = SecretUrl } };
+        var reported = new List<ChannelDelivery>();
+        using var shutdown = new CancellationTokenSource();
+
+        var dispatch = Dispatcher(options, email, slack).DispatchAsync(Notification(), null, c =>
+        {
+            lock (reported)
+                reported.Add(c);
+        }, shutdown.Token);
+        await slowEntered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+
+        lock (reported)
+            reported.Should().ContainSingle().Which.Should().Be(new ChannelDelivery("email", true, "Delivered"),
+                "email is reported while Slack is still sending");
+        await shutdown.CancelAsync();
+        var act = () => dispatch.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        lock (reported)
+            reported.Select(c => c.Channel).Should().Equal(["email"], "a channel cut off by the shutdown reports nothing");
+    }
+
+    [Fact]
     public async Task Dispatch_UnavailableChannelsAreNotCounted()
     {
         var email = new FakeChannel(NotificationChannelType.Email, _ => Task.FromResult(ChannelSendResult.Ok())) { Available = false };
 
-        (await Dispatcher(new NotificationOptions(), email).DispatchAsync(Notification(), null, Ct)).Channels.Should().BeEmpty();
+        (await Dispatcher(new NotificationOptions(), email).DispatchAsync(Notification(), null, null, Ct)).Channels.Should().BeEmpty();
         email.Calls.Should().BeEmpty();
     }
 

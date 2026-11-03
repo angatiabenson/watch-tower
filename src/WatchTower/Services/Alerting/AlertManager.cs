@@ -548,12 +548,31 @@ public sealed class AlertManager : IAlertManager
         {
             var notification = delivery.Notification;
             var skip = new HashSet<string>(delivery.DeliveredChannels, StringComparer.OrdinalIgnoreCase);
+            var reached = delivery.DeliveredChannels.Count > 0; // guarded by _gate
+
+            // Each channel that delivers is recorded right away, so a dispatch cut short (e.g. by
+            // a graceful shutdown waiting on a slow channel) never loses, or later repeats, it.
+            void OnChannelCompleted(ChannelDelivery channel)
+            {
+                if (!channel.Success)
+                    return;
+                try
+                {
+                    lock (_gate)
+                        RecordDeliveredLocked(delivery, channel.Channel, ref reached);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Could not record that the {Kind} notification for alert {Key} reached {Channel}",
+                        notification.Kind, notification.AlertKey, channel.Channel);
+                }
+            }
 
             DispatchResult result;
             string? error = null;
             try
             {
-                result = await _dispatcher.DispatchAsync(notification, skip, ct);
+                result = await _dispatcher.DispatchAsync(notification, skip, OnChannelCompleted, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -564,67 +583,30 @@ public sealed class AlertManager : IAlertManager
             }
 
             var now = UtcNow;
-            var delivered = delivery.DeliveredChannels.Concat(result.Delivered)
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             var failed = result.Failed.ToList();
             if (error is null && failed.Count > 0)
                 error = string.Join("; ", failed.Select(f => $"{f.Channel}: {f.Message}"));
             var firstAttempt = delivery.FirstAttemptAt ?? now;
 
-            // Counted as notified once it actually reached a channel, not when it was attempted.
-            if (delivery.DeliveredChannels.Count == 0 && delivered.Count > 0 && delivery.IsAboutOpenAlert)
-                MarkNotified(notification, now);
-
-            PendingDelivery? next;
-            if (error is not null)
-            {
-                var attempts = delivery.FailedAttempts + 1;
-                if (!delivery.IsAboutOpenAlert && now - firstAttempt >= NotificationRetryPolicy.GiveUpAfter)
-                {
-                    _logger.LogError("Giving up on the {Kind} notification for {Key} after {Attempts} failed attempts: {Error}",
-                        notification.Kind, notification.AlertKey, attempts, error);
-                    next = null;
-                }
-                else
-                {
-                    var retryAt = now + NotificationRetryPolicy.Backoff(attempts);
-                    _logger.LogWarning("{Kind} notification for {Key} not delivered everywhere (attempt {Attempts}); retrying at {RetryAt:O}: {Error}",
-                        notification.Kind, notification.AlertKey, attempts, retryAt, error);
-                    next = delivery with
-                    {
-                        DeliveredChannels = delivered,
-                        FailedAttempts = attempts,
-                        FirstAttemptAt = firstAttempt,
-                        NextAttemptAt = retryAt,
-                        LastError = error,
-                    };
-                }
-            }
-            else if (result.Channels.Count == 0 && delivered.Count == 0 && delivery.IsAboutOpenAlert)
-            {
-                // No channel is configured or available for it yet: the alert stays pending and is
-                // offered again at the next opportunity. Other notices are not worth keeping.
-                next = delivery with { FirstAttemptAt = firstAttempt, NextAttemptAt = now };
-            }
-            else
-            {
-                next = null; // every eligible channel has it
-            }
-
             lock (_gate)
             {
-                var deliveries = Deliveries();
-                if (!deliveries.ContainsKey(delivery.Id))
-                    return; // superseded while it was being sent
+                // Channels a dispatcher reported only in its result (not as they completed).
+                foreach (var channel in result.Delivered)
+                    RecordDeliveredLocked(delivery, channel, ref reached);
+
+                // Superseded while it was being sent: the newer notice or the close owns the row.
+                if (Deliveries().GetValueOrDefault(delivery.Id) is not { } current)
+                    return;
+                var next = NextAttempt(current, result, error, firstAttempt, now);
                 if (next is null)
                 {
                     _store.DeleteDelivery(delivery.Id);
-                    deliveries.Remove(delivery.Id);
+                    Deliveries().Remove(delivery.Id);
                 }
                 else
                 {
                     _store.UpsertDelivery(next);
-                    deliveries[delivery.Id] = next;
+                    Deliveries()[delivery.Id] = next;
                 }
             }
         }
@@ -633,6 +615,66 @@ public sealed class AlertManager : IAlertManager
             // Only now: until its outcome is recorded, a close must treat it as being sent.
             Unclaim(delivery.Id);
         }
+    }
+
+    /// <summary>
+    /// Records that <paramref name="channel"/> has <paramref name="delivery"/> (persisted at once)
+    /// and, the first time an opened or reminder notice reaches any channel, counts the alert as
+    /// notified. A superseded delivery has no row left to update, but still counts.
+    /// </summary>
+    private void RecordDeliveredLocked(PendingDelivery delivery, string channel, ref bool reached)
+    {
+        // Counted as notified once it actually reached a channel, not when it was attempted.
+        if (!reached && delivery.IsAboutOpenAlert)
+            MarkNotified(delivery.Notification, UtcNow);
+        reached = true;
+
+        if (Deliveries().GetValueOrDefault(delivery.Id) is not { } current ||
+            current.DeliveredChannels.Contains(channel, StringComparer.OrdinalIgnoreCase))
+            return;
+        var updated = current with { DeliveredChannels = [.. current.DeliveredChannels, channel] };
+        _store.UpsertDelivery(updated);
+        Deliveries()[delivery.Id] = updated;
+    }
+
+    /// <summary>
+    /// What is left of <paramref name="current"/> (its delivered channels already recorded) after
+    /// an attempt: null once every eligible channel has it or retries are given up.
+    /// </summary>
+    private PendingDelivery? NextAttempt(
+        PendingDelivery current, DispatchResult result, string? error, DateTime firstAttempt, DateTime now)
+    {
+        var notification = current.Notification;
+        if (error is not null)
+        {
+            var attempts = current.FailedAttempts + 1;
+            if (!current.IsAboutOpenAlert && now - firstAttempt >= NotificationRetryPolicy.GiveUpAfter)
+            {
+                _logger.LogError("Giving up on the {Kind} notification for {Key} after {Attempts} failed attempts: {Error}",
+                    notification.Kind, notification.AlertKey, attempts, error);
+                return null;
+            }
+
+            var retryAt = now + NotificationRetryPolicy.Backoff(attempts);
+            _logger.LogWarning("{Kind} notification for {Key} not delivered everywhere (attempt {Attempts}); retrying at {RetryAt:O}: {Error}",
+                notification.Kind, notification.AlertKey, attempts, retryAt, error);
+            return current with
+            {
+                FailedAttempts = attempts,
+                FirstAttemptAt = firstAttempt,
+                NextAttemptAt = retryAt,
+                LastError = error,
+            };
+        }
+
+        if (result.Channels.Count == 0 && current.DeliveredChannels.Count == 0 && current.IsAboutOpenAlert)
+        {
+            // No channel is configured or available for it yet: the alert stays pending and is
+            // offered again at the next opportunity. Other notices are not worth keeping.
+            return current with { FirstAttemptAt = firstAttempt, NextAttemptAt = now };
+        }
+
+        return null; // every eligible channel has it
     }
 
     /// <summary>The open alert's notice reached its first channel: it now counts as notified.</summary>

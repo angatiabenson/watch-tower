@@ -19,7 +19,10 @@ public sealed class NotificationDispatcher(
         channels.ToDictionary(c => c.Type);
 
     public async Task<DispatchResult> DispatchAsync(
-        AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
+        AlertNotification notification,
+        IReadOnlySet<string>? skipChannels,
+        Action<ChannelDelivery>? onChannelCompleted,
+        CancellationToken ct)
     {
         var targets = Eligible(notification.Severity)
             .Where(t => skipChannels is null || !skipChannels.Contains(t.Channel.Name))
@@ -34,7 +37,11 @@ public sealed class NotificationDispatcher(
         var results = await Task.WhenAll(targets.Select(async t =>
         {
             var result = await SendAsync(t.Channel, t.Sender, notification, ct);
-            return new ChannelDelivery(t.Channel.Name, result.Success, result.Message);
+            var delivery = new ChannelDelivery(t.Channel.Name, result.Success, result.Message);
+            // Reported per channel, not after Task.WhenAll: a shutdown that cancels a slow channel
+            // must not lose the channels that already delivered.
+            onChannelCompleted?.Invoke(delivery);
+            return delivery;
         }));
         return new DispatchResult(results);
     }
