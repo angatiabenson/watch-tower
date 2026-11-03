@@ -117,6 +117,7 @@ public sealed class AgentRecord
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? LastSeenAt { get; set; }
     public AgentTelemetry? Telemetry { get; set; }
+    public DateTimeOffset? TelemetryBatchedAt { get; set; }
 
     // Incremental series, keyed by timestamp so a re-delivered batch (also one without a
     // batchId, from an older agent) cannot create duplicate samples.
@@ -141,6 +142,9 @@ public sealed class AgentRecord
 
     /// <summary>Open alerts by alertKey. Alert keys are compared case-insensitively.</summary>
     public Dictionary<string, OpenAlert> OpenAlerts { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>When each alert key last closed, to recognise an "opened" event that arrives late.</summary>
+    public Dictionary<string, DateTimeOffset> LastClosedAt { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public Dictionary<string, CommandRecord> Commands { get; } = new(StringComparer.Ordinal);
 
@@ -294,8 +298,12 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             Latest(agent.AppPools, batch.ApplicationPoolStatuses, m => m.ApplicationPoolName, m => m.Timestamp);
             Latest(agent.Endpoints, batch.EndpointStatuses, m => m.Name, m => m.Timestamp);
 
-            if (batch.Agent is not null)
+            // Same for the agent object: a late, older batch must not roll the version back.
+            if (batch.Agent is not null && (agent.TelemetryBatchedAt is null || agent.TelemetryBatchedAt <= batch.BatchedAt))
+            {
                 agent.Telemetry = batch.Agent;
+                agent.TelemetryBatchedAt = batch.BatchedAt;
+            }
             return true;
         }
     }
@@ -319,12 +327,17 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
 
             // Alert lifecycle: resolved=false opens or escalates the alert, resolved=true closes
             // it, and no "resolved" at all is a one-shot event (alertKey "reboot") or an incident
-            // outside any alert (no alertKey). Events can arrive out of order after an outage,
-            // so a close older than the open it would close is ignored.
+            // outside any alert (no alertKey). Events can arrive out of order (one in retry
+            // backoff is overtaken by the next), so decide by timestamp, not by arrival: an open
+            // older than the last close is history, and a close older than the open is ignored.
             if (evt.AlertKey is { Length: > 0 } key && evt.Resolved is { } resolved)
             {
+                var at = evt.Timestamp!.Value;
                 if (!resolved)
                 {
+                    if (agent.LastClosedAt.TryGetValue(key, out var closedAt) && closedAt >= at)
+                        return true; // already closed later than this open: keep it as history only
+
                     if (agent.OpenAlerts.TryGetValue(key, out var open))
                     {
                         open.IncidentType = evt.IncidentType!.Value; // escalation keeps the alert open
@@ -336,14 +349,17 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
                         {
                             AlertKey = key,
                             IncidentType = evt.IncidentType!.Value,
-                            OpenedAt = evt.Timestamp!.Value,
+                            OpenedAt = at,
                             Description = evt.Description!,
                         };
                     }
                 }
-                else if (agent.OpenAlerts.TryGetValue(key, out var open) && open.OpenedAt <= evt.Timestamp)
+                else
                 {
-                    agent.OpenAlerts.Remove(key);
+                    if (agent.OpenAlerts.TryGetValue(key, out var open) && open.OpenedAt <= at)
+                        agent.OpenAlerts.Remove(key);
+                    if (!agent.LastClosedAt.TryGetValue(key, out var previous) || previous < at)
+                        agent.LastClosedAt[key] = at;
                 }
             }
             return true;
