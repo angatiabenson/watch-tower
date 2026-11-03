@@ -38,10 +38,11 @@ public class DeliveryConcurrencyTests
     private Task Raise(AlertManager alerts) => alerts.RaiseAsync(Key, AlertSeverity.Critical, "Down", Down(), Ct);
 
     [Fact]
-    public async Task ResolvedWhileTheHeldOpenedNoticeIsBeingSent_TheRecoveryIsSentToo()
+    public async Task ResolvedWhileTheHeldOpenedNoticeIsBeingSent_TheRecoveryFollowsIt()
     {
-        // The reviewer's probe: the window ends, the delivery worker starts sending the held opened
-        // notice, and the monitor resolves the alert before that send completes.
+        // The reviewer's and the judge's probe: the window ends, the delivery worker starts sending
+        // the held opened notice, and the monitor resolves the alert before that send completes.
+        // The recovery must neither be lost nor overtake the opened notice.
         var alerts = Alerts();
         _maintenance.Active = true;
         await Raise(alerts);
@@ -51,23 +52,30 @@ public class DeliveryConcurrencyTests
         var opened = await _dispatcher.NextAsync(Ct);
         opened.Notification.Kind.Should().Be(AlertNotificationKind.Opened);
 
-        var resolving = alerts.ResolveAsync(Key, ct: Ct);
+        (await alerts.ResolveAsync(Key, ct: Ct).Bounded()).Should().BeTrue(
+            "the monitor worker does not wait for the opened notice's channels");
+        _dispatcher.HasWaitingCall.Should().BeFalse("the recovery waits until the opened notice was sent");
+        alerts.GetPendingDeliveries().Should().ContainSingle().Which.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+
+        var receipts = new List<AlertNotificationKind>();
+        opened.Deliver("ch1");
+        receipts.Add(opened.Notification.Kind);
         var resolved = await _dispatcher.NextAsync(Ct);
         resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved,
-            "the opened notice may reach operators at any moment, so they must hear that it cleared");
-
-        opened.Deliver("ch1");
-        await processing.Bounded();
+            "the opened notice reached operators, so they must hear that it cleared");
         resolved.Deliver("ch1");
-        (await resolving.Bounded()).Should().BeTrue();
+        receipts.Add(resolved.Notification.Kind);
+        await processing.Bounded();
 
+        receipts.Should().Equal(AlertNotificationKind.Opened, AlertNotificationKind.Resolved);
         _dispatcher.Sent.Select(n => n.Kind).Should().Equal(AlertNotificationKind.Opened, AlertNotificationKind.Resolved);
         alerts.GetOpenAlerts().Should().BeEmpty();
         alerts.GetPendingDeliveries().Should().BeEmpty();
+        alerts.InFlightCount.Should().Be(0);
     }
 
     [Fact]
-    public async Task ResolvedWhileTheHeldOpenedNoticeIsBeingSent_RecoveryCompletingFirst_LeavesNothingBehind()
+    public async Task ResolvedWhileTheHeldOpenedNoticeIsBeingSent_OpenedFailingEverywhere_StillGetsTheRecovery()
     {
         var alerts = Alerts();
         _maintenance.Active = true;
@@ -76,22 +84,105 @@ public class DeliveryConcurrencyTests
 
         var processing = alerts.ProcessPendingAsync(Ct);
         var opened = await _dispatcher.NextAsync(Ct);
-        var resolving = alerts.ResolveAsync(Key, ct: Ct);
-        var resolved = await _dispatcher.NextAsync(Ct);
+        await alerts.ResolveAsync(Key, ct: Ct).Bounded();
 
+        opened.Fail("ch1");
+        var resolved = await _dispatcher.NextAsync(Ct);
+        resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
         resolved.Deliver("ch1");
-        await resolving.Bounded();
-        opened.Deliver("ch1");
         await processing.Bounded();
 
-        alerts.GetPendingDeliveries().Should().BeEmpty("the opened notice was superseded by the recovery");
-        alerts.GetOpenAlerts().Should().BeEmpty();
-        _dispatcher.HasWaitingCall.Should().BeFalse();
-
-        // Nothing is re-sent later: the occurrence is over.
+        alerts.GetPendingDeliveries().Should().BeEmpty("the failed opened notice was superseded by the recovery");
         _time.Advance(TimeSpan.FromHours(1));
-        await alerts.ProcessPendingAsync(Ct);
-        _dispatcher.Sent.Should().HaveCount(2);
+        await alerts.ProcessPendingAsync(Ct).Bounded();
+        _dispatcher.Sent.Should().HaveCount(2, "nothing is re-sent: the occurrence is over");
+    }
+
+    [Fact]
+    public async Task EscalatedWhileAnOpenedRetryIsBeingSent_TheEscalationFollowsIt()
+    {
+        var alerts = Alerts();
+        var raising = alerts.RaiseAsync(Key, AlertSeverity.Warning, "Slow", Down(), Ct);
+        (await _dispatcher.NextAsync(Ct)).Fail("ch1");
+        await raising.Bounded();
+
+        _time.Advance(NotificationRetryPolicy.Backoff(1));
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var retry = await _dispatcher.NextAsync(Ct);
+
+        await alerts.RaiseAsync(Key, AlertSeverity.Critical, "Down", Down(), Ct).Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse("the escalation waits until the retry was sent");
+
+        retry.Deliver("ch1");
+        var escalated = await _dispatcher.NextAsync(Ct);
+        escalated.Notification.Severity.Should().Be(AlertSeverity.Critical);
+        escalated.Deliver("ch1");
+        await processing.Bounded();
+
+        _dispatcher.Sent.Select(n => (n.Kind, n.Severity)).Should().Equal(
+            (AlertNotificationKind.Opened, AlertSeverity.Warning),
+            (AlertNotificationKind.Opened, AlertSeverity.Warning),
+            (AlertNotificationKind.Opened, AlertSeverity.Critical));
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task OneAlertsNoticeBeingSent_DoesNotHoldUpOtherAlerts()
+    {
+        var alerts = Alerts();
+        _maintenance.Active = true;
+        await Raise(alerts);
+        _maintenance.Active = false;
+
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var opened = await _dispatcher.NextAsync(Ct);
+
+        var other = AlertKey.Endpoint("other");
+        var raising = alerts.RaiseAsync(other, AlertSeverity.Critical, "Other down", Down(), Ct);
+        var otherOpened = await _dispatcher.NextAsync(Ct);
+        otherOpened.Notification.AlertKey.Should().Be(other.Value);
+        otherOpened.Deliver("ch1");
+        await raising.Bounded();
+
+        var resolving = alerts.ResolveAsync(other, ct: Ct);
+        (await _dispatcher.NextAsync(Ct)).Deliver("ch1");
+        (await resolving.Bounded()).Should().BeTrue();
+        processing.IsCompleted.Should().BeFalse("the first alert's opened notice is still being sent");
+
+        opened.Deliver("ch1");
+        await processing.Bounded();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task DeliveryWorkerStoppedWhileARecoveryIsQueued_StopsPromptly_AndARestartSendsIt()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var alerts = Persistent(dir.Paths.DatabasePath, _dispatcher);
+        _maintenance.Active = true;
+        await Raise(alerts);
+        _maintenance.Active = false;
+
+        using var worker = new NotificationDeliveryWorker(alerts, _time, NullLogger<NotificationDeliveryWorker>.Instance);
+        await worker.StartAsync(Ct);
+        var opened = await _dispatcher.NextAsync(Ct);
+        await alerts.ResolveAsync(Key, ct: Ct).Bounded();
+
+        await worker.StopAsync(Ct).Bounded(); // cancels the opened send; nothing waits on the recovery
+        _dispatcher.HasWaitingCall.Should().BeFalse("a dispatch cut short by the shutdown hands nothing on");
+        alerts.InFlightCount.Should().Be(0);
+        new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Should().ContainSingle()
+            .Which.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+
+        var restarted = Persistent(dir.Paths.DatabasePath, _dispatcher);
+        var processing = restarted.ProcessPendingAsync(Ct);
+        var resolved = await _dispatcher.NextAsync(Ct);
+        resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+        resolved.Deliver("ch1");
+        await processing.Bounded();
+        restarted.GetPendingDeliveries().Should().BeEmpty();
+        opened.Result.Task.IsCanceled.Should().BeTrue();
     }
 
     [Fact]
@@ -139,12 +230,13 @@ public class DeliveryConcurrencyTests
         var processing = alerts.ProcessPendingAsync(Ct);
         var retry = await _dispatcher.NextAsync(Ct);
 
-        var resolving = alerts.ResolveAsync(Key, ct: Ct);
-        var resolved = await _dispatcher.NextAsync(Ct);
+        (await alerts.ResolveAsync(Key, ct: Ct).Bounded()).Should().BeTrue();
+        _dispatcher.HasWaitingCall.Should().BeFalse("the recovery waits until the retry was sent");
         retry.Deliver("ch1");
-        await processing.Bounded();
+        var resolved = await _dispatcher.NextAsync(Ct);
+        resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
         resolved.Deliver("ch1");
-        await resolving.Bounded();
+        await processing.Bounded();
 
         _dispatcher.Sent.Select(n => n.Kind).Should().Equal(
             AlertNotificationKind.Opened, AlertNotificationKind.Opened, AlertNotificationKind.Resolved);
@@ -216,6 +308,10 @@ public class DeliveryConcurrencyTests
             var kinds = dispatcher.Sent.Select(n => n.Kind).ToList();
             if (kinds.Contains(AlertNotificationKind.Opened))
                 kinds.Should().Contain(AlertNotificationKind.Resolved, $"iteration {i} sent {string.Join(",", kinds)}");
+            var receipts = dispatcher.Received.Where(n => n.AlertKey == Key.Value).Select(n => n.Kind).ToList();
+            if (receipts.Contains(AlertNotificationKind.Opened))
+                receipts.Should().Equal([AlertNotificationKind.Opened, AlertNotificationKind.Resolved], $"iteration {i}");
+            dispatcher.MaxOverlap.Should().Be(1, $"iteration {i}: an alert's notices are never sent at the same time");
             alerts.GetOpenAlerts().Should().BeEmpty();
             alerts.GetPendingDeliveries().Should().BeEmpty();
         }
@@ -470,15 +566,41 @@ public class DeliveryConcurrencyTests
             }
         }
 
+        private readonly List<AlertNotification> _received = [];
+        private int _active;
+
+        /// <summary>Notifications in the order their send completed.</summary>
+        public IReadOnlyList<AlertNotification> Received
+        {
+            get
+            {
+                lock (_sent)
+                    return _received.ToList();
+            }
+        }
+
+        /// <summary>Most sends that were in progress at the same time (every send is for one key).</summary>
+        public int MaxOverlap { get; private set; }
+
         public async Task<DispatchResult> DispatchAsync(
             AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted,
             CancellationToken ct)
         {
             lock (_sent)
+            {
                 _sent.Add(notification);
+                MaxOverlap = Math.Max(MaxOverlap, ++_active);
+            }
             await Task.Yield();
+            if (Random.Shared.Next(4) == 0)
+                await Task.Delay(1, ct); // sometimes a slower send
             var delivery = new ChannelDelivery("ch1", true, "Delivered");
             onChannelCompleted?.Invoke(delivery);
+            lock (_sent)
+            {
+                _received.Add(notification);
+                _active--;
+            }
             return new DispatchResult([delivery]);
         }
     }

@@ -40,6 +40,16 @@ public sealed class AlertManager : IAlertManager
     private readonly HashSet<string> _inFlight = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// The opened, reminder or resolved notice being sent right now for each alert key (guarded by
+    /// <see cref="_gate"/>). An alert's notices are sent one at a time, in order: a later notice
+    /// for the same alert (its recovery, an escalation) is not claimed while an earlier one is in
+    /// flight, and the sender of the earlier one sends it as soon as that dispatch has finished
+    /// (see <see cref="ClaimSuccessorLocked"/>). Nobody waits for it, so a slow channel never
+    /// blocks a monitor worker, other alerts or a shutdown.
+    /// </summary>
+    private readonly Dictionary<string, PendingDelivery> _sending = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Serialises raising and closing per alert key, so the open/resolved lifecycle of one key is
     /// never interleaved (e.g. a retirement and a raise of the same key). Deliveries never take it,
     /// and no code path takes two, so it cannot deadlock with the delivery worker.
@@ -236,6 +246,7 @@ public sealed class AlertManager : IAlertManager
         TimeSpan duration;
         string description;
         PendingDelivery? recovery = null;
+        var recoveryClaimed = false;
 
         // One section from reading the alert to replacing its notice: a delivery cannot claim the
         // opened notice, or count it as notified, in between.
@@ -260,8 +271,10 @@ public sealed class AlertManager : IAlertManager
             // moment; it is superseded below, so it cannot count as notified afterwards). One that
             // was never attempted on any channel is dropped silently.
             var pending = PendingNoticeLocked(key.Value);
-            var attempted = pending is { IsAboutOpenAlert: true } &&
-                            (pending.FailedAttempts > 0 || _inFlight.Contains(pending.Id));
+            var attempted = (pending is { IsAboutOpenAlert: true } &&
+                             (pending.FailedAttempts > 0 || pending.DeliveredChannels.Count > 0)) ||
+                            (_sending.GetValueOrDefault(key.Value) is { IsAboutOpenAlert: true } sending &&
+                             sending.Notification.OpenedAtUtc == existing.OpenedAt);
 
             var notification = new AlertNotification(
                 AlertNotificationKind.Resolved,
@@ -280,12 +293,12 @@ public sealed class AlertManager : IAlertManager
             if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
             {
                 // Operators know about the alert: tell them it cleared (once the window ends, if held).
-                recovery = EnqueueLocked(notification, now, held: inMaintenance);
+                recovery = EnqueueLocked(notification, now, held: inMaintenance, out recoveryClaimed);
             }
             else if (options.SendRecovery && (inMaintenance || pending is { Held: true }))
             {
                 // Opened and cleared while notifications were held: kept for the end-of-window summary.
-                recovery = EnqueueLocked(notification, now, held: true);
+                recovery = EnqueueLocked(notification, now, held: true, out _);
             }
             else
             {
@@ -319,12 +332,12 @@ public sealed class AlertManager : IAlertManager
 
             handedOver = true;
             if (recovery is not null)
-                await SendOrLogHeldAsync(recovery, ct);
+                await SendOrLogHeldAsync(recovery, recoveryClaimed, ct);
         }
         finally
         {
-            if (!handedOver && recovery is { Held: false })
-                Unclaim(recovery.Id);
+            if (!handedOver && recoveryClaimed)
+                Unclaim(recovery!);
         }
         return true;
     }
@@ -396,38 +409,85 @@ public sealed class AlertManager : IAlertManager
     private async Task DeliverAsync(AlertNotification notification, DateTime now, bool held, CancellationToken ct)
     {
         PendingDelivery delivery;
+        bool claimed;
         lock (_gate)
-            delivery = EnqueueLocked(notification, now, held);
-        await SendOrLogHeldAsync(delivery, ct);
+            delivery = EnqueueLocked(notification, now, held, out claimed);
+        await SendOrLogHeldAsync(delivery, claimed, ct);
     }
 
     /// <summary>
     /// Persists a new delivery (replacing the alert's previous notice) and, unless held, claims it
     /// in the same section, before <see cref="ProcessPendingAsync"/> or a close can see it unclaimed.
+    /// It is not claimed (<paramref name="claimed"/> false) while an earlier notice of the same
+    /// alert is still being sent: that sender sends it next.
     /// </summary>
-    private PendingDelivery EnqueueLocked(AlertNotification notification, DateTime now, bool held)
+    private PendingDelivery EnqueueLocked(AlertNotification notification, DateTime now, bool held, out bool claimed)
     {
         var delivery = PendingDelivery.Create(notification, now, held);
         if (delivery.IsAlertNotice)
             RemoveNoticesLocked(notification.AlertKey);
         _store.UpsertDelivery(delivery);
         Deliveries()[delivery.Id] = delivery;
-        if (!held)
-            _inFlight.Add(delivery.Id);
+        claimed = !held && TryClaimLocked(delivery);
         return delivery;
     }
 
-    /// <summary>Sends a delivery claimed by <see cref="EnqueueLocked"/>, or logs that it is held.</summary>
-    private async Task SendOrLogHeldAsync(PendingDelivery delivery, CancellationToken ct)
+    /// <summary>
+    /// Sends a delivery claimed by <see cref="EnqueueLocked"/>, or logs why it is not sent now: it
+    /// is held, or queued behind the alert's notice being sent.
+    /// </summary>
+    private async Task SendOrLogHeldAsync(PendingDelivery delivery, bool claimed, CancellationToken ct)
     {
-        if (!delivery.Held)
+        if (claimed)
         {
             await AttemptClaimedAsync(delivery, ct);
             return;
         }
 
-        _logger.LogInformation("{Kind} notification for alert {Key} held: maintenance window active until {Until:O}",
-            delivery.Notification.Kind, delivery.AlertKey, _maintenance.Current.Until);
+        if (delivery.Held)
+        {
+            _logger.LogInformation("{Kind} notification for alert {Key} held: maintenance window active until {Until:O}",
+                delivery.Notification.Kind, delivery.AlertKey, _maintenance.Current.Until);
+            return;
+        }
+
+        _logger.LogDebug("{Kind} notification for alert {Key} queued behind the alert's notice being sent",
+            delivery.Notification.Kind, delivery.AlertKey);
+    }
+
+    /// <summary>
+    /// Claims <paramref name="delivery"/> for sending, unless it is already claimed or (alert
+    /// notices) another notice of the same alert is being sent (see <see cref="_sending"/>).
+    /// </summary>
+    private bool TryClaimLocked(PendingDelivery delivery)
+    {
+        if (_inFlight.Contains(delivery.Id))
+            return false;
+        if (delivery.IsAlertNotice && !_sending.TryAdd(delivery.AlertKey, delivery))
+            return false;
+        _inFlight.Add(delivery.Id);
+        return true;
+    }
+
+    private void ReleaseClaimLocked(PendingDelivery claimed)
+    {
+        _inFlight.Remove(claimed.Id);
+        if (_sending.GetValueOrDefault(claimed.AlertKey) is { } sending && sending.Id == claimed.Id)
+            _sending.Remove(claimed.AlertKey);
+    }
+
+    /// <summary>
+    /// After <paramref name="finished"/> (an alert notice) was sent: claims the alert's notice that
+    /// was queued behind it (its recovery, an escalation), if one is due, for the same sender to
+    /// send next. Held notices and retries still backing off are left to the delivery worker.
+    /// </summary>
+    private PendingDelivery? ClaimSuccessorLocked(PendingDelivery finished)
+    {
+        if (!finished.IsAlertNotice ||
+            PendingNoticeLocked(finished.AlertKey) is not { } next ||
+            next.Id == finished.Id || next.Held || next.NextAttemptAt > UtcNow)
+            return null;
+        return TryClaimLocked(next) ? next : null;
     }
 
     /// <summary>
@@ -448,17 +508,18 @@ public sealed class AlertManager : IAlertManager
             // delivery (a store write) is done by AttemptClaimedAsync, which always gives the
             // claim back.
             delivery = Deliveries().GetValueOrDefault(id);
-            if (delivery is null || (!delivery.Held && delivery.NextAttemptAt > now) || !_inFlight.Add(id))
+            if (delivery is null || (!delivery.Held && delivery.NextAttemptAt > now) || !TryClaimLocked(delivery))
                 return;
         }
 
         await AttemptClaimedAsync(delivery, ct);
     }
 
-    private void Unclaim(string id)
+    /// <summary>Gives back a claim whose send never started.</summary>
+    private void Unclaim(PendingDelivery claimed)
     {
         lock (_gate)
-            _inFlight.Remove(id);
+            ReleaseClaimLocked(claimed);
     }
 
     /// <summary>Most held items listed one by one in the end-of-window summary.</summary>
@@ -568,86 +629,110 @@ public sealed class AlertManager : IAlertManager
     /// with <see cref="NotificationRetryPolicy"/>. The caller holds the in-flight claim; it is
     /// released here on every path, including a failure while the send is prepared (releasing a
     /// held delivery) or its outcome is persisted.
+    /// <para>
+    /// Then sends the alert's notice queued behind it, if any (see <see cref="_sending"/>), and so
+    /// on. Only after a dispatch that finished: one cut short by <paramref name="ct"/> (a shutdown)
+    /// leaves the queued notice pending for the delivery worker or the next start.
+    /// </para>
     /// </summary>
     private async Task AttemptClaimedAsync(PendingDelivery claimed, CancellationToken ct)
     {
-        try
+        for (PendingDelivery? next = claimed; next is not null;)
         {
-            PendingDelivery? prepared;
-            lock (_gate)
-                prepared = PrepareLocked(claimed);
-            if (prepared is null)
-                return;
-
-            PendingDelivery delivery = prepared;
-            var notification = delivery.Notification;
-            var skip = new HashSet<string>(delivery.DeliveredChannels, StringComparer.OrdinalIgnoreCase);
-            var reached = delivery.DeliveredChannels.Count > 0; // guarded by _gate
-
-            // Each channel that delivers is recorded right away, so a dispatch cut short (e.g. by
-            // a graceful shutdown waiting on a slow channel) never loses, or later repeats, it.
-            void OnChannelCompleted(ChannelDelivery channel)
-            {
-                if (!channel.Success)
-                    return;
-                try
-                {
-                    lock (_gate)
-                        RecordDeliveredLocked(delivery, channel.Channel, ref reached);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Could not record that the {Kind} notification for alert {Key} reached {Channel}",
-                        notification.Kind, notification.AlertKey, channel.Channel);
-                }
-            }
-
-            DispatchResult result;
-            string? error = null;
+            var current = next;
+            next = null;
+            var finished = false;
             try
             {
-                result = await _dispatcher.DispatchAsync(notification, skip, OnChannelCompleted, ct);
+                await SendClaimedAsync(current, ct);
+                finished = true;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            finally
             {
-                _logger.LogError(ex, "Dispatching the {Kind} notification for alert {Key} failed",
-                    notification.Kind, notification.AlertKey);
-                result = DispatchResult.None;
-                error = $"Dispatch failed ({ex.GetType().Name})";
-            }
-
-            var now = UtcNow;
-            var failed = result.Failed.ToList();
-            if (error is null && failed.Count > 0)
-                error = string.Join("; ", failed.Select(f => $"{f.Channel}: {f.Message}"));
-            var firstAttempt = delivery.FirstAttemptAt ?? now;
-
-            lock (_gate)
-            {
-                // Channels a dispatcher reported only in its result (not as they completed).
-                foreach (var channel in result.Delivered)
-                    RecordDeliveredLocked(delivery, channel, ref reached);
-
-                // Superseded while it was being sent: the newer notice or the close owns the row.
-                if (Deliveries().GetValueOrDefault(delivery.Id) is not { } current)
-                    return;
-                var next = NextAttempt(current, result, error, firstAttempt, now);
-                if (next is null)
+                // Release and hand over in one section: a notice queued behind this one can
+                // neither be skipped nor be claimed by two senders.
+                lock (_gate)
                 {
-                    _store.DeleteDelivery(delivery.Id);
-                    Deliveries().Remove(delivery.Id);
-                }
-                else
-                {
-                    _store.UpsertDelivery(next);
-                    Deliveries()[delivery.Id] = next;
+                    ReleaseClaimLocked(current);
+                    if (finished && !ct.IsCancellationRequested)
+                        next = ClaimSuccessorLocked(current);
                 }
             }
         }
-        finally
+    }
+
+    /// <summary>One attempt of <see cref="AttemptClaimedAsync"/> (the caller releases the claim).</summary>
+    private async Task SendClaimedAsync(PendingDelivery claimed, CancellationToken ct)
+    {
+        PendingDelivery? prepared;
+        lock (_gate)
+            prepared = PrepareLocked(claimed);
+        if (prepared is null)
+            return;
+
+        PendingDelivery delivery = prepared;
+        var notification = delivery.Notification;
+        var skip = new HashSet<string>(delivery.DeliveredChannels, StringComparer.OrdinalIgnoreCase);
+        var reached = delivery.DeliveredChannels.Count > 0; // guarded by _gate
+
+        // Each channel that delivers is recorded right away, so a dispatch cut short (e.g. by
+        // a graceful shutdown waiting on a slow channel) never loses, or later repeats, it.
+        void OnChannelCompleted(ChannelDelivery channel)
         {
-            // Only now: until its outcome is recorded, a close must treat it as being sent.
-            Unclaim(claimed.Id);
+            if (!channel.Success)
+                return;
+            try
+            {
+                lock (_gate)
+                    RecordDeliveredLocked(delivery, channel.Channel, ref reached);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not record that the {Kind} notification for alert {Key} reached {Channel}",
+                    notification.Kind, notification.AlertKey, channel.Channel);
+            }
+        }
+
+        DispatchResult result;
+        string? error = null;
+        try
+        {
+            result = await _dispatcher.DispatchAsync(notification, skip, OnChannelCompleted, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Dispatching the {Kind} notification for alert {Key} failed",
+                notification.Kind, notification.AlertKey);
+            result = DispatchResult.None;
+            error = $"Dispatch failed ({ex.GetType().Name})";
+        }
+
+        var now = UtcNow;
+        var failed = result.Failed.ToList();
+        if (error is null && failed.Count > 0)
+            error = string.Join("; ", failed.Select(f => $"{f.Channel}: {f.Message}"));
+        var firstAttempt = delivery.FirstAttemptAt ?? now;
+
+        lock (_gate)
+        {
+            // Channels a dispatcher reported only in its result (not as they completed).
+            foreach (var channel in result.Delivered)
+                RecordDeliveredLocked(delivery, channel, ref reached);
+
+            // Superseded while it was being sent: the newer notice or the close owns the row.
+            if (Deliveries().GetValueOrDefault(delivery.Id) is not { } current)
+                return;
+            var next = NextAttempt(current, result, error, firstAttempt, now);
+            if (next is null)
+            {
+                _store.DeleteDelivery(delivery.Id);
+                Deliveries().Remove(delivery.Id);
+            }
+            else
+            {
+                _store.UpsertDelivery(next);
+                Deliveries()[delivery.Id] = next;
+            }
         }
     }
 
