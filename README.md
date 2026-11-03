@@ -232,6 +232,18 @@ All metrics are persisted to a local `watchtower.db` SQLite database:
 - **Automatic purge** — all data cleared after the daily report email is sent successfully
 - **Preserved during deployments** — CI/CD pipeline backs up and restores the database
 
+### Build your own portal
+
+The agent reports to a portal over a small, public, versioned HTTPS/JSON API (v1). It only
+makes outbound calls: it pushes metrics and events, and it polls for commands and remote
+configuration. Anyone can build a compatible portal, in any language:
+
+- [Portal API guide](guides/portal-api/README.md): concepts, a quickstart, one page per endpoint,
+  telemetry, alerts, commands, remote configuration, reliability, testing and versioning
+- [OpenAPI 3.1 spec](spec/portal-agent-api.v1.openapi.yaml)
+- [MinimalPortal](samples/MinimalPortal/README.md): a runnable reference portal
+- [AgentSimulator](samples/AgentSimulator/README.md): agent traffic from Linux, macOS or Windows
+
 ---
 
 ## Architecture
