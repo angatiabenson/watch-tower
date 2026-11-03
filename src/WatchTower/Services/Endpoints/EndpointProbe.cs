@@ -148,16 +148,21 @@ public sealed class EndpointProbe(IHttpClientFactory httpClientFactory, TimeProv
         return result with { ResponseTimeMs = elapsed };
     }
 
-    /// <summary>Judges a certificate: invalid or expired = Down, inside the warning window = Expiring.</summary>
+    /// <summary>
+    /// Judges a certificate: invalid or expired = Down, inside the warning window = Expiring.
+    /// The state is decided on the exact remaining time (expired only once <paramref name="nowUtc"/>
+    /// is past NotAfter); the day count is rounded only for display and the stored metric.
+    /// </summary>
     public static EndpointProbeResult Classify(
         DateTime notAfterUtc, SslPolicyErrors policyErrors, X509ChainStatusFlags chainProblems, string? subject,
         DateTime nowUtc, int warnDays)
     {
-        var daysLeft = Math.Round((notAfterUtc - nowUtc).TotalDays, 1);
+        var remaining = notAfterUtc - nowUtc;
+        var daysLeft = Math.Round(remaining.TotalDays, 1);
         var expires = notAfterUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var who = string.IsNullOrEmpty(subject) ? "Certificate" : $"Certificate for {subject}";
 
-        if (daysLeft <= 0)
+        if (remaining <= TimeSpan.Zero)
             return new EndpointProbeResult(EndpointState.Down, $"{who} expired on {expires}", CertificateDaysLeft: daysLeft);
 
         if (policyErrors != SslPolicyErrors.None)
@@ -168,10 +173,13 @@ public sealed class EndpointProbe(IHttpClientFactory httpClientFactory, TimeProv
             return new EndpointProbeResult(EndpointState.Down, $"{who} is not valid: {problems}", CertificateDaysLeft: daysLeft);
         }
 
-        var left = daysLeft.ToString("0.#", CultureInfo.InvariantCulture);
-        return daysLeft < warnDays
-            ? new EndpointProbeResult(EndpointState.Expiring, $"{who} expires in {left} days ({expires})", CertificateDaysLeft: daysLeft)
-            : new EndpointProbeResult(EndpointState.Up, $"{who} valid for {left} more days ({expires})", CertificateDaysLeft: daysLeft);
+        var days = daysLeft.ToString("0.#", CultureInfo.InvariantCulture);
+        if (remaining >= TimeSpan.FromDays(warnDays))
+            return new EndpointProbeResult(EndpointState.Up, $"{who} valid for {days} more days ({expires})", CertificateDaysLeft: daysLeft);
+
+        // Under a day the rounded count can read "0 days": show the time left instead.
+        var left = remaining < TimeSpan.FromDays(1) ? Alerting.AlertText.FormatDuration(remaining) : $"{days} days";
+        return new EndpointProbeResult(EndpointState.Expiring, $"{who} expires in {left} ({expires})", CertificateDaysLeft: daysLeft);
     }
 
     private static bool IsRedirect(HttpStatusCode status) => (int)status is 301 or 302 or 303 or 307 or 308;

@@ -244,6 +244,42 @@ public class EndpointCheckTests
         mismatch.Detail.Should().Contain("RemoteCertificateNameMismatch");
     }
 
+    [Theory]
+    [InlineData(30, "expires in 30 min")]
+    [InlineData(60, "expires in 1 h")]
+    [InlineData(1, "expires in 1 min")]
+    public void Classify_ValidCertificateExpiringWithinTheHourIsExpiringNotDown(int minutesLeft, string expected)
+    {
+        // Rounded to one decimal these are 0.0 days; they have not expired yet.
+        var result = EndpointProbe.Classify(Now.AddMinutes(minutesLeft), SslPolicyErrors.None, X509ChainStatusFlags.NoError,
+            "example.com", Now, 21);
+
+        result.State.Should().Be(EndpointState.Expiring);
+        result.Detail.Should().Be($"Certificate for example.com {expected} (2026-06-01)");
+        result.CertificateDaysLeft.Should().Be(0);
+    }
+
+    [Fact]
+    public void Classify_ExpiryIsExactAtNotAfter()
+    {
+        EndpointProbe.Classify(Now, SslPolicyErrors.None, X509ChainStatusFlags.NoError, null, Now, 21)
+            .State.Should().Be(EndpointState.Down, "the certificate is no longer valid at NotAfter");
+        EndpointProbe.Classify(Now.AddMinutes(-1), SslPolicyErrors.None, X509ChainStatusFlags.NoError, null, Now, 21)
+            .State.Should().Be(EndpointState.Down);
+        EndpointProbe.Classify(Now.AddSeconds(1), SslPolicyErrors.None, X509ChainStatusFlags.NoError, null, Now, 21)
+            .State.Should().Be(EndpointState.Expiring);
+    }
+
+    [Fact]
+    public void Classify_WarningWindowUsesTheExactRemainingTime()
+    {
+        // 20.96 days rounds to 21.0, but it is inside a 21-day window.
+        EndpointProbe.Classify(Now.AddDays(21).AddHours(-1), SslPolicyErrors.None, X509ChainStatusFlags.NoError, null, Now, 21)
+            .State.Should().Be(EndpointState.Expiring);
+        EndpointProbe.Classify(Now.AddDays(21), SslPolicyErrors.None, X509ChainStatusFlags.NoError, null, Now, 21)
+            .State.Should().Be(EndpointState.Up);
+    }
+
     [Fact]
     public async Task Certificate_ReadsTheServerCertificateOverTls()
     {
