@@ -52,6 +52,13 @@ public class CommandPollOptions
 
     /// <summary>Completed/failed command rows are purged once older than this many days. 0 keeps them forever.</summary>
     public int RetentionDays { get; set; } = 30;
+
+    /// <summary>
+    /// When false (default), service/app-pool commands may only target names on the LOCALLY
+    /// configured watch lists; lists pushed by the portal's remote configuration do not widen
+    /// what the portal may stop or restart. Set true to let the portal manage both.
+    /// </summary>
+    public bool AllowPortalManagedTargets { get; set; }
 }
 
 public class RemoteConfigOptions

@@ -21,6 +21,7 @@ public class CommandPollingWorker : BackgroundService
     private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _appPoolOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CommandPollingWorker> _logger;
+    private readonly ICommandTargetPolicy? _targetPolicy;
 
     /// <summary>How often finished command rows older than the retention window are purged.</summary>
     internal static readonly TimeSpan PurgeInterval = TimeSpan.FromHours(1);
@@ -39,8 +40,10 @@ public class CommandPollingWorker : BackgroundService
         IOptionsMonitor<ServiceMonitorOptions> serviceOptions,
         IOptionsMonitor<ApplicationPoolMonitorOptions> appPoolOptions,
         TimeProvider timeProvider,
-        ILogger<CommandPollingWorker> logger)
+        ILogger<CommandPollingWorker> logger,
+        ICommandTargetPolicy? targetPolicy = null)
     {
+        _targetPolicy = targetPolicy;
         _portalClient = portalClient;
         _commandStore = commandStore;
         _registry = registry;
@@ -417,15 +420,23 @@ public class CommandPollingWorker : BackgroundService
             case Portal.Actions.ActionType.ServiceStart:
             case Portal.Actions.ActionType.ServiceStop:
             case Portal.Actions.ActionType.ServiceRestart:
+                if (command.Parameters?.GetValueOrDefault("ServiceName") is { } serviceName &&
+                    _targetPolicy?.DenyService(serviceName) is { } denied)
+                {
+                    reason = denied;
+                    return false;
+                }
                 return IsTargetAllowed(command, "ServiceName",
-                    _serviceOptions.CurrentValue.WatchedServices, "watched service", out reason);
+                    _targetPolicy?.AllowedServices() ?? _serviceOptions.CurrentValue.WatchedServices,
+                    "locally watched service", out reason);
 
             case Portal.Actions.ActionType.AppPoolStart:
             case Portal.Actions.ActionType.AppPoolStop:
             case Portal.Actions.ActionType.AppPoolRestart:
             case Portal.Actions.ActionType.AppPoolRecycle:
                 return IsTargetAllowed(command, "AppPoolName",
-                    _appPoolOptions.CurrentValue.WatchedApplicationPools, "watched application pool", out reason);
+                    _targetPolicy?.AllowedApplicationPools() ?? _appPoolOptions.CurrentValue.WatchedApplicationPools,
+                    "locally watched application pool", out reason);
 
             default:
                 // Agent/config actions are not target-scoped; allowed.

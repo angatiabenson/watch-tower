@@ -58,6 +58,7 @@ public sealed class LayeredJsonConfigurationProvider : ConfigurationProvider, ID
     private readonly List<IDisposable> _watchers = [];
     private readonly Lock _loadLock = new();
     private Dictionary<string, ConfigLayer> _origins = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string?> _localData = new(StringComparer.OrdinalIgnoreCase);
     private Timer? _debounce;
 
     public LayeredJsonConfigurationProvider(LayeredJsonConfigurationSource source)
@@ -90,6 +91,25 @@ public sealed class LayeredJsonConfigurationProvider : ConfigurationProvider, ID
         return best;
     }
 
+    /// <summary>
+    /// A string list as configured WITHOUT the portal overlay (shipped defaults + operator
+    /// settings). Used where the portal must not be able to widen its own permissions, e.g. the
+    /// allow-list of services a portal command may stop or restart.
+    /// </summary>
+    public IReadOnlyList<string> GetLocalList(string key)
+    {
+        var data = _localData;
+        var prefix = key + ConfigurationPath.KeyDelimiter;
+        return data
+            .Where(kv => kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                         int.TryParse(kv.Key.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out _))
+            .OrderBy(kv => int.Parse(kv.Key.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture))
+            .Select(kv => kv.Value)
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v!)
+            .ToList();
+    }
+
     public override void Load()
     {
         // Initial load: malformed files are fatal so the operator gets a clear message.
@@ -101,6 +121,7 @@ public sealed class LayeredJsonConfigurationProvider : ConfigurationProvider, ID
         lock (_loadLock)
         {
             var merged = new JsonObject(JsonSettingsStore.NodeOptions);
+            var local = new JsonObject(JsonSettingsStore.NodeOptions); // everything except the portal overlay
             var origins = new Dictionary<string, ConfigLayer>(StringComparer.OrdinalIgnoreCase);
             var undecryptable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -121,6 +142,8 @@ public sealed class LayeredJsonConfigurationProvider : ConfigurationProvider, ID
                         origins[key] = file.Layer;
 
                     JsonSettingsStore.MergePatch(merged, doc);
+                    if (file.Layer != ConfigLayer.Portal)
+                        JsonSettingsStore.MergePatch(local, doc);
                 }
             }
             catch (Exception ex) when (ex is JsonException or IOException or InvalidDataException or UnauthorizedAccessException)
@@ -134,6 +157,7 @@ public sealed class LayeredJsonConfigurationProvider : ConfigurationProvider, ID
 
             Data = Flatten(merged);
             _origins = origins;
+            _localData = Flatten(local);
             UndecryptableKeys.Clear();
             foreach (var (k, v) in undecryptable)
                 UndecryptableKeys[k] = v;

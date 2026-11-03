@@ -79,6 +79,8 @@ public static class StartupValidator
             warnings.Add("SMTP host is not configured. Email notifications will be disabled.");
         else if (email.ToAddresses.Count == 0)
             warnings.Add("No email recipients configured. Alerts and reports will not be sent.");
+        else if (string.IsNullOrWhiteSpace(email.FromAddress))
+            warnings.Add("Email:FromAddress is not set. Alerts and reports will not be sent.");
         if (string.IsNullOrWhiteSpace(heartbeat.Url))
             warnings.Add("Heartbeat URL is not configured. Dead man's switch is disabled.");
         if (watchedServices.WatchedServices.Count == 0)

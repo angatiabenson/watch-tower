@@ -99,7 +99,11 @@ public static class ServiceCollectionExtensions
             if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
                 client.BaseAddress = uri;
             client.Timeout = TimeSpan.FromSeconds(30);
-        }).AddHttpMessageHandler<AgentAuthHandler>();
+        })
+        // TLS policy (RequireTls) and the optional client certificate (Tls:ClientCertThumbprint) for mTLS.
+        .ConfigurePrimaryHttpMessageHandler(sp => PortalTls.CreateHandler(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<PortalOptions>>().CurrentValue.Tls))
+        .AddHttpMessageHandler<AgentAuthHandler>();
 
         if (protocol.Equals("Grpc", StringComparison.OrdinalIgnoreCase))
             services.AddSingleton<IPortalClient, GrpcPortalClient>();
@@ -125,6 +129,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IActionHandler, AgentUpdateHandler>();
         services.AddSingleton<IActionHandler, ApplyConfigurationHandler>();
         services.AddSingleton<ActionHandlerRegistry>();
+        services.AddSingleton<ICommandTargetPolicy, LocalCommandTargetPolicy>();
 
         services.AddSingleton<IPortalEventPublisher, PortalEventPublisher>();
 
