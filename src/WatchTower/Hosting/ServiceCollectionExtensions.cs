@@ -47,7 +47,17 @@ public static class ServiceCollectionExtensions
         services.AddTransient<IReportBuilder, ReportBuilder>();
 
         // Alerting: open/resolved lifecycle, re-notify policy and delivery.
-        services.AddSingleton<INotificationDispatcher, EmailNotificationDispatcher>();
+        services.AddSingleton<INotificationChannel, EmailNotificationChannel>();
+        services.AddSingleton<INotificationChannel, WebhookNotificationChannel>();
+        services.AddSingleton<INotificationChannel, TeamsNotificationChannel>();
+        services.AddSingleton<INotificationChannel, SlackNotificationChannel>();
+        services.AddSingleton<NotificationDispatcher>();
+        services.AddSingleton<INotificationDispatcher>(sp => sp.GetRequiredService<NotificationDispatcher>());
+        // Webhook URLs are credentials: no redirects (the payload must not be forwarded) and no
+        // HttpClient request logging (it would write the URL).
+        services.AddHttpClient(HttpNotificationChannel.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(130))
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
+            .RemoveAllLoggers();
         services.AddSingleton<IAlertManager, AlertManager>();
 
         services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
@@ -89,6 +99,7 @@ public static class ServiceCollectionExtensions
         services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
         services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
         services.Configure<AlertingOptions>(config.GetSection(AlertingOptions.SectionName));
+        services.Configure<NotificationOptions>(config.GetSection(NotificationOptions.SectionName));
         services.Configure<PortalOptions>(config.GetSection(PortalOptions.SectionName));
         services.Configure<DisplayOptions>(config.GetSection(DisplayOptions.SectionName));
         services.Configure<Ui.UiOptions>(config.GetSection(Ui.UiOptions.SectionName));
@@ -135,6 +146,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IActionHandler, AgentRestartHandler>();
         services.AddSingleton<IActionHandler, AgentUpdateHandler>();
         services.AddSingleton<IActionHandler, ApplyConfigurationHandler>();
+        services.AddSingleton<IActionHandler, SendTestNotificationHandler>();
         services.AddSingleton<ActionHandlerRegistry>();
         services.AddSingleton<ICommandTargetPolicy, LocalCommandTargetPolicy>();
         services.AddSingleton<IAgentTelemetry, AgentTelemetry>();

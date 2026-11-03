@@ -26,4 +26,12 @@ public enum ActionType
 
     // Configuration: 401
     ApplyConfiguration = 401,
+
+    // Notifications: 501
+
+    /// <summary>
+    /// Send a test message through the notification channels (optional parameter <c>Channel</c>
+    /// limits it to one channel by name). Severity filters and maintenance do not apply.
+    /// </summary>
+    SendTestNotification = 501,
 }

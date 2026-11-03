@@ -14,6 +14,7 @@ public static class UiEndpoints
     public sealed record PasswordRequest(string? Password);
     public sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
     public sealed record EnrollRequest(string? Code);
+    public sealed record TestNotificationRequest(string? Channel);
 
     public static void Map(WebApplication app)
     {
@@ -106,6 +107,30 @@ public static class UiEndpoints
             return Results.Ok(sent
                 ? new { ok = true, message = "Test email sent. Check the recipients' inboxes (and spam folders)." }
                 : new { ok = false, message = "The test email could not be sent. Check the SMTP settings, then the logs for details." });
+        });
+
+        api.MapPost("/actions/test-notification", async (
+            [Microsoft.AspNetCore.Mvc.FromBody] TestNotificationRequest? body,
+            Services.Alerting.NotificationDispatcher notifications, AgentInfo agent, CancellationToken ct) =>
+        {
+            var channel = string.IsNullOrWhiteSpace(body?.Channel) ? null : body.Channel.Trim();
+            var results = await notifications.SendTestAsync(channel, agent.MachineName, ct);
+            if (results.Count == 0)
+            {
+                return channel is null
+                    ? Results.Ok(new { ok = false, message = "No notification channel is enabled.", results })
+                    : Error(StatusCodes.Status404NotFound, $"No enabled notification channel is named '{channel}'.");
+            }
+
+            var failed = results.Count(r => !r.Ok);
+            return Results.Ok(new
+            {
+                ok = failed == 0,
+                message = failed == 0
+                    ? $"Test notification sent to {results.Count} channel(s)."
+                    : $"{failed} of {results.Count} channel(s) failed; see the results and the log.",
+                results,
+            });
         });
 
         api.MapPost("/actions/enroll", async (EnrollRequest body, ConfigService config, CancellationToken ct) =>

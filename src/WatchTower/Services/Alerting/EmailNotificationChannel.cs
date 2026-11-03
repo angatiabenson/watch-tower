@@ -5,26 +5,22 @@ using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Services.Alerting;
 
-/// <summary>Delivers alert notifications by email (SMTP via <see cref="IEmailService"/>).</summary>
-public sealed class EmailNotificationDispatcher(
+/// <summary>Email channel: the SMTP settings and recipients of the <c>Email</c> section.</summary>
+public sealed class EmailNotificationChannel(
     IEmailService email,
     IReportBuilder reportBuilder,
-    IOptionsMonitor<AlertingOptions> options,
-    ILogger<EmailNotificationDispatcher> logger) : INotificationDispatcher
+    IOptionsMonitor<AlertingOptions> options) : INotificationChannel
 {
-    public async Task<int> DispatchAsync(AlertNotification notification, CancellationToken ct)
-    {
-        if (!email.IsConfigured)
-        {
-            logger.LogDebug("SMTP is not configured; {Kind} email for {Key} skipped", notification.Kind, notification.AlertKey);
-            return 0;
-        }
+    public NotificationChannelType Type => NotificationChannelType.Email;
 
-        var subject = Subject(notification);
-        var html = Render(notification);
-        if (!await email.SendEmailAsync(subject, html, ct))
-            logger.LogWarning("Alert email could not be delivered: {Subject}", subject);
-        return 1;
+    public bool IsAvailable(NotificationChannel channel) => email.IsConfigured;
+
+    public async Task<ChannelSendResult> SendAsync(NotificationChannel channel, AlertNotification notification, CancellationToken ct)
+    {
+        var sent = await email.SendEmailAsync(Subject(notification), Render(notification), ct);
+        return sent
+            ? ChannelSendResult.Ok("Email sent")
+            : ChannelSendResult.Failed("The email could not be sent; check the SMTP settings and the log");
     }
 
     private string Render(AlertNotification n)

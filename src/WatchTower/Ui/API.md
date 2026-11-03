@@ -136,6 +136,13 @@ keep. Responses:
 
 * `POST /api/actions/test-email` → `200 { "ok": true, "message": "..." }` / `200 { "ok": false, "message": "..." }`
   (uses the saved settings — save first).
+* `POST /api/actions/test-notification` body `{ "channel": "teams" }` (optional; omit or `{}` for every
+  enabled channel) → `200 { "ok": bool, "message": "...", "results": [ { "channel": "teams", "type": "Teams",
+  "ok": true, "message": "Delivered (HTTP 202)" } ] }`. Severity filters do not apply to tests. `ok: false`
+  with an empty `results` when no channel is enabled; `404 { "error" }` when `channel` names no enabled
+  channel. Channel names: `email`, `teams`, `slack`, `webhook` (the fixed fields of the "Notification
+  channels" section) plus any `Notifications:Channels` entries. Uses the saved settings — save first.
+  UI: a "Send test notification" button in the Notification channels section (and optionally one per channel).
 * `POST /api/actions/enroll` body `{ "code": "WT1.…" }` (enrollment code from the portal's "Add server"
   dialog) → `200 { "portalUrl", "agentId", "restartRequired": true, "warnings": [..] }` — saves and enables
   the portal connection (token encrypted); offer Restart now. `400 { "error" }` for a bad code,

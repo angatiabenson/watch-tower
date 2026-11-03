@@ -50,6 +50,8 @@ public sealed record ConfigSection(string Id, string Title, string Description, 
 /// </summary>
 public static class ConfigSchema
 {
+    private static readonly IReadOnlyList<string> SeverityOptions = ["Info", "Warning", "Critical"];
+
     public static IReadOnlyList<ConfigSection> Sections { get; } =
     [
         new("general", "General", "Reporting schedule and how times are displayed.",
@@ -73,6 +75,28 @@ public static class ConfigSchema
             new("Alerting:ResolveAfterSeconds", "Resolve after clear for (s)", FieldType.Int,
                 "CPU, memory, disk, disk-queue and network alerts resolve only once the condition stayed clear this long, so values hovering around a threshold do not flap.",
                 0, 86_400, Advanced: true),
+        ]),
+
+        new("notifications", "Notification channels",
+            "Where alerts are sent besides email. Webhook URLs are stored encrypted (Windows DPAPI). " +
+            "More channels, or several of one kind, can be added with 'WatchTower config import' (Notifications:Channels).",
+        [
+            new("Notifications:Email:Enabled", "Send alerts by email", FieldType.Bool,
+                "Uses the SMTP settings and recipients of the Email alerts section."),
+            new("Notifications:Email:MinSeverity", "Email: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:Teams:Url", "Microsoft Teams webhook URL", FieldType.Secret,
+                "A Teams Workflows \"Post to a channel when a webhook request is received\" URL. Alerts are posted as Adaptive Cards.",
+                Format: "url"),
+            new("Notifications:Teams:MinSeverity", "Teams: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:Slack:Url", "Slack incoming webhook URL", FieldType.Secret,
+                "e.g. https://hooks.slack.com/services/…", Format: "url"),
+            new("Notifications:Slack:MinSeverity", "Slack: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:Webhook:Url", "Webhook URL", FieldType.Secret,
+                "Receives a JSON document per notification (schema watchtower.alert.v1).", Format: "url"),
+            new("Notifications:Webhook:Secret", "Webhook signing secret", FieldType.Secret,
+                "When set, each request carries X-WatchTower-Signature: sha256=<HMAC-SHA256 of the body>."),
+            new("Notifications:Webhook:MinSeverity", "Webhook: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:TimeoutSeconds", "Webhook timeout (s)", FieldType.Int, null, 1, 120, Advanced: true),
         ]),
 
         new("email", "Email alerts", "SMTP server and recipients for daily reports and emergency alerts.",

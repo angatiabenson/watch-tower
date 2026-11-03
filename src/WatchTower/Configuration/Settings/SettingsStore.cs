@@ -110,13 +110,25 @@ public sealed class JsonSettingsStore : ISettingsStore
         void Walk(JsonObject obj, string? prefix)
         {
             foreach (var (name, value) in obj)
+                Visit(value, prefix is null ? name : $"{prefix}:{name}");
+        }
+
+        void Visit(JsonNode? value, string key)
+        {
+            switch (value)
             {
-                var key = prefix is null ? name : $"{prefix}:{name}";
-                if (value is JsonObject child)
+                case JsonObject child:
                     Walk(child, key);
-                else if (value is JsonValue leaf && SecretSettings.IsSecret(key) &&
-                         leaf.TryGetValue<string>(out var s) && s.Length > 0 && !DpapiSecretProtector.IsProtected(s))
+                    break;
+                case JsonArray array:
+                    // List items are addressed by index, e.g. Notifications:Channels:0:Url.
+                    for (var i = 0; i < array.Count; i++)
+                        Visit(array[i], $"{key}:{i.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+                    break;
+                case JsonValue leaf when SecretSettings.IsSecret(key) &&
+                                         leaf.TryGetValue<string>(out var s) && s.Length > 0 && !DpapiSecretProtector.IsProtected(s):
                     found = true;
+                    break;
             }
         }
     }
@@ -190,14 +202,45 @@ public sealed class JsonSettingsStore : ISettingsStore
                     case JsonObject child:
                         Walk(child, key);
                         break;
-                    case JsonValue leaf when SecretSettings.IsSecret(key)
-                                             && leaf.TryGetValue<string>(out var s)
-                                             && !string.IsNullOrEmpty(s)
-                                             && !DpapiSecretProtector.IsProtected(s):
+                    case JsonArray array:
+                        WalkArray(array, key);
+                        break;
+                    case JsonValue leaf when NeedsProtection(key, leaf, out var s):
                         obj[name] = protector.Protect(s);
                         break;
                 }
             }
+        }
+
+        // List items are addressed by index, e.g. Notifications:Channels:0:Url.
+        void WalkArray(JsonArray array, string prefix)
+        {
+            for (var i = 0; i < array.Count; i++)
+            {
+                var key = $"{prefix}:{i.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+                switch (array[i])
+                {
+                    case JsonObject child:
+                        Walk(child, key);
+                        break;
+                    case JsonArray nested:
+                        WalkArray(nested, key);
+                        break;
+                    case JsonValue leaf when NeedsProtection(key, leaf, out var s):
+                        array[i] = protector.Protect(s);
+                        break;
+                }
+            }
+        }
+
+        static bool NeedsProtection(string key, JsonValue leaf, out string value)
+        {
+            value = string.Empty;
+            if (!SecretSettings.IsSecret(key) || !leaf.TryGetValue<string>(out var s) ||
+                string.IsNullOrEmpty(s) || DpapiSecretProtector.IsProtected(s))
+                return false;
+            value = s;
+            return true;
         }
     }
 

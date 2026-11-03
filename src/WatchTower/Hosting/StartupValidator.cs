@@ -1,5 +1,6 @@
 using WatchTower.Configuration;
 using WatchTower.Configuration.Layered;
+using WatchTower.Services.Alerting;
 using WatchTower.Ui;
 
 namespace WatchTower.Hosting;
@@ -100,6 +101,9 @@ public static class StartupValidator
             warnings.Add($"Web console: {endpoint.Display} is reachable from the network over plain HTTP; " +
                          "the console password and session travel unencrypted.");
 
+        ValidateAlerting(Bind<AlertingOptions>(AlertingOptions.SectionName), errors);
+        ValidateNotifications(Bind<NotificationOptions>(NotificationOptions.SectionName), errors, warnings);
+
         var updates = Bind<Updates.UpdateOptions>(Updates.UpdateOptions.SectionName);
         if (!updates.RequireHttps && string.IsNullOrWhiteSpace(updates.PublicKey))
             warnings.Add("Updates may be downloaded over plain HTTP without a signing key (Updates:PublicKey): " +
@@ -113,5 +117,67 @@ public static class StartupValidator
             warnings.Add($"The last configuration change could not be loaded and was ignored: {reloadError}");
 
         return new Report(errors, warnings);
+    }
+
+    private static void ValidateAlerting(AlertingOptions alerting, List<string> errors)
+    {
+        if (alerting.RenotifyMinutes < 0)
+            errors.Add($"Alerting:RenotifyMinutes must be >= 0 (was {alerting.RenotifyMinutes}).");
+        if (alerting.ResolveAfterSeconds < 0)
+            errors.Add($"Alerting:ResolveAfterSeconds must be >= 0 (was {alerting.ResolveAfterSeconds}).");
+    }
+
+    /// <summary>Channel checks. Messages name the key only: URLs and secrets are credentials.</summary>
+    private static void ValidateNotifications(NotificationOptions notifications, List<string> errors, List<string> warnings)
+    {
+        void Severity(string key, string? value)
+        {
+            if (!NotificationChannelResolver.TryParseSeverity(value, out _))
+                errors.Add($"{key} must be Info, Warning or Critical.");
+        }
+
+        void Url(string key, string? value, bool required)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                if (required)
+                    errors.Add($"{key} is required.");
+                return;
+            }
+            if (!NotificationChannelResolver.IsValidUrl(value))
+                errors.Add($"{key} is not a valid http(s) URL.");
+            else if (new Uri(value.Trim()).Scheme == Uri.UriSchemeHttp)
+                warnings.Add($"{key} uses plain HTTP: alert details travel unencrypted.");
+        }
+
+        Severity("Notifications:Email:MinSeverity", notifications.Email.MinSeverity);
+        foreach (var (name, settings) in new[]
+                 {
+                     ("Teams", notifications.Teams), ("Slack", notifications.Slack), ("Webhook", notifications.Webhook),
+                 })
+        {
+            Url($"Notifications:{name}:Url", settings.Url, required: false);
+            Severity($"Notifications:{name}:MinSeverity", settings.MinSeverity);
+        }
+
+        if (notifications.TimeoutSeconds is < 1 or > 120)
+            errors.Add($"Notifications:TimeoutSeconds must be between 1 and 120 (was {notifications.TimeoutSeconds}).");
+
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < notifications.Channels.Count; i++)
+        {
+            var channel = notifications.Channels[i];
+            var prefix = $"Notifications:Channels:{i}";
+            if (!NotificationChannelResolver.TryParseType(channel.Type, out var type))
+            {
+                errors.Add($"{prefix}:Type must be Email, Webhook, Teams or Slack.");
+                continue;
+            }
+            Severity($"{prefix}:MinSeverity", channel.MinSeverity);
+            if (type != NotificationChannelType.Email && channel.Enabled)
+                Url($"{prefix}:Url", channel.Url, required: true);
+            if (!string.IsNullOrWhiteSpace(channel.Name) && !names.Add(channel.Name.Trim()))
+                errors.Add($"{prefix}:Name '{channel.Name}' is used by more than one channel.");
+        }
     }
 }

@@ -27,8 +27,9 @@ public class AlertEmailTests
         _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<full/>");
     }
 
-    private EmailNotificationDispatcher Dispatcher() =>
-        new(_email.Object, _reportBuilder.Object, _options, NullLogger<EmailNotificationDispatcher>.Instance);
+    private EmailNotificationChannel Channel() => new(_email.Object, _reportBuilder.Object, _options);
+
+    private static readonly NotificationChannel Email = new("email", NotificationChannelType.Email, AlertSeverity.Info);
 
     private static AlertNotification Opened(Incident? incident = null) => new(
         AlertNotificationKind.Opened, "cpu", AlertSeverity.Critical, "CPU Emergency: 99.5%", "CPU at 99.5% for over 300s",
@@ -38,7 +39,7 @@ public class AlertEmailTests
     [Fact]
     public async Task ShortAlertEmailByDefault()
     {
-        (await Dispatcher().DispatchAsync(Opened(), CancellationToken.None)).Should().Be(1);
+        (await Channel().SendAsync(Email, Opened(), CancellationToken.None)).Success.Should().BeTrue();
 
         _email.Verify(e => e.SendEmailAsync("[WatchTower] CPU Emergency: 99.5% (SRV-01)", "<short/>", It.IsAny<CancellationToken>()), Times.Once);
         _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Never);
@@ -49,27 +50,25 @@ public class AlertEmailTests
     {
         _options.CurrentValue = new AlertingOptions { IncludeFullReport = true };
 
-        await Dispatcher().DispatchAsync(Opened(), CancellationToken.None);
+        await Channel().SendAsync(Email, Opened(), CancellationToken.None);
 
         _email.Verify(e => e.SendEmailAsync(It.IsAny<string>(), "<full/>", It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task SmtpNotConfigured_CountsAsNoChannel()
+    public void SmtpNotConfigured_ChannelIsUnavailable()
     {
         _email.Setup(e => e.IsConfigured).Returns(false);
 
-        (await Dispatcher().DispatchAsync(Opened(), CancellationToken.None)).Should().Be(0);
-
-        _email.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        Channel().IsAvailable(Email).Should().BeFalse();
     }
 
     [Fact]
-    public async Task FailedDelivery_StillCountsAsHandedToTheChannel()
+    public async Task FailedDelivery_IsReportedAsFailure()
     {
         _email.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(false);
 
-        (await Dispatcher().DispatchAsync(Opened(), CancellationToken.None)).Should().Be(1);
+        (await Channel().SendAsync(Email, Opened(), CancellationToken.None)).Success.Should().BeFalse();
     }
 
     [Theory]
@@ -77,7 +76,7 @@ public class AlertEmailTests
     [InlineData(AlertNotificationKind.Resolved, "[WatchTower] Resolved: CPU Emergency: 99.5% (SRV-01)")]
     [InlineData(AlertNotificationKind.Test, "[WatchTower] Test notification (SRV-01)")]
     public void Subjects(AlertNotificationKind kind, string expected) =>
-        EmailNotificationDispatcher.Subject(Opened() with { Kind = kind }).Should().Be(expected);
+        EmailNotificationChannel.Subject(Opened() with { Kind = kind }).Should().Be(expected);
 
     [Fact]
     public void RenderAlert_EncodesEverySystemValue()

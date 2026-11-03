@@ -101,8 +101,10 @@ internal static class TestAlerts
         IPortalEventPublisher? portal = null)
     {
         var monitor = new TestOptionsMonitor<AlertingOptions>(options ?? new AlertingOptions());
-        var dispatcher = new EmailNotificationDispatcher(email, reportBuilder, monitor,
-            NullLogger<EmailNotificationDispatcher>.Instance);
+        var dispatcher = new NotificationDispatcher(
+            [new EmailNotificationChannel(email, reportBuilder, monitor)],
+            new TestOptionsMonitor<NotificationOptions>(new NotificationOptions()),
+            NullLogger<NotificationDispatcher>.Instance);
         return new AlertManager(new InMemoryAlertStateStore(), metricsStore, portal ?? new NullPortalEventPublisher(),
             dispatcher, monitor, time, NullLogger<AlertManager>.Instance, "TEST-SRV");
     }
