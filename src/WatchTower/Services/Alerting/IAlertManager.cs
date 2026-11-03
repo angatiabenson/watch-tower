@@ -63,6 +63,14 @@ public interface IAlertManager
         string keyPrefix, IEnumerable<AlertKey> configured, string reason, CancellationToken ct = default);
 
     /// <summary>
+    /// Retires the open alert <paramref name="key"/> with <paramref name="reason"/>, like
+    /// <see cref="RetireUnconfiguredAsync"/>: for resources that are discovered rather than
+    /// configured (disks, network adapters) and have disappeared (see
+    /// <see cref="AbsentResourceTracker"/>). Returns true when an open alert was retired.
+    /// </summary>
+    Task<bool> RetireAsync(AlertKey key, string reason, CancellationToken ct = default);
+
+    /// <summary>
     /// Records, publishes and notifies a one-shot event that has no open/resolved lifecycle
     /// (e.g. "server restarted"). Not stored in <c>alert_state</c>.
     /// </summary>

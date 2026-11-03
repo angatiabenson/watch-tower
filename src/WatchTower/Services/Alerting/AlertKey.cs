@@ -24,9 +24,13 @@ public readonly record struct AlertKey
     /// <summary>One-shot summary of what a maintenance window held back, sent when it ends.</summary>
     public static AlertKey Maintenance { get; } = new("maintenance");
 
-    public static AlertKey Disk(string drive) => new($"disk:{drive}");
-    public static AlertKey DiskQueue(string instance) => new($"diskqueue:{instance}");
-    public static AlertKey Network(string interfaceName) => new($"net:{interfaceName}");
+    public const string DiskPrefix = "disk:";
+    public const string DiskQueuePrefix = "diskqueue:";
+    public const string NetworkPrefix = "net:";
+
+    public static AlertKey Disk(string drive) => new(DiskPrefix + drive);
+    public static AlertKey DiskQueue(string instance) => new(DiskQueuePrefix + instance);
+    public static AlertKey Network(string interfaceName) => new(NetworkPrefix + interfaceName);
     public const string ServicePrefix = "svc:";
     public const string AppPoolPrefix = "pool:";
     public const string EndpointPrefix = "endpoint:";

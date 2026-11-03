@@ -19,6 +19,8 @@ public class DiskMonitorWorker : BackgroundService
     private readonly IWorkerHealth? _health;
 
     private readonly RecoveryDebouncer _recovery = new();
+    private readonly AbsentResourceTracker _removedDisks;
+    private readonly AbsentResourceTracker _removedQueues;
 
     public DiskMonitorWorker(
         ISystemMetricsProvider metricsProvider,
@@ -37,6 +39,13 @@ public class DiskMonitorWorker : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _health = workerHealth;
+
+        // A host always has a system drive (and its physical disk): an empty listing is a broken
+        // read, never a reason to retire every disk alert.
+        _removedDisks = new AbsentResourceTracker(AlertKey.DiskPrefix, "drives",
+            drive => $"Disk {drive.TrimEnd('\\')} is no longer present", emptyIsSuspicious: true, logger);
+        _removedQueues = new AbsentResourceTracker(AlertKey.DiskQueuePrefix, "physical disks",
+            disk => $"Physical disk {disk} is no longer present", emptyIsSuspicious: true, logger);
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -112,6 +121,8 @@ public class DiskMonitorWorker : BackgroundService
                 await _alerts.ResolveAsync(key, ct: ct);
         }
 
+        await RetireRemovedAsync(_removedDisks, _metricsProvider.GetDiskInventory, ct);
+
         // Disk queue length monitoring
         if (!TryRead(_metricsProvider.GetDiskQueueMetrics, "disk queue length", out var queueMetrics))
             return;
@@ -142,6 +153,24 @@ public class DiskMonitorWorker : BackgroundService
             _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
             if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
                 await _alerts.ResolveAsync(key, ct: ct);
+        }
+
+        await RetireRemovedAsync(_removedQueues, _metricsProvider.GetDiskQueueInventory, ct);
+    }
+
+    /// <summary>
+    /// Retires the alerts of drives or physical disks that are gone (see
+    /// <see cref="AbsentResourceTracker"/>); only reached after the metrics read succeeded.
+    /// </summary>
+    private async Task RetireRemovedAsync(AbsentResourceTracker tracker, Func<ResourceInventory?> inventory, CancellationToken ct)
+    {
+        try
+        {
+            await tracker.ReconcileAsync(_alerts, inventory, UtcNow, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not retire alerts of removed disks");
         }
     }
 

@@ -19,6 +19,7 @@ public class NetworkMonitorWorker : BackgroundService
     private readonly IWorkerHealth? _health;
 
     private readonly RecoveryDebouncer _recovery = new();
+    private readonly AbsentResourceTracker _removedAdapters;
 
     public NetworkMonitorWorker(
         ISystemMetricsProvider metricsProvider,
@@ -37,6 +38,10 @@ public class NetworkMonitorWorker : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _health = workerHealth;
+
+        // Zero adapters can be genuine (all disabled), so it counts; the grace period still applies.
+        _removedAdapters = new AbsentResourceTracker(AlertKey.NetworkPrefix, "network adapters",
+            adapter => $"Network adapter {adapter} is no longer present", emptyIsSuspicious: false, logger);
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -119,6 +124,16 @@ public class NetworkMonitorWorker : BackgroundService
                 if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
                     await _alerts.ResolveAsync(key, ct: ct);
             }
+        }
+
+        // Only after the metrics read succeeded (see AbsentResourceTracker).
+        try
+        {
+            await _removedAdapters.ReconcileAsync(_alerts, _metricsProvider.GetNetworkInventory, UtcNow, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not retire alerts of removed network adapters");
         }
     }
 }

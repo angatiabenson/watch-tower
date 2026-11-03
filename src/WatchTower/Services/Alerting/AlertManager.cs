@@ -179,6 +179,12 @@ public sealed class AlertManager : IAlertManager
     public Task<bool> ResolveAsync(AlertKey key, Incident? recoveryIncident = null, CancellationToken ct = default) =>
         CloseAsync(key, recoveryIncident, retiredReason: null, ct);
 
+    public Task<bool> RetireAsync(AlertKey key, string reason, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        return CloseAsync(key, recoveryIncident: null, reason, ct);
+    }
+
     public async Task<IReadOnlyList<string>> RetireUnconfiguredAsync(
         string keyPrefix, IEnumerable<AlertKey> configured, string reason, CancellationToken ct = default)
     {

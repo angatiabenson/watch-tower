@@ -157,4 +157,16 @@ public class SystemMetricsProviderTests
 
         act.Should().NotThrow();
     }
+
+    [Fact]
+    public void RealProvider_DiskInventoryListsTheSystemDrive_AndEveryDriveWithMetrics()
+    {
+        using var provider = new SystemMetricsProvider(NullLogger<SystemMetricsProvider>.Instance);
+
+        var inventory = provider.GetDiskInventory().Names;
+
+        inventory.Should().Contain(n => string.Equals(n, Path.GetPathRoot(Environment.SystemDirectory), StringComparison.OrdinalIgnoreCase));
+        inventory.Should().Contain(provider.GetDiskMetrics().Select(d => d.DriveName),
+            "a drive with metrics must never look removed");
+    }
 }

@@ -103,6 +103,20 @@ public class SystemMetricsProvider : ISystemMetricsProvider
         return new RamMetric(now, usagePercent, availableMb, totalMb);
     }
 
+    // Inventories are read without the error tolerance of the metric reads: a failure must
+    // surface (and skip retirement) rather than look like every resource disappeared.
+
+    public ResourceInventory GetDiskInventory() => new(DriveInfo.GetDrives()
+        .Where(d => d.DriveType == DriveType.Fixed)
+        .Select(d => d.Name)
+        .ToList());
+
+    public ResourceInventory GetDiskQueueInventory() =>
+        new(new PerformanceCounterCategory("PhysicalDisk").GetInstanceNames().Where(i => i != "_Total").ToList());
+
+    public ResourceInventory GetNetworkInventory() =>
+        new(new PerformanceCounterCategory("Network Interface").GetInstanceNames().ToList());
+
     public IReadOnlyList<DiskMetric> GetDiskMetrics()
     {
         var metrics = new List<DiskMetric>();
