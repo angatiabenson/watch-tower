@@ -27,6 +27,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(paths);
         services.AddSingleton<AgentInfo>();
         services.AddSingleton<IAgentRestarter, AgentRestarter>();
+        services.AddSingleton<IWorkerHealth, WorkerHealthRegistry>();
         services.AddSingleton<ISettingsStore>(_ => new JsonSettingsStore(paths.SettingsFilePath));
 
         AddOptions(services, config);
@@ -82,6 +83,8 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<ServiceMonitorWorker>();
         services.AddHostedService<ApplicationPoolMonitorWorker>();
         services.AddHostedService<HeartbeatWorker>();
+        services.AddSingleton<IBootTimeProvider, TickCountBootTimeProvider>();
+        services.AddHostedService<RebootDetectionWorker>();
         services.AddHostedService<EmailReporterWorker>();
 
         return services;

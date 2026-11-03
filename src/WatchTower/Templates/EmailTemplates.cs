@@ -517,6 +517,7 @@ WatchTower Monitoring Service · {H(n.Server)}</td></tr>
             IncidentType.ApplicationPoolDown => "Application Pool Down",
             IncidentType.ApplicationPoolStarted => "Application Pool Started",
             IncidentType.ApplicationPoolStartFailed => "Application Pool Start Failed",
+            IncidentType.ServerRestarted => "Server Restarted",
             _ => type.ToString(),
         };
 }

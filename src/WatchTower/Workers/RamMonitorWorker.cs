@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
@@ -19,6 +20,7 @@ public class RamMonitorWorker : BackgroundService
     private readonly IOptionsMonitor<RamMonitorOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<RamMonitorWorker> _logger;
+    private readonly IWorkerHealth? _health;
 
     private readonly RecoveryDebouncer _recovery = new();
     private DateTime? _firstBreachTime;
@@ -31,7 +33,8 @@ public class RamMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<RamMonitorOptions> options,
         TimeProvider timeProvider,
-        ILogger<RamMonitorWorker> logger
+        ILogger<RamMonitorWorker> logger,
+        IWorkerHealth? workerHealth = null
     )
     {
         _metricsProvider = metricsProvider;
@@ -41,6 +44,7 @@ public class RamMonitorWorker : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _health = workerHealth;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -49,11 +53,14 @@ public class RamMonitorWorker : BackgroundService
     {
         _logger.LogInformation("RAM Monitor Worker started");
 
+        ReportAlive();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
+                ReportAlive();
                 await Task.Delay(
                     TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
                     _timeProvider, stoppingToken);
@@ -71,6 +78,10 @@ public class RamMonitorWorker : BackgroundService
 
         _logger.LogInformation("RAM Monitor Worker stopped");
     }
+
+    /// <summary>Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>).</summary>
+    private void ReportAlive() =>
+        _health?.ReportSuccess(WorkerNames.Ram, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
 
     /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)

@@ -41,6 +41,9 @@ Password rule: at least 10 characters (server enforces; show the hint in the for
   },
   "health": { "errors": ["..."], "warnings": ["SMTP host is not configured. ..."] },
   "restartPending": false,          // a restart-required setting was saved but not yet applied
+  "workers": [                      // monitoring worker liveness (feeds the health-gated heartbeat)
+    { "name": "cpu", "lastSuccessAt": "2026-11-03T09:59:55Z", "intervalSeconds": 5, "stale": false }
+  ],                                // stale = no successful cycle for 3x the interval (at least 2 min)
   "update": { "phase": "Available", "availableVersion": "1.6.0", "restartAt": null, "lastResult": null },  // see Updates
   "portal": { "enabled": false, "baseUrl": "", "agentId": "", "protocol": "Https" },
   "email": { "configured": false, "recipients": 0 },

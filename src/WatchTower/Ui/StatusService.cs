@@ -20,7 +20,8 @@ public sealed class StatusService(
     IOptionsMonitor<DiskMonitorOptions> diskOptions,
     IOptionsMonitor<EmailOptions> emailOptions,
     IOptionsMonitor<PortalOptions> portalOptions,
-    Updates.UpdateService updates)
+    Updates.UpdateService updates,
+    IWorkerHealth workerHealth)
 {
     private const int MaxSeriesPoints = 120;
 
@@ -53,6 +54,14 @@ public sealed class StatusService(
             },
             health = new { errors = report.Errors, warnings = report.Warnings },
             restartPending = restartState.Pending,
+            // Liveness of the monitoring workers; any stale one makes the heartbeat report failure.
+            workers = workerHealth.Snapshot().Select(w => new
+            {
+                name = w.Worker,
+                lastSuccessAt = w.LastSuccessAt,
+                intervalSeconds = (long)w.Interval.TotalSeconds,
+                stale = w.IsStale,
+            }),
             update = UpdateSummary(updates.GetStatus()),
             portal = new { enabled = portal.Enabled, baseUrl = portal.BaseUrl, agentId = portal.AgentId, protocol = portal.Protocol },
             email = new
@@ -131,6 +140,7 @@ public sealed class StatusService(
         IncidentType.CpuThresholdBreached or IncidentType.RamThresholdBreached or IncidentType.DiskCritical
             or IncidentType.ServiceDown or IncidentType.ServiceRestartFailed
             or IncidentType.ApplicationPoolDown or IncidentType.ApplicationPoolStartFailed => "critical",
+        IncidentType.ServerRestarted => "warning",
         IncidentType.ServiceRestarted or IncidentType.ApplicationPoolStarted => "info",
         _ => "warning",
     };

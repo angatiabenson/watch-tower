@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 using WatchTower.Services.Alerting;
@@ -15,6 +16,7 @@ public class DiskMonitorWorker : BackgroundService
     private readonly IOptionsMonitor<DiskMonitorOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<DiskMonitorWorker> _logger;
+    private readonly IWorkerHealth? _health;
 
     private readonly RecoveryDebouncer _recovery = new();
 
@@ -24,7 +26,8 @@ public class DiskMonitorWorker : BackgroundService
         IAlertManager alerts,
         IOptionsMonitor<DiskMonitorOptions> options,
         TimeProvider timeProvider,
-        ILogger<DiskMonitorWorker> logger
+        ILogger<DiskMonitorWorker> logger,
+        IWorkerHealth? workerHealth = null
     )
     {
         _metricsProvider = metricsProvider;
@@ -33,6 +36,7 @@ public class DiskMonitorWorker : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _health = workerHealth;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -41,11 +45,14 @@ public class DiskMonitorWorker : BackgroundService
     {
         _logger.LogInformation("Disk Monitor Worker started");
 
+        ReportAlive();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
+                ReportAlive();
                 await Task.Delay(
                     TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
                     _timeProvider, stoppingToken);
@@ -63,6 +70,10 @@ public class DiskMonitorWorker : BackgroundService
 
         _logger.LogInformation("Disk Monitor Worker stopped");
     }
+
+    /// <summary>Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>).</summary>
+    private void ReportAlive() =>
+        _health?.ReportSuccess(WorkerNames.Disk, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
 
     /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)

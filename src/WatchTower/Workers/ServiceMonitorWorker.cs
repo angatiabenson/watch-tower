@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
@@ -31,6 +32,7 @@ public class ServiceMonitorWorker : BackgroundService
     private readonly IOptionsMonitor<ServiceMonitorOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ServiceMonitorWorker> _logger;
+    private readonly IWorkerHealth? _health;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _activeOutages = new(StringComparer.OrdinalIgnoreCase);
@@ -46,7 +48,8 @@ public class ServiceMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ServiceMonitorOptions> options,
         TimeProvider timeProvider,
-        ILogger<ServiceMonitorWorker> logger
+        ILogger<ServiceMonitorWorker> logger,
+        IWorkerHealth? workerHealth = null
     )
     {
         _serviceManager = serviceManager;
@@ -56,6 +59,7 @@ public class ServiceMonitorWorker : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _health = workerHealth;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -64,11 +68,14 @@ public class ServiceMonitorWorker : BackgroundService
     {
         _logger.LogInformation("Service Monitor Worker started");
 
+        ReportAlive();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
+                ReportAlive();
                 await Task.Delay(
                     TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
                     _timeProvider, stoppingToken);
@@ -88,6 +95,10 @@ public class ServiceMonitorWorker : BackgroundService
         await WhenRecoveriesIdleAsync();
         _logger.LogInformation("Service Monitor Worker stopped");
     }
+
+    /// <summary>Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>).</summary>
+    private void ReportAlive() =>
+        _health?.ReportSuccess(WorkerNames.Services, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
 
     /// <summary>Completes once every in-flight per-service recovery has finished. Exposed for testing.</summary>
     internal Task WhenRecoveriesIdleAsync() => Task.WhenAll(_recoveries.Values);

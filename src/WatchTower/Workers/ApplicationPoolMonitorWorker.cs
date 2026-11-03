@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
@@ -19,6 +20,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ApplicationPoolMonitorWorker> _logger;
+    private readonly IWorkerHealth? _health;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
     private readonly ConcurrentDictionary<string, byte> _activeOutages = new();
@@ -30,7 +32,8 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ApplicationPoolMonitorOptions> options,
         TimeProvider timeProvider,
-        ILogger<ApplicationPoolMonitorWorker> logger
+        ILogger<ApplicationPoolMonitorWorker> logger,
+        IWorkerHealth? workerHealth = null
     )
     {
         _applicationPoolManager = applicationPoolManager;
@@ -40,6 +43,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
+        _health = workerHealth;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -48,11 +52,14 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     {
         _logger.LogInformation("Application Pool Monitor Worker started");
 
+        ReportAlive();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
+                ReportAlive();
                 await Task.Delay(
                     TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
                     _timeProvider, stoppingToken);
@@ -71,6 +78,10 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         _logger.LogInformation("Application Pool Monitor Worker stopped");
     }
 
+    /// <summary>Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>).</summary>
+    private void ReportAlive() =>
+        _health?.ReportSuccess(WorkerNames.AppPools, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
+
     /// <summary>Runs a single poll/evaluate cycle over all watched pools. Exposed for testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)
     {
@@ -84,6 +95,10 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
         foreach (var applicationPoolName in opts.WatchedApplicationPools)
         {
+            // A stopped pool can take StartDelay + StartTimeout + StableStateDelay to handle: report
+            // progress per pool so a long cycle over several pools is not mistaken for a dead worker.
+            ReportAlive();
+
             var status = await _applicationPoolManager.GetApplicationPoolStatusAsync(applicationPoolName, ct);
             _metricsStore.AddApplicationPoolStatus(status);
 
