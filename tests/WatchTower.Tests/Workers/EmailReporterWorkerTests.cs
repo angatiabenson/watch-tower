@@ -5,6 +5,7 @@ using Microsoft.Extensions.Time.Testing;
 using Moq;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Portal.Storage;
 using WatchTower.Services.Abstractions;
@@ -12,8 +13,12 @@ using WatchTower.Workers;
 
 namespace WatchTower.Tests.Workers;
 
-public class EmailReporterWorkerTests
+public class EmailReporterWorkerTests : IDisposable
 {
+    // Isolated data dir so the last-report marker never leaks between tests or into bin/.
+    private readonly WatchTowerPaths _paths = new(AppContext.BaseDirectory,
+        Path.Combine(Path.GetTempPath(), "wt-tests", Guid.NewGuid().ToString("N")));
+
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IEmailService> _emailService = new();
     private readonly Mock<IMetricsStore> _metricsStore = new();
@@ -90,5 +95,11 @@ public class EmailReporterWorkerTests
         _displayOptions.Object,
         _portalOptions.Object,
         _time,
+        _paths,
         _logger.Object);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_paths.DataDirectory, recursive: true); } catch (IOException) { }
+    }
 }

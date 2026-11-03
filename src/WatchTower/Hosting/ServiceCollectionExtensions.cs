@@ -1,0 +1,125 @@
+using WatchTower.Configuration;
+using WatchTower.Configuration.Settings;
+using WatchTower.Portal;
+using WatchTower.Portal.Actions;
+using WatchTower.Portal.Actions.Handlers;
+using WatchTower.Portal.Clients;
+using WatchTower.Portal.Storage;
+using WatchTower.Services;
+using WatchTower.Services.Abstractions;
+using WatchTower.Workers;
+
+namespace WatchTower.Hosting;
+
+public static class ServiceCollectionExtensions
+{
+    /// <summary>Registers every WatchTower option, service and worker (the composition root).</summary>
+    public static IServiceCollection AddWatchTower(
+        this IServiceCollection services, IConfiguration config, WatchTowerPaths paths)
+    {
+        // Give workers time to finish the current cycle / flush in-flight DB writes on stop.
+        services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
+
+        // Single clock abstraction so worker timing is testable with a fake provider.
+        services.AddSingleton(TimeProvider.System);
+
+        services.AddSingleton(paths);
+        services.AddSingleton<AgentInfo>();
+        services.AddSingleton<ISettingsStore>(_ => new JsonSettingsStore(paths.SettingsFilePath));
+
+        AddOptions(services, config);
+
+        // Storage. The outbox store also owns the portal sync-state cursors, which the daily
+        // reporter resets after every purge — so it is required even in standalone mode.
+        var dbPath = paths.DatabasePath;
+        services.AddSingleton<IMetricsStore>(_ => new SqliteMetricsStore(dbPath));
+        services.AddSingleton(_ => new SqliteOutboxStore(dbPath));
+        services.AddSingleton<IOutboxStore>(sp => sp.GetRequiredService<SqliteOutboxStore>());
+        services.AddSingleton<IPortalSyncState>(sp => sp.GetRequiredService<SqliteOutboxStore>());
+
+        services.AddSingleton<ISystemMetricsProvider, SystemMetricsProvider>();
+        services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
+        services.AddSingleton<IIisApplicationPoolManager, IisApplicationPoolManager>();
+        services.AddTransient<IEmailService, EmailService>();
+        services.AddTransient<IReportBuilder, ReportBuilder>();
+
+        services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
+
+        if (config.GetValue<bool>($"{PortalOptions.SectionName}:Enabled"))
+            AddPortal(services, config, dbPath);
+        else
+            services.AddSingleton<IPortalEventPublisher, NullPortalEventPublisher>();
+
+        services.AddHostedService<CpuMonitorWorker>();
+        services.AddHostedService<RamMonitorWorker>();
+        services.AddHostedService<DiskMonitorWorker>();
+        services.AddHostedService<NetworkMonitorWorker>();
+        services.AddHostedService<ServiceMonitorWorker>();
+        services.AddHostedService<ApplicationPoolMonitorWorker>();
+        services.AddHostedService<HeartbeatWorker>();
+        services.AddHostedService<EmailReporterWorker>();
+
+        return services;
+    }
+
+    private static void AddOptions(IServiceCollection services, IConfiguration config)
+    {
+        services.Configure<CpuMonitorOptions>(config.GetSection(CpuMonitorOptions.SectionName));
+        services.Configure<RamMonitorOptions>(config.GetSection(RamMonitorOptions.SectionName));
+        services.Configure<DiskMonitorOptions>(config.GetSection(DiskMonitorOptions.SectionName));
+        services.Configure<ServiceMonitorOptions>(config.GetSection(ServiceMonitorOptions.SectionName));
+        services.Configure<ApplicationPoolMonitorOptions>(config.GetSection(ApplicationPoolMonitorOptions.SectionName));
+        services.Configure<NetworkMonitorOptions>(config.GetSection(NetworkMonitorOptions.SectionName));
+        services.Configure<HeartbeatOptions>(config.GetSection(HeartbeatOptions.SectionName));
+        services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
+        services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
+        services.Configure<PortalOptions>(config.GetSection(PortalOptions.SectionName));
+        services.Configure<DisplayOptions>(config.GetSection(DisplayOptions.SectionName));
+    }
+
+    private static void AddPortal(IServiceCollection services, IConfiguration config, string dbPath)
+    {
+        var protocol = config[$"{PortalOptions.SectionName}:Protocol"] ?? "Https";
+        var baseUrl = (config[$"{PortalOptions.SectionName}:BaseUrl"] ?? "").TrimEnd('/') + "/";
+
+        services.AddTransient<AgentAuthHandler>();
+        services.AddHttpClient("PortalClient", client =>
+        {
+            if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+                client.BaseAddress = uri;
+            client.Timeout = TimeSpan.FromSeconds(30);
+        }).AddHttpMessageHandler<AgentAuthHandler>();
+
+        if (protocol.Equals("Grpc", StringComparison.OrdinalIgnoreCase))
+            services.AddSingleton<IPortalClient, GrpcPortalClient>();
+        else
+            services.AddSingleton<IPortalClient, HttpsPortalClient>();
+
+        services.AddSingleton<ICommandStore>(_ => new SqliteCommandStore(dbPath));
+        services.AddSingleton<IRemoteConfigStore>(_ => new SqliteRemoteConfigStore(dbPath));
+
+        services.AddSingleton<IMetricSnapshotTrigger, MetricSnapshotTrigger>();
+        services.AddSingleton<IConfigSyncTrigger, ConfigSyncTrigger>();
+
+        services.AddSingleton<IActionHandler, ServiceStartHandler>();
+        services.AddSingleton<IActionHandler, ServiceStopHandler>();
+        services.AddSingleton<IActionHandler, ServiceRestartHandler>();
+        services.AddSingleton<IActionHandler, AppPoolStartHandler>();
+        services.AddSingleton<IActionHandler, AppPoolStopHandler>();
+        services.AddSingleton<IActionHandler, AppPoolRestartHandler>();
+        services.AddSingleton<IActionHandler, AppPoolRecycleHandler>();
+        services.AddSingleton<IActionHandler, ForceMetricSnapshotHandler>();
+        services.AddSingleton<IActionHandler, ForceConfigSyncHandler>();
+        services.AddSingleton<IActionHandler, AgentRestartHandler>();
+        services.AddSingleton<IActionHandler, ApplyConfigurationHandler>();
+        services.AddSingleton<ActionHandlerRegistry>();
+
+        services.AddSingleton<IPortalEventPublisher, PortalEventPublisher>();
+
+        services.AddHostedService<OutboxDispatchWorker>();
+        services.AddHostedService<CommandPollingWorker>();
+
+        if (config.GetValue($"{PortalOptions.SectionName}:RemoteConfig:Enabled", true))
+            services.AddHostedService<RemoteConfigWorker>();
+    }
+}

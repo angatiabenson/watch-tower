@@ -1,5 +1,6 @@
 using System.Text.Json;
 
+using WatchTower.Hosting;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Storage;
 
@@ -8,6 +9,7 @@ namespace WatchTower.Portal.Actions.Handlers;
 public class ApplyConfigurationHandler : IActionHandler
 {
     private readonly IRemoteConfigStore _configStore;
+    private readonly WatchTowerPaths _paths;
     private readonly ILogger<ApplyConfigurationHandler> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -19,9 +21,11 @@ public class ApplyConfigurationHandler : IActionHandler
 
     public ApplyConfigurationHandler(
         IRemoteConfigStore configStore,
+        WatchTowerPaths paths,
         ILogger<ApplyConfigurationHandler> logger)
     {
         _configStore = configStore;
+        _paths = paths;
         _logger = logger;
     }
 
@@ -54,16 +58,17 @@ public class ApplyConfigurationHandler : IActionHandler
 
         var version = parameters.TryGetValue("Version", out var v) ? v : Guid.NewGuid().ToString();
 
+        // Write the overlay first: only record the version once it is actually in effect.
+        await WriteRemoteConfigFileAsync(_paths.RemoteConfigFilePath, config, ct);
         await _configStore.SaveConfigAsync(config, version);
-        await WriteRemoteConfigFileAsync(config, ct);
 
         _logger.LogInformation("Remote configuration applied (version {Version})", version);
         return new ActionResult(true, $"Configuration applied (version {version})");
     }
 
-    internal static async Task WriteRemoteConfigFileAsync(RemoteAgentConfigDto config, CancellationToken ct)
+    internal static async Task WriteRemoteConfigFileAsync(string filePath, RemoteAgentConfigDto config, CancellationToken ct)
     {
-        var filePath = Path.Combine(AppContext.BaseDirectory, "remote-config.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
         var tempPath = filePath + ".tmp";
 
         var json = BuildConfigFileJson(config);

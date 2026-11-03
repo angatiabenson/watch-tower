@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Portal.Storage;
 using WatchTower.Services.Abstractions;
 
@@ -21,8 +22,7 @@ public class EmailReporterWorker : BackgroundService
     // Persisted marker (survives restarts and purges) recording the local date of the
     // last successfully-sent daily report, so a restart after the scheduled time does
     // not silently skip that day's report.
-    private readonly string _lastReportMarkerPath =
-        Path.Combine(AppContext.BaseDirectory, "last-report.txt");
+    private readonly string _lastReportMarkerPath;
 
     // Backstop retention used only when the daily report repeatedly fails to send, so the
     // metric tables stay bounded without losing the most recent data.
@@ -37,9 +37,11 @@ public class EmailReporterWorker : BackgroundService
         IOptionsMonitor<DisplayOptions> displayOptions,
         IOptionsMonitor<PortalOptions> portalOptions,
         TimeProvider timeProvider,
+        WatchTowerPaths paths,
         ILogger<EmailReporterWorker> logger
     )
     {
+        _lastReportMarkerPath = paths.LastReportMarkerPath;
         _reportBuilder = reportBuilder;
         _emailService = emailService;
         _metricsStore = metricsStore;

@@ -73,7 +73,7 @@ jobs:
         run: dotnet test --project tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-build --report-trx
 
       - name: Publish
-        run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
+        run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
 
       - name: Stop service (if running)
         shell: powershell
@@ -176,14 +176,13 @@ jobs:
           }
           Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 
-      - name: Create service (if not exists)
+      - name: Register service
         shell: powershell
         run: |
-          $service = Get-Service -Name $env:SERVICE_NAME -ErrorAction SilentlyContinue
-          if (-not $service) {
-            sc.exe create $env:SERVICE_NAME binPath="${{ env.DEPLOY_PATH }}\WatchTower.exe" start=auto
-            sc.exe description $env:SERVICE_NAME "WatchTower Server Monitoring Service"
-          }
+          # Idempotent: creates the service or updates its binPath, delayed-auto start and
+          # crash-recovery actions; also creates and locks down the data directory.
+          & "${{ env.DEPLOY_PATH }}\WatchTower.exe" install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Start service
         shell: powershell
@@ -198,7 +197,8 @@ jobs:
           # log for a worker "started" line, fail fast on a fatal/config error, and confirm
           # the service is still running at the end (catches crash-on-start loops).
           $deployPath = "${{ env.DEPLOY_PATH }}"
-          $logDir = "$deployPath\Logs"
+          # Logs live in the data directory, not next to the binaries.
+          $logDir = Join-Path $env:ProgramData "WatchTower\Logs"
           $healthy = $false
           $fatal = $false
 
