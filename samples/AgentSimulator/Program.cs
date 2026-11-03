@@ -214,7 +214,7 @@ internal sealed class Scenarios(
             null, "reboot", null), ct));
         Check("Incident without alert accepted (no alertKey)", await portal.SendEventAsync(new AgentEventDto(
             Guid.NewGuid().ToString(), SimulatedAgent.Stamp(Now), (int)IncidentType.CpuSpikeDetected,
-            "CPU spike detected: 97.2%", agent.TopProcesses(), null, null), ct));
+            "CPU hit 97.2% (threshold: 95%)", agent.TopProcesses(), null, null), ct));
 
         var count = await agent.PollCommandsAsync(ct);
         Check("GET commands/pending answered (200 array or 204)", true, $"{count} command(s) received and handled");
@@ -333,27 +333,27 @@ internal sealed class Scenarios(
         var t = Now.AddMinutes(-30);
         DateTime At(int minute) => t.AddMinutes(minute);
 
-        agent.EnqueueEvent(IncidentType.CpuSpikeDetected, "CPU spike detected: 97.2%", At(0), topProcesses: agent.TopProcesses());
+        agent.EnqueueEvent(IncidentType.CpuSpikeDetected, "CPU hit 97.2% (threshold: 95%)", At(0), topProcesses: agent.TopProcesses());
         agent.EnqueueEvent(IncidentType.CpuThresholdBreached, "CPU at 99.6% for over 300s", At(1), "cpu", false, agent.TopProcesses());
         agent.EnqueueEvent(IncidentType.CpuThresholdBreached, "Resolved after 4 min: CPU at 99.6% for over 300s", At(5), "cpu", true);
-        agent.EnqueueEvent(IncidentType.RamSpikeDetected, "RAM spike detected: 95.0%", At(2), topProcesses: agent.TopProcesses());
-        agent.EnqueueEvent(IncidentType.RamThresholdBreached, "RAM at 93.4% for over 300s", At(3), "ram", false, agent.TopProcesses());
-        agent.EnqueueEvent(IncidentType.RamThresholdBreached, "Resolved after 6 min: RAM at 93.4% for over 300s", At(9), "ram", true);
-        agent.EnqueueEvent(IncidentType.DiskCritical, @"Drive C:\ is 91.2% full (11.1 GB free)", At(4), @"disk:C:\", false);
-        agent.EnqueueEvent(IncidentType.DiskQueueHigh, "Disk queue on 0 C: is 4.2", At(6), "diskqueue:0 C:", false);
-        agent.EnqueueEvent(IncidentType.DiskQueueHigh, "Resolved after 2 min: Disk queue on 0 C: is 4.2", At(8), "diskqueue:0 C:", true);
-        agent.EnqueueEvent(IncidentType.NetworkQueueSaturated, "Output queue on Ethernet0 is 12", At(7), "net:Ethernet0", false);
+        agent.EnqueueEvent(IncidentType.RamSpikeDetected, "RAM hit 95.0% (819 MB available, threshold: 90%)", At(2), topProcesses: agent.TopProcesses());
+        agent.EnqueueEvent(IncidentType.RamThresholdBreached, "RAM at 93.4% (1081 MB available) for over 300s", At(3), "ram", false, agent.TopProcesses());
+        agent.EnqueueEvent(IncidentType.RamThresholdBreached, "Resolved after 6 min: RAM at 93.4% (1081 MB available) for over 300s", At(9), "ram", true);
+        agent.EnqueueEvent(IncidentType.DiskCritical, @"Drive C:\ at 91.2% (11.1 GB free of 126.4 GB)", At(4), @"disk:C:\", false);
+        agent.EnqueueEvent(IncidentType.DiskQueueHigh, "Disk '0 C:' queue length at 4.2 (threshold: 2)", At(6), "diskqueue:0 C:", false);
+        agent.EnqueueEvent(IncidentType.DiskQueueHigh, "Resolved after 2 min: Disk '0 C:' queue length at 4.2 (threshold: 2)", At(8), "diskqueue:0 C:", true);
+        agent.EnqueueEvent(IncidentType.NetworkQueueSaturated, "Network interface 'Ethernet0' output queue at 12 (threshold: > 0)", At(7), "net:Ethernet0", false);
         agent.EnqueueEvent(IncidentType.NetworkQueueSaturated,
-            "No longer monitored (network adapter removed); closed after 3 min. Last state: Output queue on Ethernet0 is 12",
+            "No longer monitored (Network adapter Ethernet0 is no longer present); closed after 3 min. Last state: Network interface 'Ethernet0' output queue at 12 (threshold: > 0)",
             At(10), "net:Ethernet0", true);
         agent.EnqueueEvent(IncidentType.ServiceDown, "Service 'Print Spooler' (Spooler) is Stopped", At(11));
         agent.EnqueueEvent(IncidentType.ServiceRestartFailed, "Service 'Spooler' failed to restart after 3 attempts", At(12), "svc:Spooler", false);
         agent.EnqueueEvent(IncidentType.ServiceRestarted, "Service 'Print Spooler' (Spooler) was found stopped and restarted successfully",
             At(14), "svc:Spooler", true);
-        agent.EnqueueEvent(IncidentType.ApplicationPoolDown, "Application pool 'DefaultAppPool' is Stopped", At(15));
-        agent.EnqueueEvent(IncidentType.ApplicationPoolStartFailed, "Application pool 'DefaultAppPool' failed to start after 3 attempts",
+        agent.EnqueueEvent(IncidentType.ApplicationPoolDown, "IIS application pool 'DefaultAppPool' is Stopped", At(15));
+        agent.EnqueueEvent(IncidentType.ApplicationPoolStartFailed, "IIS application pool 'DefaultAppPool' failed to start after 3 attempts",
             At(16), "pool:DefaultAppPool", false);
-        agent.EnqueueEvent(IncidentType.ApplicationPoolStarted, "Application pool 'DefaultAppPool' was found stopped and started successfully",
+        agent.EnqueueEvent(IncidentType.ApplicationPoolStarted, "IIS application pool 'DefaultAppPool' was found stopped and started successfully",
             At(17), "pool:DefaultAppPool", true);
         agent.EnqueueEvent(IncidentType.EndpointDown, "Endpoint 'shop-home' (Http https://shop.example.com/) is down: HTTP 503 (3 consecutive failed checks)",
             At(18), "endpoint:shop-home", false);
@@ -364,7 +364,7 @@ internal sealed class Scenarios(
         agent.EnqueueEvent(IncidentType.ServerRestarted,
             "The server restarted at 2026-11-03 05:58 UTC. WatchTower was not stopped cleanly before it: possible crash, power loss or forced reset.",
             At(22), "reboot");
-        agent.EnqueueEvent(IncidentType.DiskCritical, @"Resolved after 20 min: Drive C:\ is 91.2% full (11.1 GB free)", At(24), @"disk:C:\", true);
+        agent.EnqueueEvent(IncidentType.DiskCritical, @"Resolved after 20 min: Drive C:\ at 91.2% (11.1 GB free of 126.4 GB)", At(24), @"disk:C:\", true);
 
         return await DrainAsync(ct) ? 0 : 1;
     }
