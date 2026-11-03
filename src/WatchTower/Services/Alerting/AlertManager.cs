@@ -293,7 +293,9 @@ public sealed class AlertManager : IAlertManager
             if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
             {
                 // Operators know about the alert: tell them it cleared (once the window ends, if held).
-                recovery = EnqueueLocked(notification, now, held: inMaintenance, out recoveryClaimed);
+                // Explicit: never folded into a maintenance summary, even if no channel has counted
+                // the opening yet (it may still reach operators once its send completes).
+                recovery = EnqueueLocked(notification, now, held: inMaintenance, out recoveryClaimed, explicitRecovery: true);
             }
             else if (options.SendRecovery && (inMaintenance || pending is { Held: true }))
             {
@@ -421,9 +423,10 @@ public sealed class AlertManager : IAlertManager
     /// It is not claimed (<paramref name="claimed"/> false) while an earlier notice of the same
     /// alert is still being sent: that sender sends it next.
     /// </summary>
-    private PendingDelivery EnqueueLocked(AlertNotification notification, DateTime now, bool held, out bool claimed)
+    private PendingDelivery EnqueueLocked(
+        AlertNotification notification, DateTime now, bool held, out bool claimed, bool explicitRecovery = false)
     {
-        var delivery = PendingDelivery.Create(notification, now, held);
+        var delivery = PendingDelivery.Create(notification, now, held, explicitRecovery);
         if (delivery.IsAlertNotice)
             RemoveNoticesLocked(notification.AlertKey);
         _store.UpsertDelivery(delivery);
@@ -527,7 +530,7 @@ public sealed class AlertManager : IAlertManager
 
     /// <summary>
     /// A maintenance window ended. Held notices operators should get one by one stay as they are
-    /// (alerts still open, and resolutions of alerts that were notified before the window); they
+    /// (alerts still open, and resolutions of alerts whose opening may have reached operators); they
     /// are released by <see cref="ContinueAsync"/>. Everything else that was held — alerts that
     /// opened and cleared inside the window, one-shot events such as the patch reboot — is
     /// replaced by a single summary notification.
@@ -536,8 +539,7 @@ public sealed class AlertManager : IAlertManager
     {
         var deliveries = Deliveries();
         var held = deliveries.Values
-            .Where(d => d.Held && (d.Notification.Kind == AlertNotificationKind.Event ||
-                                   d.Notification is { Kind: AlertNotificationKind.Resolved, NotifyCount: 0 }))
+            .Where(d => d.Held && (d.Notification.Kind == AlertNotificationKind.Event || d.IsSummarisedRecovery))
             .OrderBy(d => d.Notification.OccurredAtUtc)
             .ToList();
         if (held.Count == 0)

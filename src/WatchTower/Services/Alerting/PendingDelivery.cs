@@ -18,6 +18,10 @@ namespace WatchTower.Services.Alerting;
 /// <param name="NextAttemptAt">Earliest next attempt (UTC).</param>
 /// <param name="LastError">Last failure, per channel (no URLs or secrets).</param>
 /// <param name="Held">Held back by a maintenance window: not attempted until the window ends.</param>
+/// <param name="ExplicitRecovery">Resolved notices only: the alert's opening may have reached
+/// operators (it was notified, or its opened notice was being sent or had been attempted when the
+/// alert closed), so this recovery is always sent on its own, never folded into the
+/// end-of-maintenance summary.</param>
 public sealed record PendingDelivery(
     string Id,
     AlertNotification Notification,
@@ -27,7 +31,8 @@ public sealed record PendingDelivery(
     DateTime? FirstAttemptAt,
     DateTime NextAttemptAt,
     string? LastError,
-    bool Held = false)
+    bool Held = false,
+    bool ExplicitRecovery = false)
 {
     public string AlertKey => Notification.AlertKey;
 
@@ -37,8 +42,15 @@ public sealed record PendingDelivery(
     /// <summary>An opened, reminder or resolved notification (one per alert key at a time).</summary>
     public bool IsAlertNotice => IsAboutOpenAlert || Notification.Kind == AlertNotificationKind.Resolved;
 
-    public static PendingDelivery Create(AlertNotification notification, DateTime now, bool held) =>
-        new(Guid.NewGuid().ToString("N"), notification, now, [], 0, null, now, null, held);
+    /// <summary>
+    /// A resolved notice of an alert that operators were never told about (opened and cleared
+    /// inside a maintenance window): listed in the end-of-window summary instead of sent alone.
+    /// </summary>
+    public bool IsSummarisedRecovery =>
+        Notification is { Kind: AlertNotificationKind.Resolved, NotifyCount: 0 } && !ExplicitRecovery;
+
+    public static PendingDelivery Create(AlertNotification notification, DateTime now, bool held, bool explicitRecovery = false) =>
+        new(Guid.NewGuid().ToString("N"), notification, now, [], 0, null, now, null, held, explicitRecovery);
 }
 
 /// <summary>When failed notification deliveries are retried.</summary>

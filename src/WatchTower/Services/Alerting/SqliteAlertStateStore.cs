@@ -62,6 +62,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
 
         // Columns added after the first release of alert_state.
         AddColumnIfMissing(conn, "alert_state", "retired_reason", "TEXT");
+        AddColumnIfMissing(conn, "alert_delivery", "explicit_recovery", "INTEGER NOT NULL DEFAULT 0");
     }
 
     private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string definition)
@@ -168,7 +169,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 SELECT id, notification, created_at, delivered_channels, failed_attempts, first_attempt_at,
-                       next_attempt_at, last_error, held
+                       next_attempt_at, last_error, held, explicit_recovery
                 FROM alert_delivery
                 ORDER BY created_at, id
                 """;
@@ -197,7 +198,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     reader.IsDBNull(5) ? null : ParseUtc(reader.GetString(5)),
                     ParseUtc(reader.GetString(6)),
                     reader.IsDBNull(7) ? null : reader.GetString(7),
-                    reader.GetInt32(8) != 0));
+                    reader.GetInt32(8) != 0,
+                    reader.GetInt32(9) != 0));
             }
         }
         return results;
@@ -212,8 +214,10 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 INSERT INTO alert_delivery (id, alert_key, kind, notification, created_at, delivered_channels,
-                                            failed_attempts, first_attempt_at, next_attempt_at, last_error, held)
-                VALUES (@id, @key, @kind, @notification, @created, @delivered, @failed, @first, @next, @error, @held)
+                                            failed_attempts, first_attempt_at, next_attempt_at, last_error, held,
+                                            explicit_recovery)
+                VALUES (@id, @key, @kind, @notification, @created, @delivered, @failed, @first, @next, @error, @held,
+                        @explicit)
                 ON CONFLICT(id) DO UPDATE SET
                     notification = excluded.notification,
                     delivered_channels = excluded.delivered_channels,
@@ -221,7 +225,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     first_attempt_at = excluded.first_attempt_at,
                     next_attempt_at = excluded.next_attempt_at,
                     last_error = excluded.last_error,
-                    held = excluded.held
+                    held = excluded.held,
+                    explicit_recovery = excluded.explicit_recovery
                 """;
             cmd.Parameters.AddWithValue("@id", delivery.Id);
             cmd.Parameters.AddWithValue("@key", delivery.AlertKey);
@@ -234,6 +239,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.Parameters.AddWithValue("@next", Format(delivery.NextAttemptAt));
             cmd.Parameters.AddWithValue("@error", (object?)delivery.LastError ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@held", delivery.Held ? 1 : 0);
+            cmd.Parameters.AddWithValue("@explicit", delivery.ExplicitRecovery ? 1 : 0);
             cmd.ExecuteNonQuery();
         }
     }

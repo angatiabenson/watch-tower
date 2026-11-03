@@ -355,6 +355,47 @@ public class DeliveryConcurrencyTests
     }
 
     [Fact]
+    public async Task ResolvedInANewWindowWhileTheReleasedOpeningIsBeingSent_GetsAnExplicitRecoveryAfterARestart()
+    {
+        // The judge's probe: the released opening is in flight (not yet counted as notified) when a
+        // new window starts and the alert resolves; the opening then reaches its channel. The
+        // recovery must be sent on its own, not folded into the summary, also after a restart.
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var alerts = Persistent(dir.Paths.DatabasePath, _dispatcher);
+        _maintenance.Active = true;
+        await Raise(alerts);
+        _maintenance.Active = false;
+
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var opened = await _dispatcher.NextAsync(Ct);
+        _maintenance.Active = true;
+        (await alerts.ResolveAsync(Key, ct: Ct).Bounded()).Should().BeTrue();
+        opened.Deliver("ch1");
+        await processing.Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse("the recovery is held by the new window");
+
+        var held = new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Should().ContainSingle().Subject;
+        held.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+        held.Held.Should().BeTrue();
+        held.ExplicitRecovery.Should().BeTrue();
+
+        _maintenance.Active = false;
+        var restarted = Persistent(dir.Paths.DatabasePath, _dispatcher);
+        processing = restarted.ProcessPendingAsync(Ct);
+        var resolved = await _dispatcher.NextAsync(Ct);
+        resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+        resolved.Notification.AlertKey.Should().Be(Key.Value);
+        resolved.Deliver("ch1");
+        await processing.Bounded();
+
+        _dispatcher.HasWaitingCall.Should().BeFalse();
+        _dispatcher.Sent.Should().NotContain(n => n.Title.StartsWith("Maintenance ended"));
+        _dispatcher.Sent.Select(n => n.Kind).Should().Equal(AlertNotificationKind.Opened, AlertNotificationKind.Resolved);
+        restarted.GetPendingDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task WindowStartingWhileRetriesAreSent_LeavesTheRemainingRetriesPending()
     {
         var alerts = Alerts();

@@ -218,12 +218,47 @@ public class NotificationDeliveryTests
             "slack: Rejected with HTTP 500", Held: true);
 
         store.UpsertDelivery(delivery);
-        store.UpsertDelivery(delivery with { FailedAttempts = 3 });
+        store.UpsertDelivery(delivery with { FailedAttempts = 3, ExplicitRecovery = true });
 
         var loaded = new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Should().ContainSingle().Subject;
-        loaded.Should().BeEquivalentTo(delivery with { FailedAttempts = 3 });
+        loaded.Should().BeEquivalentTo(delivery with { FailedAttempts = 3, ExplicitRecovery = true });
         store.DeleteDelivery("id-1");
         store.LoadDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void SqliteStore_UpgradesADeliveryTableWithoutTheExplicitRecoveryColumn()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var notification = new AlertNotification(AlertNotificationKind.Resolved, "svc:W3SVC", AlertSeverity.Critical, "Service Down",
+            "running again", "SRV", Now, Now.AddHours(-1), TimeSpan.FromHours(1), NotifyCount: 0);
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dir.Paths.DatabasePath};Pooling=False"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            // The table as the previous version created it.
+            cmd.CommandText =
+                """
+                CREATE TABLE alert_delivery (
+                    id TEXT PRIMARY KEY, alert_key TEXT NOT NULL COLLATE NOCASE, kind INTEGER NOT NULL,
+                    notification TEXT NOT NULL, created_at TEXT NOT NULL, delivered_channels TEXT NOT NULL DEFAULT '[]',
+                    failed_attempts INTEGER NOT NULL DEFAULT 0, first_attempt_at TEXT, next_attempt_at TEXT NOT NULL,
+                    last_error TEXT, held INTEGER NOT NULL DEFAULT 0);
+                INSERT INTO alert_delivery (id, alert_key, kind, notification, created_at, next_attempt_at, held)
+                VALUES ('old', 'svc:W3SVC', 2, @notification, '2026-01-01T00:00:00.0000000Z', '2026-01-01T00:00:00.0000000Z', 1);
+                """;
+            cmd.Parameters.AddWithValue("@notification", System.Text.Json.JsonSerializer.Serialize(notification));
+            cmd.ExecuteNonQuery();
+        }
+
+        var store = new SqliteAlertStateStore(dir.Paths.DatabasePath);
+        var old = store.LoadDeliveries().Should().ContainSingle().Subject;
+        old.ExplicitRecovery.Should().BeFalse();
+        old.IsSummarisedRecovery.Should().BeTrue("a held resolved notice of a never-notified alert, as before");
+
+        store.UpsertDelivery(old with { ExplicitRecovery = true });
+        new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Single().ExplicitRecovery.Should().BeTrue();
     }
 
     [Theory]
