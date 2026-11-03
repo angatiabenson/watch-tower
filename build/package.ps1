@@ -42,20 +42,21 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.\-]+)?$') {
 
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $OutputDir = [IO.Path]::GetFullPath($OutputDir)
-$publishDir = if ($PublishDir) { [IO.Path]::GetFullPath($PublishDir) } else { Join-Path $OutputDir "publish-$Runtime" }
+# NB: PowerShell variable names are case-insensitive, so this must not be called $publishDir.
+$publishOutput = if ($PublishDir) { [IO.Path]::GetFullPath($PublishDir) } else { Join-Path $OutputDir "publish-$Runtime" }
 $stageDir = Join-Path $OutputDir "stage-$Runtime"
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 if (-not $SkipPublish -and -not $PublishDir) {
-    if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
+    if (Test-Path $publishOutput) { Remove-Item $publishOutput -Recurse -Force }
     dotnet publish (Join-Path $root 'src/WatchTower/WatchTower.csproj') `
-        --configuration Release --runtime $Runtime --output $publishDir "-p:Version=$Version"
+        --configuration Release --runtime $Runtime --output $publishOutput "-p:Version=$Version"
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
 }
 
 # Sanity check: the exe must carry exactly the version we are releasing.
-$exe = Join-Path $publishDir 'WatchTower.exe'
+$exe = Join-Path $publishOutput 'WatchTower.exe'
 $productVersion = ((Get-Item $exe).VersionInfo.ProductVersion -split '\+')[0]
 if ($productVersion -ne $Version) {
     throw "Published WatchTower.exe reports version '$productVersion', expected '$Version'."
@@ -64,7 +65,7 @@ if ($productVersion -ne $Version) {
 # Stage the distributable: binaries + installer script + short readme.
 if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-Copy-Item (Join-Path $publishDir '*') $stageDir -Recurse
+Copy-Item (Join-Path $publishOutput '*') $stageDir -Recurse
 Get-ChildItem $stageDir -Include '*.pdb', 'web.config', '*.staticwebassets.*' -Recurse | Remove-Item -Force
 Copy-Item (Join-Path $root 'build/install.ps1') $stageDir
 Copy-Item (Join-Path $root 'build/INSTALL.txt') $stageDir

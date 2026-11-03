@@ -100,6 +100,19 @@ internal sealed class ServiceInstaller(string serviceName, TextWriter output)
     /// <summary>The --data-dir the installed service runs with, or null (not installed / default).</summary>
     public string? GetConfiguredDataDirectory() => DataDirectoryOf(ReadImagePath(ServiceName));
 
+    /// <summary>Folder of the executable the installed service runs, or null (not installed).</summary>
+    public string? GetConfiguredInstallDirectory()
+    {
+        var imagePath = ReadImagePath(ServiceName);
+        if (string.IsNullOrWhiteSpace(imagePath))
+            return null;
+        var exe = SplitCommandLine(imagePath).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(exe))
+            return null;
+        exe = Environment.ExpandEnvironmentVariables(exe);
+        return File.Exists(exe) ? Path.GetDirectoryName(Path.GetFullPath(exe)) : null;
+    }
+
     /// <summary>Names of installed services whose command line uses <paramref name="dataDirectory"/>.</summary>
     public static IEnumerable<string> FindServicesUsingDataDirectory(string dataDirectory)
     {

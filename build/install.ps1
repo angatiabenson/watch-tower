@@ -59,8 +59,8 @@ function Assert-Administrator {
 }
 
 function Invoke-WatchTower {
-    param([string[]] $Arguments, [string] $StandardInput)
-    $exe = Join-Path $InstallDir 'WatchTower.exe'
+    param([string[]] $Arguments, [string] $StandardInput, [string] $Exe)
+    $exe = if ($Exe) { $Exe } else { Join-Path $InstallDir 'WatchTower.exe' }
     if ($StandardInput) {
         # Pipe through cmd's echo-free path: write the secret to the process's stdin directly.
         $psi = New-Object System.Diagnostics.ProcessStartInfo $exe
@@ -89,43 +89,80 @@ if (-not (Test-Path (Join-Path $source 'WatchTower.exe'))) {
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $common = @('--service-name', $ServiceName)
 if ($DataDir) { $common += @('--data-dir', [IO.Path]::GetFullPath($DataDir)) }
+$newExe = Join-Path $source 'WatchTower.exe'
 
 Write-Host "Installing WatchTower to $InstallDir" -ForegroundColor Green
 
-# Upgrade in place: stop the running service so its executable can be replaced.
-$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existing -and $existing.Status -ne 'Stopped') {
-    Write-Host "Stopping the existing '$ServiceName' service..."
-    Stop-Service -Name $ServiceName -Force
-    $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
+# ── 1. Validate everything BEFORE touching the running installation ─────────────────────
+if ($ConfigFile) {
+    $ConfigFile = [IO.Path]::GetFullPath($ConfigFile)
+    # Checked by the NEW version against its own defaults; nothing is written.
+    Invoke-WatchTower (@('config', 'validate', $ConfigFile) + $common) -Exe $newExe
 }
 
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-if ([IO.Path]::GetFullPath($source).TrimEnd('\') -ne $InstallDir.TrimEnd('\')) {
-    Get-ChildItem $source -Exclude 'install.ps1', '*.seed.json' | Copy-Item -Destination $InstallDir -Recurse -Force
-}
-
-$installArgs = @('install') + $common
-if ($ConfigFile) { $installArgs += @('--config', [IO.Path]::GetFullPath($ConfigFile)) }
-Invoke-WatchTower $installArgs
-
-# Console password: use the supplied one, otherwise prompt on a fresh install.
-$settings = (& (Join-Path $InstallDir 'WatchTower.exe') config path @common | Select-Object -Last 1)
+$settings = (& $newExe config path @common | Select-Object -Last 1)
 $hasPassword = (Test-Path $settings) -and ((Get-Content $settings -Raw) -match 'AdminPasswordHash')
 if (-not $AdminPassword -and -not $hasPassword -and [Environment]::UserInteractive) {
     Write-Host ''
     Write-Host 'Choose a password for the WatchTower web console (at least 10 characters).'
     $AdminPassword = Read-Host -AsSecureString 'Console password'
 }
+$plain = $null
 if ($AdminPassword) {
     $plain = [Runtime.InteropServices.Marshal]::PtrToStringUni(
         [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($AdminPassword))
-    try { Invoke-WatchTower (@('set-password', '--password-stdin') + $common) -StandardInput $plain }
-    finally { $plain = $null }
+    if ($plain.Length -lt 10) { throw 'The console password must be at least 10 characters.' }
 }
 
-if (-not $NoStart) {
-    Invoke-WatchTower (@('start') + $common)
+# ── 2. Stop the existing service and back up its binaries ───────────────────────────────
+$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$wasRunning = $existing -and $existing.Status -ne 'Stopped'
+$sameFolder = [IO.Path]::GetFullPath($source).TrimEnd('\') -eq $InstallDir.TrimEnd('\')
+$backup = $null
+if ((Test-Path (Join-Path $InstallDir 'WatchTower.exe')) -and -not $sameFolder) {
+    $backup = Join-Path ([IO.Path]::GetTempPath()) ("WatchTower-upgrade-backup-" + (Get-Date -Format 'yyyyMMddHHmmss'))
+}
+
+if ($wasRunning) {
+    Write-Host "Stopping the existing '$ServiceName' service..."
+    Stop-Service -Name $ServiceName -Force
+    $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
+}
+
+# ── 3. Install; on any failure restore the previous binaries and running state ──────────
+try {
+    if ($backup) { Copy-Item $InstallDir $backup -Recurse -Force }
+
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    if (-not $sameFolder) {
+        Get-ChildItem $source -Exclude 'install.ps1', '*.seed.json' | Copy-Item -Destination $InstallDir -Recurse -Force
+    }
+
+    $installArgs = @('install') + $common
+    if ($ConfigFile) { $installArgs += @('--config', $ConfigFile) }
+    Invoke-WatchTower $installArgs
+
+    if ($plain) { Invoke-WatchTower (@('set-password', '--password-stdin') + $common) -StandardInput $plain }
+
+    if (-not $NoStart) { Invoke-WatchTower (@('start') + $common) }
+}
+catch {
+    Write-Warning "Installation failed: $($_.Exception.Message)"
+    if ($backup -and (Test-Path $backup)) {
+        Write-Warning 'Restoring the previous version...'
+        # Mirror the backup back (also removes files the failed version added).
+        robocopy $backup $InstallDir /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($wasRunning) { Start-Service -Name $ServiceName -ErrorAction SilentlyContinue }
+        Write-Warning 'The previous version was restored.'
+    }
+    elseif ($wasRunning) {
+        Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    }
+    throw
+}
+finally {
+    $plain = $null
+    if ($backup -and (Test-Path $backup)) { Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host ''

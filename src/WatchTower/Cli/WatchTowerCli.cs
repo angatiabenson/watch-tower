@@ -109,14 +109,19 @@ public static class WatchTowerCli
         /// `status`, `config import`, `set-password` and `uninstall --purge-data` pointed at
         /// the instance they manage.
         /// </summary>
-        public WatchTowerPaths PathsOf(ParseResult parse)
+        /// <param name="useInstalledBinaries">
+        /// Read shipped defaults (appsettings.json) from the installed service's folder rather than
+        /// this executable's — what the running instance actually uses. `config validate` passes
+        /// false to check a seed against the NEW version's defaults before upgrading.
+        /// </param>
+        public WatchTowerPaths PathsOf(ParseResult parse, bool useInstalledBinaries = true)
         {
-            var explicitDir = Normalize(parse.GetValue(DataDir));
-            if (explicitDir is not null)
-                return WatchTowerPaths.Resolve(explicitDir);
+            var service = new ServiceInstaller(ServiceNameOf(parse), TextWriter.Null);
+            var installDir = useInstalledBinaries ? service.GetConfiguredInstallDirectory() : null;
 
-            var installed = new ServiceInstaller(ServiceNameOf(parse), TextWriter.Null).GetConfiguredDataDirectory();
-            return WatchTowerPaths.Resolve(Normalize(installed));
+            var explicitDir = Normalize(parse.GetValue(DataDir));
+            var dataDir = explicitDir ?? Normalize(service.GetConfiguredDataDirectory());
+            return WatchTowerPaths.Resolve(dataDir, installDir);
         }
     }
 
@@ -137,7 +142,7 @@ public static class WatchTowerCli
         {
             RequireAdministrator();
             var output = ctx.Output;
-            var paths = ctx.PathsOf(parse);
+            var paths = ctx.PathsOf(parse, useInstalledBinaries: false); // defaults of the exe being installed
             var exe = Environment.ProcessPath ?? throw new CliException("Cannot determine the executable path.");
 
             WarnOnVolatileLocation(exe, output);
@@ -374,6 +379,19 @@ public static class WatchTowerCli
             return 0;
         });
 
+        var validateFile = new Argument<FileInfo>("file") { Description = "JSON settings file to check." };
+        var validate = new Command("validate",
+            "Check that merging a JSON settings file would produce a valid configuration, without writing anything.")
+        {
+            validateFile,
+        };
+        validate.SetAction(parse =>
+        {
+            ImportSettings(ctx.PathsOf(parse, useInstalledBinaries: false), parse.GetValue(validateFile)!, ctx.Output,
+                validateOnly: true);
+            return 0;
+        });
+
         var path = new Command("path", "Print the operator settings file path.");
         path.SetAction(parse =>
         {
@@ -381,11 +399,11 @@ public static class WatchTowerCli
             return 0;
         });
 
-        return new Command("config", "Manage operator settings.") { import, path };
+        return new Command("config", "Manage operator settings.") { import, validate, path };
     }
 
-    /// <summary>Validates the configuration that would result, then merges the file in.</summary>
-    internal static void ImportSettings(WatchTowerPaths paths, FileInfo file, TextWriter output)
+    /// <summary>Validates the configuration that would result, then (unless validating only) merges the file in.</summary>
+    internal static void ImportSettings(WatchTowerPaths paths, FileInfo file, TextWriter output, bool validateOnly = false)
     {
         if (!file.Exists)
             throw new CliException($"Settings file '{file.FullName}' does not exist.");
@@ -406,22 +424,40 @@ public static class WatchTowerCli
             throw new CliException($"Invalid JSON in '{file.FullName}': {ex.Message}");
         }
 
+        // Merge + validate + write under the store lock, so a concurrent console edit cannot
+        // slip in between validation and the write.
+        var report = new StartupValidator.Report([], []);
         var store = new JsonSettingsStore(paths.SettingsFilePath);
-        var candidate = store.Read();
-        JsonSettingsStore.MergePatch(candidate, patch);
+        var written = store.TryUpdateAsync(doc =>
+        {
+            JsonSettingsStore.MergePatch(doc, patch);
+            report = ValidateCandidate(paths, doc);
+            return report.IsValid && !validateOnly;
+        }).GetAwaiter().GetResult();
 
-        var builder = new ConfigurationBuilder();
-        WatchTowerHost.ConfigureSources(builder, paths, "Production", reloadOnChange: false,
-            operatorSettingsOverride: candidate);
-        var candidateConfig = builder.Build();
-        var report = StartupValidator.Validate(candidateConfig);
-        (candidateConfig as IDisposable)?.Dispose();
         if (!report.IsValid)
             throw new CliException($"'{file.Name}' would produce an invalid configuration; nothing was imported:" +
                                    Environment.NewLine + " - " + string.Join(Environment.NewLine + " - ", report.Errors));
 
-        store.ApplyMergePatchAsync(patch).GetAwaiter().GetResult();
-        output.WriteLine($"Imported settings from {file.FullName} into {paths.SettingsFilePath}.");
+        output.WriteLine(written
+            ? $"Imported settings from {file.FullName} into {paths.SettingsFilePath}."
+            : $"{file.FullName} is valid.");
+    }
+
+    private static StartupValidator.Report ValidateCandidate(WatchTowerPaths paths, JsonObject operatorDoc)
+    {
+        var builder = new ConfigurationBuilder();
+        WatchTowerHost.ConfigureSources(builder, paths, "Production", reloadOnChange: false,
+            operatorSettingsOverride: operatorDoc);
+        var candidateConfig = builder.Build();
+        try
+        {
+            return StartupValidator.Validate(candidateConfig);
+        }
+        finally
+        {
+            (candidateConfig as IDisposable)?.Dispose();
+        }
     }
 
     /// <summary>The first address the console listens on, as a browsable URL; null when disabled.</summary>
