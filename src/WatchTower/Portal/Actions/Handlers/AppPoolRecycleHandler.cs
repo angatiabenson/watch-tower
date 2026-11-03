@@ -17,17 +17,17 @@ public class AppPoolRecycleHandler : IActionHandler
         _logger = logger;
     }
 
-    public Task<ActionResult> ExecuteAsync(
+    public async Task<ActionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, CancellationToken ct)
     {
         if (!AppPoolStartHandler.TryGetPoolName(parameters, out var name))
-            return Task.FromResult(new ActionResult(false, "Missing or invalid AppPoolName parameter"));
+            return new ActionResult(false, "Missing or invalid AppPoolName parameter");
 
         _logger.LogInformation("Portal command: recycling app pool '{Name}'", name);
 
-        var ok = _poolManager.RecycleApplicationPool(name, TimeSpan.FromSeconds(30));
-        return Task.FromResult(ok
+        var ok = await _poolManager.RecycleApplicationPoolAsync(name, TimeSpan.FromSeconds(30), ct);
+        return ok
             ? new ActionResult(true, $"App pool '{name}' recycled successfully")
-            : new ActionResult(false, $"Failed to recycle app pool '{name}'"));
+            : new ActionResult(false, $"Failed to recycle app pool '{name}'");
     }
 }

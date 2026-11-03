@@ -90,7 +90,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
         foreach (var applicationPoolName in opts.WatchedApplicationPools)
         {
-            var status = _applicationPoolManager.GetApplicationPoolStatus(applicationPoolName);
+            var status = await _applicationPoolManager.GetApplicationPoolStatusAsync(applicationPoolName, ct);
             _metricsStore.AddApplicationPoolStatus(status);
 
             if (status.IsRunning)
@@ -98,6 +98,17 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 _consecutiveFailures.TryRemove(applicationPoolName, out _);
                 _activeOutages.TryRemove(applicationPoolName, out _);
                 _logger.LogDebug("Application pool {ApplicationPoolName}: Started", applicationPoolName);
+                continue;
+            }
+
+            if (ApplicationPoolStatus.IsUnknown(status.Status))
+            {
+                // The state query timed out or failed (IIS busy, WAS slow, PowerShell module
+                // load stalled). That says nothing about the pool, so it must not raise a
+                // "down" incident or trigger a start; re-check on the next poll.
+                _logger.LogWarning(
+                    "State of application pool {ApplicationPoolName} could not be determined; re-checking next poll",
+                    applicationPoolName);
                 continue;
             }
 
@@ -118,17 +129,27 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
             await Task.Delay(TimeSpan.FromSeconds(opts.StartDelaySeconds), _timeProvider, ct);
 
-            var started = _applicationPoolManager.StartApplicationPool(
+            var started = await _applicationPoolManager.StartApplicationPoolAsync(
                 applicationPoolName,
-                TimeSpan.FromSeconds(opts.StartTimeoutSeconds)
+                TimeSpan.FromSeconds(opts.StartTimeoutSeconds),
+                ct
             );
 
             if (started)
             {
                 await Task.Delay(TimeSpan.FromSeconds(opts.StableStateDelaySeconds), _timeProvider, ct);
 
-                var restartStatus = _applicationPoolManager.GetApplicationPoolStatus(applicationPoolName);
+                var restartStatus = await _applicationPoolManager.GetApplicationPoolStatusAsync(applicationPoolName, ct);
                 _metricsStore.AddApplicationPoolStatus(restartStatus);
+
+                if (ApplicationPoolStatus.IsUnknown(restartStatus.Status))
+                {
+                    // Inconclusive re-check: neither a success nor a failed attempt.
+                    _logger.LogWarning(
+                        "Could not confirm application pool {ApplicationPoolName} is running after start; re-checking next poll",
+                        applicationPoolName);
+                    continue;
+                }
 
                 if (restartStatus.IsRunning)
                 {
