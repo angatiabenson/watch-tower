@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="WatchTower">
+  <title>WatchTower</title>
+  <!-- Outlined "T" tower on a base line: the WatchTower mark. Uses currentColor so it can be tinted. -->
+  <g fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="miter" stroke-linecap="square">
+    <path d="M12 9.5H52V18.5H36V52H28V18.5H12Z"/>
+    <path d="M19 55.5H45"/>
+  </g>
+  <rect x="29.5" y="12.5" width="5" height="3" fill="currentColor"/>
+</svg>

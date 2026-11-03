@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>WatchTower</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/GeistMono-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div id="app" class="boot" aria-busy="true">
+    <p class="boot-msg"><span class="spinner" aria-hidden="true"></span>Loading WatchTower console…</p>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
+  <noscript><p class="noscript">The WatchTower console needs JavaScript. Enable it for this site, or manage settings with <code>WatchTower.exe</code> on the server.</p></noscript>
+</body>
+</html>
