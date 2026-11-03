@@ -74,6 +74,42 @@ public class ConsoleApiTests
     }
 
     [Fact]
+    public async Task DnsRebinding_LoopbackRequestWithForeignHost_IsRejected_SoSetupCannotBeHijacked()
+    {
+        await using var host = await ConsoleTestHost.StartAsync(withPassword: false);
+        var client = host.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/auth/setup")
+        {
+            Content = JsonContent.Create(new { password = "attacker-chosen-pass" }),
+        };
+        request.Headers.Host = "attacker.example:8750";
+        request.Headers.Add("Origin", "http://attacker.example:8750");
+
+        var response = await client.SendAsync(request, Ct);
+
+        response.StatusCode.Should().Be(HttpStatusCode.MisdirectedRequest);
+        File.ReadAllText(host.Directory.Paths.SettingsFilePath).Should().NotContain("AdminPasswordHash");
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:8750", true)]
+    [InlineData("https://127.0.0.1:8750", false)] // scheme differs
+    [InlineData("http://127.0.0.1:9999", false)]  // port differs
+    public async Task Csrf_OriginMustMatchCompletely(string origin, bool accepted)
+    {
+        await using var host = await ConsoleTestHost.StartAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/auth/login")
+        {
+            Content = JsonContent.Create(new { password = ConsoleTestHost.Password }),
+        };
+        request.Headers.Add("Origin", origin);
+
+        var response = await host.CreateClient().SendAsync(request, Ct);
+
+        (response.StatusCode == HttpStatusCode.NoContent).Should().Be(accepted);
+    }
+
+    [Fact]
     public async Task FirstRunSetup_FromRemoteAddress_IsForbidden()
     {
         await using var host = await ConsoleTestHost.StartAsync(withPassword: false, requestsAreLocal: false);
@@ -112,6 +148,22 @@ public class ConsoleApiTests
         var recipients = (await client.GetFromJsonAsync<JsonElement>("api/config", Ct))
             .GetProperty("values").GetProperty("Email:ToAddresses").GetProperty("value");
         recipients.EnumerateArray().Select(e => e.GetString()).Should().Equal("ops@example.com"); // de-duplicated
+    }
+
+    [Fact]
+    public async Task SavedValue_IsVisibleToTheVeryNextRead()
+    {
+        // Regression: PUT returned before the debounced reload, so an immediate GET showed the old value.
+        await using var host = await ConsoleTestHost.StartAsync();
+        var client = await host.SignedInClientAsync();
+
+        (await client.PutAsJsonAsync("api/config",
+            new { changes = new Dictionary<string, object> { ["Monitoring:Ram:ThresholdPercent"] = 77 } }, Ct))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        var view = await client.GetFromJsonAsync<JsonElement>("api/config", Ct);
+
+        view.GetProperty("values").GetProperty("Monitoring:Ram:ThresholdPercent").GetProperty("value").GetDouble()
+            .Should().Be(77);
     }
 
     [Fact]

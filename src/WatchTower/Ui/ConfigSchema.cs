@@ -190,6 +190,9 @@ public static class ConfigSchema
             new("Ui:RequireHttpsForRemoteAccess", "Require HTTPS for remote access (recommended)", FieldType.Bool,
                 "Turn off to serve the console to other machines over plain http://. The console password and " +
                 "session then travel unencrypted.", RestartRequired: true, Advanced: true),
+            new("Ui:AllowedHosts", "Allowed host names", FieldType.List,
+                "Names other machines use to reach the console, e.g. srv-01.corp.local. Empty allows any.",
+                Advanced: true),
             new("Ui:CertificateThumbprint", "HTTPS certificate thumbprint", FieldType.String,
                 "Certificate in LocalMachine\\My used for https:// URLs.", RestartRequired: true, Advanced: true),
         ]),

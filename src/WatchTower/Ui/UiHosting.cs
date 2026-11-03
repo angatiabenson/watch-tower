@@ -129,6 +129,7 @@ public static class UiHosting
 
     public static WebApplication UseWatchTowerUi(this WebApplication app)
     {
+        app.Use(HostGuard);
         app.Use(SecurityHeaders);
         app.Use(CsrfGuard);
 
@@ -151,6 +152,46 @@ public static class UiHosting
         UiEndpoints.Map(app);
         return app;
     }
+
+    /// <summary>
+    /// DNS-rebinding defence. A page on attacker.example can make its DNS name resolve to
+    /// 127.0.0.1; the victim's browser then talks to the console over loopback while sending
+    /// <c>Host: attacker.example</c>, and the page can read the responses. Loopback connections
+    /// must therefore address the console AS loopback (127.0.0.1 / localhost / [::1]); with
+    /// <see cref="UiOptions.AllowedHosts"/> set, remote connections are limited to those names too.
+    /// </summary>
+    private static async Task HostGuard(HttpContext context, Func<Task> next)
+    {
+        var host = context.Request.Host.Host;
+        bool allowed;
+        if (IsLocalRequest(context))
+        {
+            allowed = IsLoopbackHost(host);
+        }
+        else
+        {
+            var allowedHosts = context.RequestServices
+                .GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<UiOptions>>().CurrentValue.AllowedHosts;
+            allowed = allowedHosts.Count == 0 ||
+                      allowedHosts.Any(h => string.Equals(h.Trim(), host, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!allowed)
+        {
+            context.Response.StatusCode = StatusCodes.Status421MisdirectedRequest;
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = $"This console does not answer to the host name '{host}'. " +
+                        "Open it at http://127.0.0.1 on the server, or add the name to Ui:AllowedHosts.",
+            });
+            return;
+        }
+        await next();
+    }
+
+    internal static bool IsLoopbackHost(string host) =>
+        string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+        (IPAddress.TryParse(host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip));
 
     private static async Task SecurityHeaders(HttpContext context, Func<Task> next)
     {
@@ -181,10 +222,11 @@ public static class UiHosting
             !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method))
         {
             var hasHeader = request.Headers.TryGetValue(CsrfHeader, out var value) && value == "1";
+            // Compare the complete origin (scheme + host + port), not only the authority.
             var origin = request.Headers.Origin.ToString();
             var originOk = string.IsNullOrEmpty(origin) ||
-                           (Uri.TryCreate(origin, UriKind.Absolute, out var o) &&
-                            string.Equals(o.Authority, request.Host.Value, StringComparison.OrdinalIgnoreCase));
+                           string.Equals(origin.TrimEnd('/'), $"{request.Scheme}://{request.Host.Value}",
+                               StringComparison.OrdinalIgnoreCase);
             if (!hasHeader || !originOk)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;

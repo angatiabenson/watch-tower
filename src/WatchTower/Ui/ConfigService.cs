@@ -163,6 +163,17 @@ public sealed partial class ConfigService(
         logger.LogInformation("Configuration updated from the console: {Keys}",
             string.Join(", ", normalized.Keys.Concat(resets.Select(r => r.Key + " (reset)"))));
 
+        // Publish the change now instead of waiting for the debounced file watcher, so the
+        // response — and the console's immediate re-read — reflect the saved values.
+        try
+        {
+            (configuration as IConfigurationRoot)?.Reload();
+        }
+        catch (InvalidDataException ex)
+        {
+            logger.LogWarning(ex, "Saved settings could not be reloaded immediately; the file watcher will retry");
+        }
+
         if (restartRequired)
             restartState.MarkPending();
 

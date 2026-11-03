@@ -27,6 +27,13 @@ public class UiOptions
     /// </summary>
     public bool RequireHttpsForRemoteAccess { get; set; } = true;
 
+    /// <summary>
+    /// Host names remote browsers may use to reach the console (e.g. "srv-01.corp.local").
+    /// Empty allows any name for remote connections. Connections from the server itself must
+    /// always use 127.0.0.1 / localhost (DNS-rebinding protection).
+    /// </summary>
+    public List<string> AllowedHosts { get; set; } = [];
+
     /// <summary>Thumbprint of a certificate in LocalMachine\My used for HTTPS URLs.</summary>
     public string? CertificateThumbprint { get; set; }
 
