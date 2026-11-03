@@ -134,15 +134,22 @@ if ((Test-Path (Join-Path $InstallDir 'WatchTower.exe')) -and -not $sameFolder) 
     $backup = Join-Path ([IO.Path]::GetTempPath()) ("WatchTower-upgrade-backup-" + (Get-Date -Format 'yyyyMMddHHmmss'))
 }
 
-if ($wasRunning) {
-    Write-Host "Stopping the existing '$ServiceName' service..."
-    Stop-Service -Name $ServiceName -Force
-    $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
-}
-
 # ── 3. Install; on any failure restore the previous binaries and running state ──────────
+$backupComplete = $false   # only a fully written backup may be restored
+$filesChanged = $false     # whether the installation folder has been touched yet
 try {
-    if ($backup) { Copy-Item $InstallDir $backup -Recurse -Force }
+    # Stopping is inside the recovery scope: a stop that times out (or any later failure)
+    # still ends with the previous service running again.
+    if ($wasRunning) {
+        Write-Host "Stopping the existing '$ServiceName' service..."
+        Stop-Service -Name $ServiceName -Force
+        $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
+    }
+
+    if ($backup) {
+        Copy-Item $InstallDir $backup -Recurse -Force -ErrorAction Stop
+        $backupComplete = $true
+    }
 
     # Installations from before the data directory kept settings, history and the database
     # next to the exe. Import them NOW, while the old appsettings.json is still in place;
@@ -153,6 +160,7 @@ try {
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     if (-not $sameFolder) {
+        $filesChanged = $true
         Get-ChildItem $source -Exclude 'install.ps1', '*.seed.json' | Copy-Item -Destination $InstallDir -Recurse -Force
     }
 
@@ -168,16 +176,19 @@ try {
 }
 catch {
     Write-Warning "Installation failed: $($_.Exception.Message)"
-    if ($backup -and (Test-Path $backup)) {
+    if ($filesChanged -and $backupComplete) {
         Write-Warning 'Restoring the previous version...'
-        # Mirror the backup back (also removes files the failed version added).
+        # Mirror the COMPLETE backup back (also removes files the failed version added).
         robocopy $backup $InstallDir /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($wasRunning) { Start-Service -Name $ServiceName -ErrorAction SilentlyContinue }
-        Write-Warning 'The previous version was restored.'
+        if ($LASTEXITCODE -ge 8) { Write-Warning "Restoring '$backup' reported errors (robocopy $LASTEXITCODE)." }
+        else { Write-Warning 'The previous version was restored.' }
     }
-    elseif ($wasRunning) {
-        Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    elseif ($filesChanged) {
+        Write-Warning "The installation folder was partly updated and no complete backup exists; reinstall to repair."
     }
+    # Whatever failed — stopping, backing up, importing or installing — bring the previous
+    # service back if it was running before.
+    if ($wasRunning) { Start-Service -Name $ServiceName -ErrorAction SilentlyContinue }
     throw
 }
 finally {
