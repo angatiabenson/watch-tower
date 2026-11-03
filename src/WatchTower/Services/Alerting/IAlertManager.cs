@@ -52,6 +52,17 @@ public interface IAlertManager
     Task<bool> ResolveAsync(AlertKey key, Incident? recoveryIncident = null, CancellationToken ct = default);
 
     /// <summary>
+    /// Retires every open alert whose key starts with <paramref name="keyPrefix"/> (e.g.
+    /// <see cref="AlertKey.ServicePrefix"/>) but is not in <paramref name="configured"/>: what it
+    /// watched was removed from the configuration, so it can never resolve on its own. Each is
+    /// closed with <paramref name="reason"/> as its <see cref="AlertState.RetiredReason"/>, a
+    /// resolved portal event and (if it had been notified) a resolved notice that says why.
+    /// Returns the retired keys.
+    /// </summary>
+    Task<IReadOnlyList<string>> RetireUnconfiguredAsync(
+        string keyPrefix, IEnumerable<AlertKey> configured, string reason, CancellationToken ct = default);
+
+    /// <summary>
     /// Records, publishes and notifies a one-shot event that has no open/resolved lifecycle
     /// (e.g. "server restarted"). Not stored in <c>alert_state</c>.
     /// </summary>

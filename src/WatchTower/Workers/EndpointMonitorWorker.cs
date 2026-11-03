@@ -89,7 +89,33 @@ public sealed class EndpointMonitorWorker(
         foreach (var check in due)
             _lastRun[check.Name] = now;
 
+        await ReconcileAsync(names, ct);
+
         await Task.WhenAll(due.Select(check => RunAsync(check, ct)));
+    }
+
+    internal const string RemovedReason = $"removed from {EndpointMonitorOptions.SectionName}:Endpoints or no longer a valid check";
+
+    /// <summary>
+    /// First poll (startup) and every poll after a configuration change: forgets checks that are
+    /// gone and retires their alerts, which could otherwise never resolve.
+    /// </summary>
+    private async Task ReconcileAsync(HashSet<string> configured, CancellationToken ct)
+    {
+        foreach (var name in _lastRun.Keys.Concat(_failures.Keys).Where(n => !configured.Contains(n)).ToList())
+        {
+            _lastRun.TryRemove(name, out _);
+            _failures.TryRemove(name, out _);
+        }
+
+        try
+        {
+            await alerts.RetireUnconfiguredAsync(AlertKey.EndpointPrefix, configured.Select(AlertKey.Endpoint), RemovedReason, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            logger.LogError(ex, "Could not retire alerts of endpoint checks that are no longer configured");
+        }
     }
 
     private async Task RunAsync(EndpointCheck check, CancellationToken ct)

@@ -85,6 +85,8 @@ public abstract class HttpNotificationChannel(IHttpClientFactory httpClientFacto
         };
         if (n.Duration is { } duration && n.Kind is AlertNotificationKind.Reminder or AlertNotificationKind.Resolved)
             facts.Add((n.Kind == AlertNotificationKind.Resolved ? "Lasted" : "Open for", AlertText.FormatDuration(duration)));
+        if (n.RetiredReason is { } retired)
+            facts.Add(("Retired", retired));
         if (n.Incident?.TopProcesses is { Count: > 0 } processes)
             facts.Add(("Top processes", string.Join(", ", processes.Select(p =>
                 $"{p.Name} (PID {p.Pid}, {p.CpuPercent:F1}% CPU, {p.MemoryMb:F0} MB)"))));
@@ -118,7 +120,8 @@ public sealed class WebhookNotificationChannel(IHttpClientFactory httpClientFact
         IncidentType: n.Incident?.Type.ToString(),
         TopProcesses: n.Incident?.TopProcesses is { Count: > 0 } processes
             ? processes.Select(p => new WebhookProcess(p.Name, p.Pid, Math.Round(p.CpuPercent, 1), Math.Round(p.MemoryMb))).ToList()
-            : null), JsonOptions);
+            : null,
+        RetiredReason: n.RetiredReason), JsonOptions);
 
     protected override void AddHeaders(HttpRequestMessage request, NotificationChannel channel, AlertNotification notification, byte[] body)
     {
@@ -144,7 +147,8 @@ public sealed class WebhookNotificationChannel(IHttpClientFactory httpClientFact
         long? DurationSeconds,
         int NotifyCount,
         string? IncidentType,
-        List<WebhookProcess>? TopProcesses);
+        List<WebhookProcess>? TopProcesses,
+        string? RetiredReason);
 
     private sealed record WebhookProcess(string Name, int Pid, double CpuPercent, double MemoryMb);
 }

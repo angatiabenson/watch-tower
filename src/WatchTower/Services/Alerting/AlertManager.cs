@@ -152,7 +152,39 @@ public sealed class AlertManager : IAlertManager
         await DeliverAsync(notification, now, inMaintenance, ct);
     }
 
-    public async Task<bool> ResolveAsync(AlertKey key, Incident? recoveryIncident = null, CancellationToken ct = default)
+    public Task<bool> ResolveAsync(AlertKey key, Incident? recoveryIncident = null, CancellationToken ct = default) =>
+        CloseAsync(key, recoveryIncident, retiredReason: null, ct);
+
+    public async Task<IReadOnlyList<string>> RetireUnconfiguredAsync(
+        string keyPrefix, IEnumerable<AlertKey> configured, string reason, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(keyPrefix);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        var keep = configured.Select(k => k.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        List<string> retire;
+        lock (_gate)
+        {
+            retire = States().Values
+                .Where(s => s.IsOpen && s.Key.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase) && !keep.Contains(s.Key))
+                .Select(s => s.Key)
+                .ToList();
+        }
+
+        var retired = new List<string>();
+        foreach (var key in retire)
+        {
+            if (await CloseAsync(new AlertKey(key), recoveryIncident: null, reason, ct))
+                retired.Add(key);
+        }
+        return retired;
+    }
+
+    /// <summary>
+    /// Closes an open alert: resolved (the condition cleared) or, with
+    /// <paramref name="retiredReason"/>, retired (what it watched is no longer monitored).
+    /// </summary>
+    private async Task<bool> CloseAsync(AlertKey key, Incident? recoveryIncident, string? retiredReason, CancellationToken ct)
     {
         var existing = TryGet(key);
         if (existing is not { IsOpen: true })
@@ -160,7 +192,7 @@ public sealed class AlertManager : IAlertManager
 
         var now = UtcNow;
         var duration = now - existing.OpenedAt;
-        Save(existing with { ResolvedAt = now });
+        Save(existing with { ResolvedAt = now, RetiredReason = retiredReason });
 
         // An opened notice that failed on every channel so far still tells its story as a
         // resolved notice; one that was never attempted on any channel is dropped silently.
@@ -168,7 +200,14 @@ public sealed class AlertManager : IAlertManager
         var attempted = pending is { IsAboutOpenAlert: true, FailedAttempts: > 0 };
 
         string description;
-        if (recoveryIncident is not null)
+        if (retiredReason is not null)
+        {
+            description = $"No longer monitored ({retiredReason}); closed after {AlertText.FormatDuration(duration)}. " +
+                          $"Last state: {existing.LastDescription}";
+            await _portal.PublishAlertEventAsync(
+                new Incident(now, existing.IncidentType, description), key.Value, resolved: true, ct);
+        }
+        else if (recoveryIncident is not null)
         {
             description = recoveryIncident.Description;
             _metricsStore.AddIncident(recoveryIncident);
@@ -183,7 +222,10 @@ public sealed class AlertManager : IAlertManager
                 new Incident(now, existing.IncidentType, description), key.Value, resolved: true, ct);
         }
 
-        _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
+        if (retiredReason is not null)
+            _logger.LogInformation("Alert {Key} retired after {Duration}: {Reason}", key.Value, AlertText.FormatDuration(duration), retiredReason);
+        else
+            _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
 
         var options = _options.CurrentValue;
         var inMaintenance = _maintenance.Current.Active;
@@ -198,7 +240,8 @@ public sealed class AlertManager : IAlertManager
             OpenedAtUtc: existing.OpenedAt,
             Duration: duration,
             Incident: recoveryIncident,
-            NotifyCount: existing.NotifyCount);
+            NotifyCount: existing.NotifyCount,
+            RetiredReason: retiredReason);
 
         if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
         {
@@ -382,9 +425,14 @@ public sealed class AlertManager : IAlertManager
     {
         var at = DateTime.SpecifyKind(n.OccurredAtUtc, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
         var label = AlertText.Label(n.Severity);
-        return n.Kind == AlertNotificationKind.Resolved
-            ? $"• {at} [{label}] {n.Title}: opened and cleared after {AlertText.FormatDuration(n.Duration ?? TimeSpan.Zero)}"
-            : $"• {at} [{label}] {n.Title}: {n.Description}";
+        return n switch
+        {
+            { Kind: AlertNotificationKind.Resolved, RetiredReason: { } reason } =>
+                $"• {at} [{label}] {n.Title}: no longer monitored ({reason})",
+            { Kind: AlertNotificationKind.Resolved } =>
+                $"• {at} [{label}] {n.Title}: opened and cleared after {AlertText.FormatDuration(n.Duration ?? TimeSpan.Zero)}",
+            _ => $"• {at} [{label}] {n.Title}: {n.Description}",
+        };
     }
 
     /// <summary>

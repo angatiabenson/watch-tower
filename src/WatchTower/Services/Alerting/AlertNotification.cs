@@ -33,6 +33,8 @@ public enum AlertNotificationKind
 /// <param name="Duration">How long the alert has been (or was) open.</param>
 /// <param name="Incident">The incident behind the notification, when there is one.</param>
 /// <param name="NotifyCount">How many notifications this occurrence has produced, including this one.</param>
+/// <param name="RetiredReason">Resolved notices only: set when the alert was closed because what it
+/// watched is no longer monitored, rather than because the condition cleared.</param>
 public sealed record AlertNotification(
     AlertNotificationKind Kind,
     string AlertKey,
@@ -44,4 +46,5 @@ public sealed record AlertNotification(
     DateTime? OpenedAtUtc = null,
     TimeSpan? Duration = null,
     Incident? Incident = null,
-    int NotifyCount = 1);
+    int NotifyCount = 1,
+    string? RetiredReason = null);

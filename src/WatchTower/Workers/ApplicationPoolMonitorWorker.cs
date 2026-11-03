@@ -86,10 +86,25 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     private void ReportAlive() =>
         _health?.ReportSuccess(WorkerNames.AppPools, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
 
+    internal const string RemovedReason = $"removed from {ApplicationPoolMonitorOptions.SectionName}:WatchedApplicationPools";
+
     /// <summary>Runs a single poll/evaluate cycle over all watched pools. Exposed for testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
+
+        // First poll (startup) and every poll after a configuration change: alerts of pools that
+        // are no longer watched would otherwise stay open forever.
+        try
+        {
+            await _alerts.RetireUnconfiguredAsync(
+                AlertKey.AppPoolPrefix, opts.WatchedApplicationPools.Where(p => !string.IsNullOrWhiteSpace(p)).Select(AlertKey.AppPool),
+                RemovedReason, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not retire alerts of application pools that are no longer watched");
+        }
 
         if (opts.WatchedApplicationPools.Count == 0)
         {

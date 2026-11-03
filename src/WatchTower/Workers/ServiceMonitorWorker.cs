@@ -115,6 +115,10 @@ public class ServiceMonitorWorker : BackgroundService
     {
         var opts = _options.CurrentValue;
 
+        // First poll (startup) and every poll after a configuration change: alerts of services
+        // that are no longer watched would otherwise stay open forever.
+        await RetireRemovedAsync(opts, ct);
+
         if (opts.WatchedServices.Count == 0)
         {
             _logger.LogDebug("No services configured for monitoring");
@@ -145,6 +149,24 @@ public class ServiceMonitorWorker : BackgroundService
                 // One service's failure must not stop the remaining services being checked.
                 _logger.LogError(ex, "Failed to check service {ServiceName}", serviceName);
             }
+        }
+    }
+
+    internal const string RemovedReason = $"removed from {ServiceMonitorOptions.SectionName}:WatchedServices";
+
+    /// <summary>The names polled (and used in alert keys) exactly as <see cref="PollOnceAsync"/> uses them.</summary>
+    private static IEnumerable<string> Watched(ServiceMonitorOptions opts) =>
+        opts.WatchedServices.Where(s => !string.IsNullOrWhiteSpace(s));
+
+    private async Task RetireRemovedAsync(ServiceMonitorOptions opts, CancellationToken ct)
+    {
+        try
+        {
+            await _alerts.RetireUnconfiguredAsync(AlertKey.ServicePrefix, Watched(opts).Select(AlertKey.Service), RemovedReason, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not retire alerts of services that are no longer watched");
         }
     }
 
@@ -277,7 +299,9 @@ public class ServiceMonitorWorker : BackgroundService
                 "Service {ServiceName} did not recover (restart returned {Restarted}, stayed running=false). Consecutive failures: {Failures}",
                 serviceName, restarted, failures);
 
-            if (failures >= opts.MaxRestartAttempts)
+            // A recovery that outlived the service's removal from the watch list must not re-open its alert.
+            if (failures >= opts.MaxRestartAttempts &&
+                Watched(_options.CurrentValue).Contains(serviceName, StringComparer.OrdinalIgnoreCase))
                 await RaiseRestartFailedAsync(serviceName, failures, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

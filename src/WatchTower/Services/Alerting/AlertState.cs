@@ -15,6 +15,8 @@ namespace WatchTower.Services.Alerting;
 /// <param name="NotifyCount">Notifications sent for this occurrence (opened + reminders).</param>
 /// <param name="ResolvedAt">When the alert resolved (UTC); null while open.</param>
 /// <param name="LastDescription">Latest description reported for the condition.</param>
+/// <param name="RetiredReason">Set when the alert was closed because what it watched is no longer
+/// monitored (e.g. the service was removed from the configuration) rather than because it recovered.</param>
 public sealed record AlertState(
     string Key,
     AlertSeverity Severity,
@@ -24,7 +26,8 @@ public sealed record AlertState(
     DateTime? LastNotifiedAt,
     int NotifyCount,
     DateTime? ResolvedAt,
-    string LastDescription)
+    string LastDescription,
+    string? RetiredReason = null)
 {
     public bool IsOpen => ResolvedAt is null;
 }

@@ -27,9 +27,13 @@ public readonly record struct AlertKey
     public static AlertKey Disk(string drive) => new($"disk:{drive}");
     public static AlertKey DiskQueue(string instance) => new($"diskqueue:{instance}");
     public static AlertKey Network(string interfaceName) => new($"net:{interfaceName}");
-    public static AlertKey Service(string serviceName) => new($"svc:{serviceName}");
-    public static AlertKey AppPool(string applicationPoolName) => new($"pool:{applicationPoolName}");
-    public static AlertKey Endpoint(string endpointName) => new($"endpoint:{endpointName}");
+    public const string ServicePrefix = "svc:";
+    public const string AppPoolPrefix = "pool:";
+    public const string EndpointPrefix = "endpoint:";
+
+    public static AlertKey Service(string serviceName) => new(ServicePrefix + serviceName);
+    public static AlertKey AppPool(string applicationPoolName) => new(AppPoolPrefix + applicationPoolName);
+    public static AlertKey Endpoint(string endpointName) => new(EndpointPrefix + endpointName);
 
     public override string ToString() => Value;
 }

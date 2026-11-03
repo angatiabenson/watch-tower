@@ -100,6 +100,11 @@ table `alert_state`, untouched by the daily report purge):
   alerts resolve only after staying clear for `Alerting:ResolveAfterSeconds` (default 300),
   so values hovering around a threshold do not flap.
 - An alert that was open before a restart is **not** re-sent.
+- **Retired** — when a service, application pool or endpoint check is removed from the
+  configuration (checked at startup and on every poll, so a config change takes effect
+  within one poll interval), its open alert is closed with a retirement reason (e.g.
+  `removed from Monitoring:Services:WatchedServices`), stored in `alert_state.retired_reason`
+  and sent as a resolved notice with `retiredReason` in the webhook body.
 
 CPU/RAM spike incidents are still recorded (without notifying) for the daily report.
 

@@ -59,6 +59,23 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             );
             """;
         cmd.ExecuteNonQuery();
+
+        // Columns added after the first release of alert_state.
+        AddColumnIfMissing(conn, "alert_state", "retired_reason", "TEXT");
+    }
+
+    private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string definition)
+    {
+        using (var info = conn.CreateCommand())
+        {
+            info.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'";
+            if (Convert.ToInt64(info.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+                return;
+        }
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+        alter.ExecuteNonQuery();
     }
 
     private SqliteConnection Open()
@@ -83,7 +100,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 SELECT key, severity, incident_type, title, opened_at, last_notified_at, notify_count,
-                       resolved_at, last_description
+                       resolved_at, last_description, retired_reason
                 FROM alert_state
                 """;
             using var reader = cmd.ExecuteReader();
@@ -98,7 +115,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     reader.IsDBNull(5) ? null : ParseUtc(reader.GetString(5)),
                     reader.GetInt32(6),
                     reader.IsDBNull(7) ? null : ParseUtc(reader.GetString(7)),
-                    reader.GetString(8)));
+                    reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9)));
             }
         }
         return results;
@@ -113,8 +131,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 INSERT INTO alert_state (key, severity, incident_type, title, opened_at, last_notified_at,
-                                         notify_count, resolved_at, last_description)
-                VALUES (@key, @severity, @type, @title, @opened, @notified, @count, @resolved, @description)
+                                         notify_count, resolved_at, last_description, retired_reason)
+                VALUES (@key, @severity, @type, @title, @opened, @notified, @count, @resolved, @description, @retired)
                 ON CONFLICT(key) DO UPDATE SET
                     severity = excluded.severity,
                     incident_type = excluded.incident_type,
@@ -123,7 +141,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     last_notified_at = excluded.last_notified_at,
                     notify_count = excluded.notify_count,
                     resolved_at = excluded.resolved_at,
-                    last_description = excluded.last_description
+                    last_description = excluded.last_description,
+                    retired_reason = excluded.retired_reason
                 """;
             cmd.Parameters.AddWithValue("@key", state.Key);
             cmd.Parameters.AddWithValue("@severity", (int)state.Severity);
@@ -134,6 +153,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.Parameters.AddWithValue("@count", state.NotifyCount);
             cmd.Parameters.AddWithValue("@resolved", state.ResolvedAt is { } r ? Format(r) : DBNull.Value);
             cmd.Parameters.AddWithValue("@description", state.LastDescription);
+            cmd.Parameters.AddWithValue("@retired", (object?)state.RetiredReason ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
     }
