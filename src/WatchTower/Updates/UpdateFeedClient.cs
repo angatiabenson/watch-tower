@@ -26,12 +26,12 @@ public sealed class UpdateFeedClient(IHttpClientFactory httpClientFactory, ILogg
 
     public async Task<UpdateManifest?> GetLatestAsync(UpdateOptions options, CancellationToken ct)
     {
-        var feed = RequireHttps(options.FeedUrl, "Updates:FeedUrl");
+        var feed = RequireHttps(options.FeedUrl, "Updates:FeedUrl", options.RequireHttps);
         var includePrerelease = string.Equals(options.Channel, "prerelease", StringComparison.OrdinalIgnoreCase);
         var http = CreateClient();
 
         var manifest = IsGitHubReleasesApi(feed)
-            ? await FromGitHubAsync(http, feed, includePrerelease, ct)
+            ? await FromGitHubAsync(http, feed, includePrerelease, options.RequireHttps, ct)
             : await http.GetFromJsonAsync<UpdateManifest>(feed, Json, ct);
 
         if (manifest is null)
@@ -43,7 +43,8 @@ public sealed class UpdateFeedClient(IHttpClientFactory httpClientFactory, ILogg
         return manifest;
     }
 
-    private async Task<UpdateManifest?> FromGitHubAsync(HttpClient http, Uri feed, bool includePrerelease, CancellationToken ct)
+    private async Task<UpdateManifest?> FromGitHubAsync(
+        HttpClient http, Uri feed, bool includePrerelease, bool requireHttps, CancellationToken ct)
     {
         var releases = await http.GetFromJsonAsync<List<GitHubRelease>>(
             feed.AbsoluteUri.TrimEnd('/') + "?per_page=30", Json, ct) ?? [];
@@ -63,7 +64,7 @@ public sealed class UpdateFeedClient(IHttpClientFactory httpClientFactory, ILogg
 
         var asset = candidate.Release.Assets.First(a => a.Name == ManifestAssetName);
         var manifest = await http.GetFromJsonAsync<UpdateManifest>(
-            RequireHttps(asset.BrowserDownloadUrl, "release asset URL"), Json, ct);
+            RequireHttps(asset.BrowserDownloadUrl, "release asset URL", requireHttps), Json, ct);
 
         return manifest is null ? null : manifest with
         {
@@ -87,15 +88,19 @@ public sealed class UpdateFeedClient(IHttpClientFactory httpClientFactory, ILogg
         uri.AbsolutePath.TrimEnd('/').EndsWith("/releases", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Feeds and packages must use HTTPS. Plain HTTP is accepted only for loopback addresses
-    /// (a feed served on the same machine, e.g. for testing a self-hosted release).
+    /// Feeds and packages use HTTPS unless the operator turned <c>Updates:RequireHttps</c> off
+    /// (then plain HTTP is allowed; configure <c>Updates:PublicKey</c> so packages stay
+    /// tamper-proof). Plain HTTP on loopback addresses is always accepted.
     /// </summary>
-    internal static Uri RequireHttps(string? url, string what)
+    internal static Uri RequireHttps(string? url, string what, bool requireHttps = true)
     {
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
-            (uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback)))
+            (uri.Scheme == Uri.UriSchemeHttps ||
+             (uri.Scheme == Uri.UriSchemeHttp && (uri.IsLoopback || !requireHttps))))
             return uri;
-        throw new InvalidDataException($"{what} must be an https:// URL (was '{url}').");
+        throw new InvalidDataException(requireHttps
+            ? $"{what} must be an https:// URL (was '{url}'), or turn off Updates:RequireHttps."
+            : $"{what} must be an http:// or https:// URL (was '{url}').");
     }
 
     private sealed record GitHubRelease(

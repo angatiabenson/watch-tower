@@ -159,7 +159,9 @@ public static class ConfigSchema
             new("VisibilityPortal:Protocol", "Protocol", FieldType.Enum, Options: ["Https", "Grpc"], RestartRequired: true),
             new("VisibilityPortal:RemoteConfig:Enabled", "Allow the portal to manage settings", FieldType.Bool,
                 "Portal-managed values override the ones set here.", RestartRequired: true),
-            new("VisibilityPortal:Tls:RequireTls", "Require HTTPS", FieldType.Bool, Advanced: true),
+            new("VisibilityPortal:Tls:RequireTls", "Require HTTPS (recommended)", FieldType.Bool,
+                "Turn off to connect to a portal at an http:// address, e.g. on a trusted internal network. " +
+                "The agent token, metrics and commands then travel unencrypted."),
             new("VisibilityPortal:Outbox:FlushIntervalSeconds", "Send metrics every (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
             new("VisibilityPortal:CommandPoll:PollIntervalSeconds", "Poll for commands every (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
             new("VisibilityPortal:RemoteConfig:PollIntervalSeconds", "Fetch remote settings every (s)", FieldType.Int, null, 1, 86_400, Advanced: true),
@@ -180,10 +182,14 @@ public static class ConfigSchema
         [
             new("Ui:SessionTimeoutMinutes", "Sign-out after idle (min)", FieldType.Int, null, 5, 1_440, RestartRequired: true),
             new("Ui:Urls", "Listen URLs", FieldType.List,
-                "Default http://127.0.0.1:8750 (this server only). Non-local addresses require HTTPS, a certificate and remote access enabled.",
+                "Default http://127.0.0.1:8750 (this server only). Non-local addresses need remote access enabled, " +
+                "and https:// with a certificate unless HTTPS is no longer required below.",
                 Format: "url", RestartRequired: true, Advanced: true),
             new("Ui:AllowRemoteAccess", "Allow remote access", FieldType.Bool,
-                "Expose the console beyond this server (HTTPS only).", RestartRequired: true, Advanced: true),
+                "Expose the console beyond this server.", RestartRequired: true, Advanced: true),
+            new("Ui:RequireHttpsForRemoteAccess", "Require HTTPS for remote access (recommended)", FieldType.Bool,
+                "Turn off to serve the console to other machines over plain http://. The console password and " +
+                "session then travel unencrypted.", RestartRequired: true, Advanced: true),
             new("Ui:CertificateThumbprint", "HTTPS certificate thumbprint", FieldType.String,
                 "Certificate in LocalMachine\\My used for https:// URLs.", RestartRequired: true, Advanced: true),
         ]),
@@ -199,8 +205,11 @@ public static class ConfigSchema
             new("Updates:RestartCountdownSeconds", "Restart countdown (s)", FieldType.Int,
                 "Delay between a finished download and the restart that installs it.", 5, 3_600),
             new("Updates:FeedUrl", "Release feed", FieldType.Url,
-                "A GitHub releases API URL or your own watchtower-update.json manifest URL (https).",
+                "A GitHub releases API URL or your own watchtower-update.json manifest URL.",
                 Placeholder: Updates.UpdateOptions.DefaultFeedUrl, Advanced: true),
+            new("Updates:RequireHttps", "Require HTTPS for downloads (recommended)", FieldType.Bool,
+                "Turn off to use a plain http:// feed (e.g. an internal file server). Also set a signing key " +
+                "below so tampered packages are still rejected.", Advanced: true),
             new("Updates:PublicKey", "Signing public key (PEM)", FieldType.String,
                 "When set, only packages signed with the matching private key are installed.", Advanced: true),
         ]),

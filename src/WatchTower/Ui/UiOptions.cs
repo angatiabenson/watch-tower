@@ -10,14 +10,22 @@ public class UiOptions
 
     /// <summary>
     /// Kestrel listen URLs. Loopback-only by default; binding any other address additionally
-    /// requires <see cref="AllowRemoteAccess"/> and an HTTPS URL with a certificate.
+    /// requires <see cref="AllowRemoteAccess"/> and, unless <see cref="RequireHttpsForRemoteAccess"/> is
+    /// off, an HTTPS URL with a certificate.
     /// </summary>
     // Empty means "use DefaultUrl". A non-empty default would be APPENDED to by the configuration
     // binder, so a configured URL list could never remove the default address.
     public List<string> Urls { get; set; } = [];
 
-    /// <summary>Opt-in for listening on non-loopback addresses (HTTPS only).</summary>
+    /// <summary>Opt-in for listening on non-loopback addresses.</summary>
     public bool AllowRemoteAccess { get; set; }
+
+    /// <summary>
+    /// When true (default), non-loopback URLs must be https://. Turn off to serve the console to
+    /// other machines over plain HTTP (e.g. a trusted management network) — the password and
+    /// session cookie then cross the network unencrypted.
+    /// </summary>
+    public bool RequireHttpsForRemoteAccess { get; set; } = true;
 
     /// <summary>Thumbprint of a certificate in LocalMachine\My used for HTTPS URLs.</summary>
     public string? CertificateThumbprint { get; set; }

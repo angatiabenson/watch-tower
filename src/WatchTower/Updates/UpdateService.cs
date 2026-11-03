@@ -317,7 +317,7 @@ public sealed class UpdateService
         {
             var asset = manifest.Assets.FirstOrDefault(a => string.Equals(a.Rid, RuntimeId, StringComparison.OrdinalIgnoreCase))
                         ?? throw new InvalidDataException($"Release {manifest.Version} has no package for {RuntimeId}.");
-            var url = UpdateFeedClient.RequireHttps(asset.Url, "package URL");
+            var url = UpdateFeedClient.RequireHttps(asset.Url, "package URL", _options.CurrentValue.RequireHttps);
 
             lock (_lock)
             {

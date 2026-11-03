@@ -58,9 +58,10 @@ public static class UiEndpointPlanner
                     problems.Add($"'{raw}' is reachable from the network but Ui:AllowRemoteAccess is off; ignored.");
                     continue;
                 }
-                if (!https)
+                if (!https && options.RequireHttpsForRemoteAccess)
                 {
-                    problems.Add($"'{raw}': remote access requires https://; plain HTTP is only allowed on 127.0.0.1.");
+                    problems.Add($"'{raw}': remote access requires https:// while Ui:RequireHttpsForRemoteAccess " +
+                                 "is on (turn it off to allow plain HTTP).");
                     continue;
                 }
             }

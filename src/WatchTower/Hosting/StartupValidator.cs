@@ -69,7 +69,11 @@ public static class StartupValidator
             else if (!Uri.TryCreate(portal.BaseUrl, UriKind.Absolute, out var portalUri))
                 errors.Add($"VisibilityPortal.BaseUrl '{portal.BaseUrl}' is not an absolute URL.");
             else if (portal.Tls.RequireTls && portalUri.Scheme != Uri.UriSchemeHttps)
-                errors.Add("VisibilityPortal.BaseUrl must use https:// while Tls.RequireTls is enabled.");
+                errors.Add("VisibilityPortal.BaseUrl must use https:// while Tls.RequireTls is enabled " +
+                           "(turn off \"Require HTTPS\" to connect over plain HTTP).");
+            else if (portalUri.Scheme == Uri.UriSchemeHttp && !portalUri.IsLoopback)
+                warnings.Add("The portal connection uses plain HTTP: the agent token, metrics and commands " +
+                             "travel unencrypted. Use https:// unless the network is trusted.");
             RequirePositive("VisibilityPortal:Outbox:FlushIntervalSeconds", portal.Outbox.FlushIntervalSeconds);
             RequirePositive("VisibilityPortal:CommandPoll:PollIntervalSeconds", portal.CommandPoll.PollIntervalSeconds);
             RequirePositive("VisibilityPortal:RemoteConfig:PollIntervalSeconds", portal.RemoteConfig.PollIntervalSeconds);
@@ -89,8 +93,17 @@ public static class StartupValidator
             warnings.Add("No watched IIS application pools configured. Application pool monitoring will be idle.");
 
         // UI binding problems never stop monitoring: the console is simply not started.
-        foreach (var problem in UiEndpointPlanner.Plan(Bind<UiOptions>(UiOptions.SectionName)).Problems)
+        var uiPlan = UiEndpointPlanner.Plan(Bind<UiOptions>(UiOptions.SectionName));
+        foreach (var problem in uiPlan.Problems)
             warnings.Add($"Web console: {problem}");
+        foreach (var endpoint in uiPlan.Endpoints.Where(e => !e.IsLoopback && !e.Https))
+            warnings.Add($"Web console: {endpoint.Display} is reachable from the network over plain HTTP; " +
+                         "the console password and session travel unencrypted.");
+
+        var updates = Bind<Updates.UpdateOptions>(Updates.UpdateOptions.SectionName);
+        if (!updates.RequireHttps && string.IsNullOrWhiteSpace(updates.PublicKey))
+            warnings.Add("Updates may be downloaded over plain HTTP without a signing key (Updates:PublicKey): " +
+                         "a package altered in transit would not be detected.");
 
         var layered = LayeredJsonConfigurationProvider.Find(configuration);
         foreach (var key in layered?.UndecryptableKeys.Keys ?? Enumerable.Empty<string>())

@@ -32,6 +32,13 @@ public class UpdateOptions
     /// </summary>
     public string? PublicKey { get; set; }
 
+    /// <summary>
+    /// When true (default) the feed and packages must be fetched over HTTPS. Turn off to use a
+    /// plain-HTTP feed (e.g. an internal file server); set <see cref="PublicKey"/> as well so a
+    /// package altered in transit is still rejected.
+    /// </summary>
+    public bool RequireHttps { get; set; } = true;
+
     /// <summary>How long to wait for the new version to report healthy before rolling back.</summary>
     public int HealthTimeoutSeconds { get; set; } = 120;
 }
