@@ -175,6 +175,66 @@ public class MaintenanceTests
         pools.Verify(p => p.StartApplicationPoolAsync(It.IsAny<string>(), It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Fact]
+    public async Task MaintenanceStartingDuringTheAppPoolStartDelay_PreventsTheStart()
+    {
+        var pools = new Mock<IIisApplicationPoolManager>();
+        pools.Setup(p => p.GetApplicationPoolStatusAsync("Pool", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ApplicationPoolStatus(DateTime.UtcNow, "Pool", "Stopped", false));
+        pools.Setup(p => p.StartApplicationPoolAsync("Pool", It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        var options = new Mock<IOptionsMonitor<ApplicationPoolMonitorOptions>>();
+        options.Setup(o => o.CurrentValue).Returns(new ApplicationPoolMonitorOptions
+        {
+            WatchedApplicationPools = ["Pool"],
+            StartDelaySeconds = 30,
+            StableStateDelaySeconds = 0,
+        });
+        var worker = new ApplicationPoolMonitorWorker(pools.Object, _metrics.Object, Alerts(), _portal.Object, options.Object, _time,
+            NullLogger<ApplicationPoolMonitorWorker>.Instance, maintenance: _maintenance);
+
+        // The status query completes synchronously, so the poll is now waiting out StartDelay.
+        var poll = worker.PollOnceAsync(Ct);
+        poll.IsCompleted.Should().BeFalse();
+        _maintenance.Active = true;
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await poll;
+
+        pools.Verify(p => p.StartApplicationPoolAsync(It.IsAny<string>(), It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()), Times.Never);
+        _metrics.Verify(m => m.AddIncident(It.Is<Incident>(i => i.Type == IncidentType.ApplicationPoolDown)), Times.Once);
+    }
+
+    [Fact]
+    public async Task MaintenanceStartingDuringTheServiceRestartDelay_PreventsTheRestart()
+    {
+        var manager = new Mock<IWindowsServiceManager>();
+        manager.Setup(m => m.GetServiceStatus("Svc")).Returns(
+            new ServiceStatus(DateTime.UtcNow, "Svc", "Service", "Stopped", false, "Automatic"));
+        manager.Setup(m => m.RestartService("Svc", It.IsAny<TimeSpan>())).Returns(true);
+        var options = new Mock<IOptionsMonitor<ServiceMonitorOptions>>();
+        options.Setup(o => o.CurrentValue).Returns(new ServiceMonitorOptions
+        {
+            WatchedServices = ["Svc"],
+            RestartDelaySeconds = 30,
+            StableStateDelaySeconds = 0,
+            StartupGraceSeconds = 0,
+        });
+        var worker = new ServiceMonitorWorker(manager.Object, _metrics.Object, Alerts(), _portal.Object, options.Object, _time,
+            NullLogger<ServiceMonitorWorker>.Instance, maintenance: _maintenance);
+
+        await worker.PollOnceAsync(Ct);
+        _maintenance.Active = true;
+        // The recovery task registers its delay on the thread pool: step the clock until it is done.
+        var idle = worker.WhenRecoveriesIdleAsync();
+        for (var i = 0; i < 500 && !idle.IsCompleted; i++)
+        {
+            _time.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(10, Ct);
+        }
+        await idle.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+
+        manager.Verify(m => m.RestartService(It.IsAny<string>(), It.IsAny<TimeSpan>()), Times.Never);
+    }
+
     // ── Portal remote config ───────────────────────────────────────────────
 
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");

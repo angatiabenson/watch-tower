@@ -154,6 +154,15 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
             await Task.Delay(TimeSpan.FromSeconds(opts.StartDelaySeconds), _timeProvider, ct);
 
+            // A maintenance window may have opened during the delay: decide again right before
+            // touching the pool, as the check above only covered the moment the outage was seen.
+            if (_maintenance.Current.Active)
+            {
+                _maintenanceLogged.TryAdd(applicationPoolName, 0);
+                _logger.LogWarning("Maintenance started; not starting application pool {ApplicationPoolName}", applicationPoolName);
+                continue;
+            }
+
             var started = await _applicationPoolManager.StartApplicationPoolAsync(
                 applicationPoolName,
                 TimeSpan.FromSeconds(opts.StartTimeoutSeconds),
