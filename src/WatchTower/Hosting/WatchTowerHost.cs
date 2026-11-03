@@ -186,6 +186,12 @@ public static class WatchTowerHost
             else
                 logger.LogInformation("Web console is not running (disabled or no usable listen URL).");
 
+            // Keep the Start-menu shortcut pointing at the current console address (Ui:Urls may
+            // have changed since install). Only refreshes a shortcut that already exists.
+            if (File.Exists(Cli.ConsoleShortcut.PathFor(serviceName)) &&
+                Cli.WatchTowerCli.ConsoleUrl(paths) is { } consoleUrl && Environment.ProcessPath is { } exePath)
+                Cli.ConsoleShortcut.Create(serviceName, consoleUrl, exePath);
+
             var report = StartupValidator.Validate(host.Services);
             foreach (var warning in report.Warnings)
                 logger.LogWarning("{Warning}", warning);

@@ -70,6 +70,7 @@ public static class WatchTowerCli
         root.Subcommands.Add(BuildConfig(ctx));
         root.Subcommands.Add(BuildSetPassword(ctx));
         root.Subcommands.Add(BuildApplyUpdate(ctx));
+        root.Subcommands.Add(BuildImportLegacy(ctx));
 
         var parseResult = root.Parse(args);
         var config = new InvocationConfiguration
@@ -308,6 +309,38 @@ public static class WatchTowerCli
             var store = new JsonSettingsStore(paths.SettingsFilePath);
             await store.UpdateAsync(doc => ConfigService.SetPath(doc, AdminCredentials.HashKey, PasswordHasher.Hash(password!)), ct);
             output.WriteLine("Web console password updated. Existing console sessions are signed out.");
+            return 0;
+        });
+        return cmd;
+    }
+
+    /// <summary>
+    /// Internal (install.ps1): import state from an old-style installation folder BEFORE its
+    /// files are replaced — the old hand-edited appsettings.json is otherwise overwritten by the
+    /// new shipped defaults before the new service gets a chance to migrate it.
+    /// </summary>
+    private static Command BuildImportLegacy(CliContext ctx)
+    {
+        var from = new Option<string>("--from") { Required = true, Description = "Old installation folder." };
+        var cmd = new Command("import-legacy", "Internal: import settings and state from an old installation folder.")
+        {
+            from,
+        };
+        cmd.Hidden = true;
+        cmd.SetAction(parse =>
+        {
+            RequireAdministrator();
+            var target = ctx.PathsOf(parse, useInstalledBinaries: false);
+            target.EnsureDirectories();
+            DataDirectorySecurity.Harden(target.DataDirectory);
+
+            var legacy = new WatchTowerPaths(Path.GetFullPath(parse.GetValue(from)!), target.DataDirectory);
+            var result = LegacyStateMigrator.Run(legacy);
+            if (result.Error is not null)
+                throw new CliException($"Importing the previous installation's state failed: {result.Error}");
+            ctx.Output.WriteLine(result.CopiedFiles.Count == 0
+                ? "No previous-installation state to import."
+                : $"Imported from {legacy.InstallDirectory}: {string.Join(", ", result.CopiedFiles)}");
             return 0;
         });
         return cmd;

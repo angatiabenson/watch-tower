@@ -133,6 +133,13 @@ if ($wasRunning) {
 try {
     if ($backup) { Copy-Item $InstallDir $backup -Recurse -Force }
 
+    # Installations from before the data directory kept settings, history and the database
+    # next to the exe. Import them NOW, while the old appsettings.json is still in place;
+    # copying the new files would replace it with the shipped defaults.
+    if (Test-Path (Join-Path $InstallDir 'watchtower.db')) {
+        Invoke-WatchTower (@('import-legacy', '--from', $InstallDir) + $common) -Exe $newExe
+    }
+
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     if (-not $sameFolder) {
         Get-ChildItem $source -Exclude 'install.ps1', '*.seed.json' | Copy-Item -Destination $InstallDir -Recurse -Force
