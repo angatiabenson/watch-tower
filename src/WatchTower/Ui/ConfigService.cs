@@ -97,6 +97,13 @@ public sealed partial class ConfigService(
                 errors[key] = "Unknown setting.";
                 continue;
             }
+            if (field.Type == FieldType.ObjectList)
+            {
+                // Per-item errors are keyed "<key>:<index>[:<property>]" so the UI can show them inline.
+                if (NormalizeObjectList(field, element, errors) is { } list)
+                    normalized[field.Key] = list;
+                continue;
+            }
             if (TryNormalize(field, element, out var node, out var error))
                 normalized[field.Key] = node;
             else
@@ -156,7 +163,10 @@ public sealed partial class ConfigService(
         if (!saved)
         {
             foreach (var message in report.Errors)
-                errors[MatchKey(message) ?? "_"] = message;
+            {
+                var (key, text) = MapError(message);
+                errors[key] = text;
+            }
             return new ConfigUpdateResult(false, errors, false, report.Warnings);
         }
 
@@ -190,6 +200,22 @@ public sealed partial class ConfigService(
 
     internal static JsonNode? ReadValue(IConfiguration config, ConfigField field)
     {
+        if (field.Type == FieldType.ObjectList)
+        {
+            // Children come back in numeric index order; absent properties show their default.
+            var list = new JsonArray();
+            foreach (var child in config.GetSection(field.Key).GetChildren())
+            {
+                if (!int.TryParse(child.Key, NumberStyles.None, CultureInfo.InvariantCulture, out _))
+                    continue;
+                var item = new JsonObject();
+                foreach (var sub in field.Fields ?? [])
+                    item[sub.Key] = ReadValue(child, sub) ?? JsonSerializer.SerializeToNode(sub.Default);
+                list.Add(item);
+            }
+            return list;
+        }
+
         if (ConfigSchema.IsListType(field.Type))
         {
             var items = config.GetSection(field.Key).Get<string[]>() ?? [];
@@ -261,6 +287,13 @@ public sealed partial class ConfigService(
                 }
                 node = new JsonArray(items.Select(i => (JsonNode?)JsonValue.Create(i)).ToArray());
                 return true;
+
+            case FieldType.ObjectList:
+                var listErrors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                node = NormalizeObjectList(field, element, listErrors);
+                if (node is null)
+                    return Fail(listErrors.Values.FirstOrDefault() ?? "Invalid list.", out error);
+                return true;
         }
 
         // String-like types.
@@ -269,6 +302,9 @@ public sealed partial class ConfigService(
         var text = element.GetString()!.Trim();
         if (text.Length > 2048)
             return Fail("Value is too long.", out error);
+        // For text, Max is a length limit (used by list-item fields such as an endpoint name).
+        if (field.Type == FieldType.String && field.Max is { } maxLength && text.Length > maxLength)
+            return Fail($"Use at most {maxLength.ToString(CultureInfo.InvariantCulture)} characters.", out error);
 
         switch (field.Type)
         {
@@ -324,15 +360,141 @@ public sealed partial class ConfigService(
         return false;
     }
 
-    /// <summary>Maps a validator message back to the schema key it mentions (for inline errors).</summary>
-    private static string? MatchKey(string message)
+    /// <summary>
+    /// Validates an <see cref="FieldType.ObjectList"/> value: an array (at most <c>Max</c> entries)
+    /// of objects with only the schema's item properties, required properties present, every
+    /// property valid for its type and the <c>UniqueBy</c> property unique. Absent optional
+    /// properties are left out so the options class default applies. Errors are added to
+    /// <paramref name="errors"/> keyed <c>&lt;key&gt;:&lt;index&gt;[:&lt;property&gt;]</c>; returns null when any failed.
+    /// </summary>
+    internal static JsonArray? NormalizeObjectList(ConfigField field, JsonElement element, IDictionary<string, string> errors)
     {
+        if (element.ValueKind != JsonValueKind.Array)
+        {
+            errors[field.Key] = "Must be a list.";
+            return null;
+        }
+        if (field.Max is { } max && element.GetArrayLength() > max)
+        {
+            errors[field.Key] = $"At most {max.ToString(CultureInfo.InvariantCulture)} entries are allowed.";
+            return null;
+        }
+
+        var itemFields = field.Fields ?? [];
+        var result = new JsonArray();
+        var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var ok = true;
+        var index = 0;
+        foreach (var item in element.EnumerateArray())
+        {
+            var prefix = $"{field.Key}:{index.ToString(CultureInfo.InvariantCulture)}";
+            var position = index + 1;
+            index++;
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                errors[prefix] = $"Entry {position} must be an object.";
+                ok = false;
+                continue;
+            }
+
+            var provided = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in item.EnumerateObject())
+            {
+                var sub = itemFields.FirstOrDefault(f => string.Equals(f.Key, property.Name, StringComparison.OrdinalIgnoreCase));
+                if (sub is null)
+                {
+                    errors[prefix] = $"Entry {position}: unknown property '{Truncate(property.Name, 64)}'.";
+                    ok = false;
+                    continue;
+                }
+                provided[sub.Key] = property.Value;
+            }
+
+            var normalized = new JsonObject(JsonSettingsStore.NodeOptions);
+            foreach (var sub in itemFields)
+            {
+                var key = $"{prefix}:{sub.Key}";
+                if (!provided.TryGetValue(sub.Key, out var value) || value.ValueKind == JsonValueKind.Null)
+                {
+                    if (sub.Required)
+                    {
+                        errors[key] = $"{sub.Label} is required.";
+                        ok = false;
+                    }
+                    continue;
+                }
+                if (!TryNormalize(sub, value, out var node, out var error))
+                {
+                    errors[key] = error!;
+                    ok = false;
+                    continue;
+                }
+                if (sub.Required && node is JsonValue text && text.TryGetValue<string>(out var s) && s.Length == 0)
+                {
+                    errors[key] = $"{sub.Label} is required.";
+                    ok = false;
+                    continue;
+                }
+                normalized[sub.Key] = node;
+            }
+
+            if (field.UniqueBy is { } unique &&
+                normalized[unique] is JsonValue uniqueValue && uniqueValue.TryGetValue<string>(out var name) && name.Length > 0)
+            {
+                if (seen.TryGetValue(name, out var first))
+                {
+                    var label = itemFields.FirstOrDefault(f => f.Key == unique)?.Label ?? unique;
+                    errors[$"{prefix}:{unique}"] =
+                        $"{label} '{name}' is already used by entry {first.ToString(CultureInfo.InvariantCulture)}. Each {label.ToLowerInvariant()} must be unique.";
+                    ok = false;
+                }
+                else
+                {
+                    seen[name] = position;
+                }
+            }
+            result.Add(normalized);
+        }
+        return ok ? result : null;
+    }
+
+    private static string Truncate(string value, int length) => value.Length <= length ? value : value[..length] + "…";
+
+    /// <summary>
+    /// Maps a validator message back to the schema key it mentions (for inline errors). A
+    /// message about one entry of an object list ("Monitoring:Endpoints:2:Target must be …")
+    /// maps to that entry's key ("Monitoring:Endpoints:2:Target") and loses the key prefix.
+    /// </summary>
+    internal static (string Key, string Message) MapError(string message)
+    {
+        foreach (var field in ConfigSchema.AllFields.Where(f => f.Type == FieldType.ObjectList))
+        {
+            var prefix = field.Key + ":";
+            if (!message.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var rest = message[prefix.Length..];
+            var digits = rest.TakeWhile(char.IsAsciiDigit).Count();
+            if (digits == 0)
+                break;
+            var key = field.Key + ":" + rest[..digits];
+            rest = rest[digits..];
+            if (rest.StartsWith(':'))
+            {
+                var name = new string(rest[1..].TakeWhile(char.IsAsciiLetterOrDigit).ToArray());
+                if ((field.Fields ?? []).FirstOrDefault(f => string.Equals(f.Key, name, StringComparison.OrdinalIgnoreCase)) is { } sub)
+                    return ($"{key}:{sub.Key}", rest[1..]);
+                return (key, rest[1..]);
+            }
+            return (key, rest.TrimStart());
+        }
+
         var normalized = message.Replace('.', ':');
-        return ConfigSchema.AllFields
+        var match = ConfigSchema.AllFields
             .Select(f => f.Key)
             .Where(k => normalized.Contains(k, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(k => k.Length)
             .FirstOrDefault();
+        return (match ?? "_", message);
     }
 
     internal static void SetPath(JsonObject root, string key, JsonNode? value)

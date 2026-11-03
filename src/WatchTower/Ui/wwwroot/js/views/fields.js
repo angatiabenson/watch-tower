@@ -1,7 +1,7 @@
 // One editor per schema field type (see API.md table). Editors are dumb: they render a
 // control, parse what the user typed, validate it, and report (value, error, display)
 // upwards. The config view owns drafts and decides what counts as a change.
-import { h, icon, nextId } from '../dom.js';
+import { h, icon, nextId, plural } from '../dom.js';
 import { api, cached } from '../api.js';
 import { openPicker } from './picker.js';
 
@@ -67,6 +67,7 @@ export function createEditor(f, o) {
     case 'List':
     case 'Services':
     case 'AppPools': return listEditor(f, o);
+    case 'ObjectList': return objectListEditor(f, o);
     default: return textEditor(f, o, { kind: 'text' });
   }
 }
@@ -320,6 +321,344 @@ function listEditor(f, o) {
     h('div', { class: 'list-add' }, add, addBtn, browse),
     msg);
   return { el, focus: () => add.focus() };
+}
+
+// ------------------------------------------------------------ list of objects (endpoint checks)
+// Mirrors EndpointCheck.TryCreate client-side; the server re-validates the whole list on save.
+
+const TYPE_LABEL = { http: 'HTTP', tcp: 'TCP', certificate: 'TLS cert' };
+const TARGET_HINT = {
+  http: { placeholder: 'https://intranet.example.com/health', help: 'Full http:// or https:// URL. It is requested with GET.' },
+  tcp: { placeholder: 'sql01.corp.local:1433', help: 'Host name or IP address and port.' },
+  certificate: { placeholder: 'portal.example.com', help: 'Host name, host:port (port 443 when left out) or an https:// URL.' },
+};
+
+function checkHostPort(v, portRequired) {
+  if (/[\s/?#@]/.test(v)) return false;
+  let host = v;
+  let port = '';
+  if (v.startsWith('[')) {
+    const close = v.indexOf(']');
+    if (close < 2) return false;
+    host = v.slice(1, close);
+    const rest = v.slice(close + 1);
+    if (rest && !rest.startsWith(':')) return false;
+    port = rest.slice(1);
+    if (!host.includes(':')) return false;
+  } else {
+    const colons = (v.match(/:/g) || []).length;
+    if (colons > 1) return false; // bare IPv6 is ambiguous: use [fd00::1]:443
+    if (colons === 1) [host, port] = v.split(':');
+  }
+  if (!host || /[[\]]/.test(host)) return false;
+  if (!port) return !portRequired && !v.endsWith(':');
+  return /^\d{1,5}$/.test(port) && Number(port) >= 1 && Number(port) <= 65535;
+}
+
+export function checkEndpointTarget(type, v) {
+  if (!v) return null;
+  const t = String(type || '').toLowerCase();
+  if (t === 'http') return checkUrl(v) ? 'Enter a full http:// or https:// URL, e.g. https://intranet.example.com/health.' : null;
+  if (t === 'tcp') {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return 'Enter host:port without a scheme, e.g. sql01.corp.local:1433.';
+    return checkHostPort(v, true) ? null : 'Enter host:port with a port from 1 to 65535, e.g. sql01.corp.local:1433. Put IPv6 addresses in brackets.';
+  }
+  if (t === 'certificate') {
+    if (/^https:\/\//i.test(v)) { try { new URL(v); return null; } catch { /* fall through */ } }
+    return checkHostPort(v, false) ? null : 'Enter a host, host:port or an https:// URL, e.g. portal.example.com:443.';
+  }
+  return null;
+}
+
+export function checkStatusRanges(v) {
+  if (!v || !v.trim()) return null; // empty = 200-399
+  const msg = 'Use status codes or ranges from 100 to 599, e.g. 200-399 or 200,204,301-302.';
+  const parts = v.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return msg;
+  for (const p of parts) {
+    const b = p.split('-').map((s) => s.trim());
+    if (b.length > 2 || !b.every((x) => /^\d+$/.test(x))) return msg;
+    const from = Number(b[0]);
+    const to = Number(b[b.length - 1]);
+    if (from < 100 || to > 599 || from > to) return msg;
+  }
+  return null;
+}
+
+/**
+ * Editable list of objects described by f.fields (e.g. Monitoring:Endpoints). Items are
+ * collapsible rows; their properties reuse the scalar editors above.
+ * Extra options: o.itemErrors { "<index>" | "<index>:<Prop>": message } (server errors);
+ * onChange(items, error, display, touched) where touched is "<index>:<Prop>" or "*".
+ */
+function objectListEditor(f, o) {
+  const subs = f.fields || [];
+  const noun = f.itemNoun || 'entry';
+  const uniqueKey = f.uniqueBy || null;
+  const typeField = subs.find((s) => s.type === 'Enum') || null;
+  const targetField = subs.find((s) => s.required && s.key !== uniqueKey) || null;
+  const max = typeof f.max === 'number' ? f.max : Infinity;
+  const disp = o.display || {};
+  const fresh = (it) => Object.fromEntries(subs.map((s) => [s.key, it?.[s.key] ?? s.default ?? null]));
+  const nameKey = (v) => String(v ?? '').trim().toLowerCase();
+
+  let items = (Array.isArray(o.value) ? o.value : []).map(fresh);
+  const originalNames = new Set((Array.isArray(o.original) ? o.original : []).map((it) => nameKey(it?.[uniqueKey])));
+  const open = new Set(disp.open || []);
+  const raw = new Map(Object.entries(disp.raw || {}));          // "i:Prop" → text typed into a box that did not parse
+  const parseErr = new Map(Object.entries(disp.parseErr || {})); // "i:Prop" → that editor's own error
+  const touched = new Set(disp.touched || []);                   // "i:Prop" → user has left the box (errors shown)
+  const server = new Map(Object.entries(o.itemErrors || {}));
+  let revealAll = !!disp.revealAll;
+  for (const k of server.keys()) open.add(Number(k.split(':')[0]));
+
+  const visible = (s, it) => !s.visibleWhen
+    || s.visibleWhen.values.some((v) => String(v).toLowerCase() === String(it[s.visibleWhen.key] ?? '').toLowerCase());
+
+  function clientError(i, s) {
+    const ck = `${i}:${s.key}`;
+    if (parseErr.has(ck)) return parseErr.get(ck);
+    const it = items[i];
+    if (!visible(s, it)) return null;
+    const v = it[s.key];
+    const empty = v == null || (typeof v === 'string' && !v.trim());
+    if (empty) return s.required ? `${s.label} is required.` : null;
+    if (s.type === 'String' && typeof s.max === 'number' && String(v).length > s.max) return `Use at most ${s.max} characters.`;
+    if (s.key === uniqueKey) {
+      const first = items.findIndex((x) => nameKey(x[uniqueKey]) === nameKey(v));
+      if (first >= 0 && first < i) return `“${String(v).trim()}” is already used by ${noun} ${first + 1}. ${s.label}s must be unique.`;
+    }
+    if (s.format === 'endpoint-target') return checkEndpointTarget(typeField ? it[typeField.key] : null, String(v).trim());
+    if (s.format === 'status-ranges') return checkStatusRanges(String(v));
+    return checkFormat(s.format, String(v).trim());
+  }
+  const shownError = (i, s) => {
+    const ck = `${i}:${s.key}`;
+    const err = clientError(i, s);
+    if (err && (revealAll || touched.has(ck) || parseErr.has(ck))) return err;
+    return server.get(ck) || null;
+  };
+  const itemHasError = (i) => subs.some((s) => clientError(i, s)) || [...server.keys()].some((k) => k === String(i) || k.startsWith(`${i}:`));
+  const itemShowsError = (i) => subs.some((s) => shownError(i, s)) || server.has(String(i));
+
+  function summary() {
+    const bad = items.filter((_, i) => subs.some((s) => clientError(i, s))).length;
+    if (!bad) return null;
+    return `${plural(bad, noun)} ${bad === 1 ? 'is' : 'are'} incomplete or invalid.`;
+  }
+
+  const emit = (what) => o.onChange(items.map((it) => ({ ...it })), summary(), {
+    open: [...open], raw: Object.fromEntries(raw), parseErr: Object.fromEntries(parseErr), touched: [...touched], revealAll,
+  }, what);
+
+  // ---------------------------------------------------------------- DOM
+  const groupLabel = o.labelledBy || null;
+  const list = h('ul', { class: 'obj-items', 'aria-labelledby': groupLabel });
+  const live = h('p', { class: 'sr-only', 'aria-live': 'polite' });
+  const count = h('p', { class: 'obj-count' });
+  const addBtn = h('button', { class: 'btn btn-sm', type: 'button', hidden: o.readOnly }, icon('plus'), `Add ${noun}`);
+  const views = []; // per item: { li, toggle, remove, body, cells: Map(key → cell) }
+
+  function announce(text) { live.textContent = ''; setTimeout(() => { live.textContent = text; }, 30); }
+
+  function paintCount() {
+    count.textContent = items.length ? plural(items.length, noun) : '';
+    addBtn.disabled = o.readOnly || items.length >= max;
+    addBtn.title = items.length >= max ? `At most ${max} ${noun}s.` : '';
+  }
+
+  function paintHead(i) {
+    const v = views[i];
+    const it = items[i];
+    const name = String(it[uniqueKey] ?? '').trim();
+    const type = typeField ? String(it[typeField.key] ?? '') : '';
+    const target = targetField ? String(it[targetField.key] ?? '').trim() : '';
+    const isNew = !originalNames.has(nameKey(name)) || !name;
+    v.name.textContent = name || `New ${noun}`;
+    v.name.classList.toggle('is-placeholder', !name);
+    v.badge.textContent = TYPE_LABEL[type.toLowerCase()] || type;
+    v.badge.hidden = !type;
+    v.newBadge.hidden = !isNew || o.readOnly;
+    v.sub.textContent = target || 'No target yet';
+    const bad = itemShowsError(i);
+    v.li.classList.toggle('is-invalid', bad);
+    v.mark.replaceChildren(...(bad ? [icon('critical'), h('span', { class: 'sr-only' }, ' (needs fixing)')] : []));
+    v.toggle.setAttribute('aria-expanded', String(open.has(i)));
+    v.body.hidden = !open.has(i);
+    v.remove?.setAttribute('aria-label', `Remove ${noun} ${name || i + 1}`);
+    const itemMsg = server.get(String(i));
+    v.itemErr.hidden = !itemMsg;
+    v.itemErr.replaceChildren(...(itemMsg ? [icon('critical'), h('span', null, itemMsg)] : []));
+  }
+
+  function paintCells(i) {
+    for (const [key, cell] of views[i].cells) {
+      const s = subs.find((x) => x.key === key);
+      const msg = shownError(i, s);
+      cell.el.classList.toggle('is-invalid', !!msg);
+      cell.err.hidden = !msg;
+      cell.err.replaceChildren(...(msg ? [icon('critical'), h('span', null, msg)] : []));
+      cell.el.querySelectorAll('input, select').forEach((c) => {
+        if (msg) c.setAttribute('aria-invalid', 'true'); else c.removeAttribute('aria-invalid');
+      });
+    }
+  }
+
+  const paintAll = () => { items.forEach((_, i) => { paintHead(i); paintCells(i); }); paintCount(); };
+
+  function buildCells(i) {
+    const v = views[i];
+    const it = items[i];
+    v.cells = new Map();
+    const type = typeField ? String(it[typeField.key] ?? '').toLowerCase() : '';
+    const grid = subs.filter((s) => visible(s, it)).map((s) => {
+      const ck = `${i}:${s.key}`;
+      const cid = nextId('obj-f');
+      const hint = s.format === 'endpoint-target' ? TARGET_HINT[type] : null;
+      const help = hint?.help || s.help;
+      const err = h('p', { id: `${cid}-err`, class: 'field-error', hidden: true });
+      const ed = createEditor({ ...s, placeholder: hint?.placeholder || s.placeholder }, {
+        id: cid,
+        describedBy: [help ? `${cid}-help` : null, `${cid}-err`].filter(Boolean).join(' '),
+        value: it[s.key],
+        display: raw.get(ck),
+        original: s.default ?? null, // non-null: an emptied number box is an error, not "unset"
+        hasValue: true,
+        readOnly: o.readOnly,
+        onChange: (value, error, display) => onCell(i, s, value, error, display),
+      });
+      const span = s.format === 'endpoint-target' || s.format === 'url' ? 'span-all'
+        : s.type === 'String' && !s.format ? 'span-2' : '';
+      const el = h('div', { class: `obj-field ${span}`.trim(), dataset: { prop: s.key } },
+        h('label', { class: 'obj-label', for: cid }, s.label),
+        ed.el,
+        help ? h('p', { id: `${cid}-help`, class: 'obj-help' }, help) : null,
+        err);
+      el.addEventListener('focusout', (e) => {
+        if (el.contains(e.relatedTarget) || touched.has(ck)) return;
+        touched.add(ck);
+        paintCells(i); paintHead(i);
+        emit(null);
+      });
+      v.cells.set(s.key, { el, err, focus: ed.focus });
+      return el;
+    });
+    v.body.replaceChildren(...grid, v.itemErr);
+    paintCells(i);
+  }
+
+  function onCell(i, s, value, error, display) {
+    const ck = `${i}:${s.key}`;
+    items[i][s.key] = value === undefined ? null : value;
+    if (error) { parseErr.set(ck, error); if (display !== undefined) raw.set(ck, display); }
+    else { parseErr.delete(ck); raw.delete(ck); }
+    server.delete(ck);
+    if (typeField && s.key === typeField.key) {
+      // Different type → different properties and target format.
+      buildCells(i);
+      views[i].cells.get(s.key)?.focus();
+    }
+    // Uniqueness and target rules depend on other items/properties: repaint everything.
+    paintAll();
+    emit(ck);
+  }
+
+  function itemView(i) {
+    const bodyId = nextId('obj');
+    const name = h('span', { class: 'obj-name' });
+    const badge = h('span', { class: 'badge obj-badge' });
+    const newBadge = h('span', { class: 'badge badge-dirty' }, 'New');
+    const sub = h('span', { class: 'obj-sub' });
+    const mark = h('span', { class: 'obj-mark' });
+    const toggle = h('button', { class: 'obj-toggle', type: 'button', 'aria-controls': bodyId },
+      h('span', { class: 'obj-chevron', 'aria-hidden': 'true' }),
+      h('span', { class: 'obj-title' }, name, badge, newBadge),
+      sub, mark);
+    const remove = o.readOnly ? null : h('button', { class: 'btn btn-sm btn-quiet obj-remove', type: 'button' }, icon('close'), h('span', { class: 'obj-remove-text' }, 'Remove'));
+    const itemErr = h('p', { class: 'field-error obj-item-error span-all', role: 'status', hidden: true });
+    const body = h('div', { class: 'obj-body', id: bodyId, role: 'group', 'aria-label': `${noun} ${i + 1}` });
+    const li = h('li', { class: 'obj-item' }, h('div', { class: 'obj-head' }, toggle, remove), body);
+    views[i] = { li, toggle, remove, body, name, badge, newBadge, sub, mark, itemErr, cells: new Map() };
+
+    toggle.addEventListener('click', () => {
+      if (open.has(i)) open.delete(i); else open.add(i);
+      paintHead(i);
+      emit(null);
+    });
+    remove?.addEventListener('click', () => removeItem(i));
+    buildCells(i);
+    paintHead(i);
+    return li;
+  }
+
+  function renderList() {
+    views.length = 0;
+    list.replaceChildren(...(items.length
+      ? items.map((_, i) => itemView(i))
+      : [h('li', { class: 'obj-empty' }, o.readOnly ? `No ${noun}s.` : `No ${noun}s yet. Add one to watch a website, a port or a TLS certificate.`)]));
+    paintCount();
+  }
+
+  /** Drops index i from a Map/Set keyed "i" or "i:Prop" and shifts later indices down. */
+  function shiftKeys(coll, i) {
+    const entries = coll instanceof Map ? [...coll.entries()] : [...coll].map((k) => [k, true]);
+    coll.clear();
+    for (const [k, val] of entries) {
+      const [idx, ...rest] = String(k).split(':');
+      const n = Number(idx);
+      if (n === i) continue;
+      const nk = n > i ? [n - 1, ...rest].join(':') : String(k);
+      if (coll instanceof Map) coll.set(nk, val); else coll.add(typeof k === 'number' ? Number(nk) : nk);
+    }
+  }
+
+  function removeItem(i) {
+    const label = String(items[i][uniqueKey] ?? '').trim();
+    items.splice(i, 1);
+    for (const coll of [open, raw, parseErr, touched]) shiftKeys(coll, i);
+    server.clear(); // indices changed; the next save re-validates
+    renderList();
+    emit('*');
+    announce(`Removed ${noun} ${label || i + 1}. Undo change or Discard restores it until you save.`);
+    (views[Math.min(i, items.length - 1)]?.toggle || addBtn).focus();
+  }
+
+  addBtn.addEventListener('click', () => {
+    if (items.length >= max) return;
+    items.push(fresh(null));
+    const i = items.length - 1;
+    open.add(i);
+    if (items.length === 1) renderList();
+    else { list.append(itemView(i)); paintCount(); }
+    emit('*');
+    announce(`Added ${noun} ${i + 1}.`);
+    views[i].cells.get(uniqueKey || subs[0]?.key)?.focus();
+  });
+
+  renderList();
+  const el = h('div', { class: 'obj-list', id: o.id, role: 'group', 'aria-labelledby': groupLabel, 'aria-describedby': o.describedBy || null },
+    list, h('div', { class: 'obj-foot' }, addBtn, count), live);
+
+  /** Focus a given entry property (from a server error key), else the first problem, else the list. */
+  function focus(key) {
+    const m = /^(\d+)(?::(\w+))?$/.exec(key || '');
+    let target = m ? { i: Number(m[1]), prop: m[2] } : null;
+    if (!target) {
+      revealAll = true;
+      const i = items.findIndex((_, x) => itemHasError(x));
+      if (i >= 0) target = { i, prop: subs.find((s) => views[i].cells.has(s.key) && (clientError(i, s) || server.has(`${i}:${s.key}`)))?.key };
+    }
+    if (target && views[target.i]) {
+      open.add(target.i);
+      paintAll();
+      const v = views[target.i];
+      (v.cells.get(target.prop)?.focus || (() => v.toggle.focus()))();
+      return;
+    }
+    (views[0]?.toggle || addBtn).focus();
+  }
+
+  return { el, focus };
 }
 
 async function loadServices() {

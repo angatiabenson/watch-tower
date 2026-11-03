@@ -25,7 +25,15 @@ public enum FieldType
     /// <summary>List of IIS application pool names; picker data from <c>/api/system/apppools</c>.</summary>
     AppPools,
     Url,
+    /// <summary>
+    /// List of objects whose properties are described by <see cref="ConfigField.Fields"/>
+    /// (item field keys are relative, e.g. <c>Name</c>). Value: an array of JSON objects.
+    /// </summary>
+    ObjectList,
 }
+
+/// <summary>Show an item field only while the item's <paramref name="Key"/> is one of <paramref name="Values"/>.</summary>
+public sealed record FieldCondition(string Key, IReadOnlyList<string> Values);
 
 public sealed record ConfigField(
     string Key,
@@ -40,7 +48,25 @@ public sealed record ConfigField(
     /// <summary>Extra validation for strings / list items: "email" | "url".</summary>
     string? Format = null,
     /// <summary>Rendered in an "Advanced" disclosure.</summary>
-    bool Advanced = false);
+    bool Advanced = false,
+    /// <summary>ObjectList: the properties of one item (keys relative to the item).</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<ConfigField>? Fields = null,
+    /// <summary>ObjectList item field: must be present and non-empty.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool Required = false,
+    /// <summary>ObjectList item field: value used for new items and when the property is absent.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    object? Default = null,
+    /// <summary>ObjectList item field: only relevant while another property of the item has one of these values.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FieldCondition? VisibleWhen = null,
+    /// <summary>ObjectList: item property whose (trimmed, case-insensitive) value must be unique.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? UniqueBy = null,
+    /// <summary>ObjectList: what one item is called in the UI, e.g. "endpoint check".</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ItemNoun = null);
 
 public sealed record ConfigSection(string Id, string Title, string Description, IReadOnlyList<ConfigField> Fields);
 
@@ -51,6 +77,45 @@ public sealed record ConfigSection(string Id, string Title, string Description, 
 public static class ConfigSchema
 {
     private static readonly IReadOnlyList<string> SeverityOptions = ["Info", "Warning", "Critical"];
+
+    /// <summary>Most endpoint checks one server may have (keeps the probe loop and the UI bounded).</summary>
+    public const int MaxEndpointChecks = 100;
+
+    private static readonly FieldCondition HttpOnly = new("Type", ["Http"]);
+
+    /// <summary>
+    /// One <see cref="Configuration.EndpointCheckOptions"/> entry. Defaults mirror that class;
+    /// ranges mirror <see cref="Services.Endpoints.EndpointCheck.TryCreate"/>, which still
+    /// validates the whole list (targets, status ranges) before anything is saved.
+    /// </summary>
+    private static readonly IReadOnlyList<ConfigField> EndpointCheckFields =
+    [
+        new("Name", "Name", FieldType.String,
+            "Unique. Alerts and the dashboard use it, e.g. intranet or billing-api.",
+            Max: Services.Endpoints.EndpointCheck.MaxNameLength, Placeholder: "intranet", Required: true),
+        new("Type", "Check", FieldType.Enum,
+            "Http: request a URL and check the status code. Tcp: open a connection. " +
+            "Certificate: warn before the TLS certificate expires.",
+            Options: ["Http", "Tcp", "Certificate"], Default: "Http"),
+        new("Target", "Target", FieldType.String,
+            "Http: an http(s) URL. Tcp: host:port. Certificate: host, host:port (default 443) or an https URL.",
+            Format: "endpoint-target", Required: true),
+        new("IntervalSeconds", "Check every (s)", FieldType.Int, null,
+            Services.Endpoints.EndpointCheck.MinIntervalSeconds, 86_400, Default: 60),
+        new("TimeoutSeconds", "Timeout (s)", FieldType.Int, null,
+            1, Services.Endpoints.EndpointCheck.MaxTimeoutSeconds, Default: 10),
+        new("FailuresBeforeAlert", "Failures before alert", FieldType.Int,
+            "Consecutive failed checks before the endpoint is reported down.", 1, 100, Default: 2),
+        new("ExpectStatus", "Expected status", FieldType.String,
+            "Accepted HTTP status codes, e.g. 200-399, 200 or 200,204,301-302.",
+            Placeholder: "200-399", Format: "status-ranges", Default: "200-399", VisibleWhen: HttpOnly),
+        new("ExpectBodyContains", "Body must contain", FieldType.String,
+            "Text the response must contain (case-sensitive). Empty = not checked.",
+            Default: "", VisibleWhen: HttpOnly),
+        new("CertificateWarnDays", "Warn days before expiry", FieldType.Int,
+            "Report the certificate as expiring when fewer days than this are left.",
+            1, 3_650, Default: 21, VisibleWhen: new("Type", ["Certificate"])),
+    ];
 
     public static IReadOnlyList<ConfigSection> Sections { get; } =
     [
@@ -186,6 +251,15 @@ public static class ConfigSchema
             new("Monitoring:ApplicationPools:StartTimeoutSeconds", "Start timeout (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
             new("Monitoring:ApplicationPools:StableStateDelaySeconds", "Stability check after start (s)", FieldType.Int,
                 null, 0, 600, Advanced: true),
+        ]),
+
+        new("endpoints", "Endpoint checks",
+            "HTTP, TCP and TLS-certificate checks run from this server. Results appear on the dashboard; " +
+            "an endpoint that keeps failing, or a certificate close to expiry, raises an alert. Changes apply without a restart.",
+        [
+            new("Monitoring:Endpoints", "Checks", FieldType.ObjectList,
+                "Each check runs on its own schedule. Removing a check stops it.",
+                Max: MaxEndpointChecks, Fields: EndpointCheckFields, UniqueBy: "Name", ItemNoun: "endpoint check"),
         ]),
 
         new("heartbeat", "Dead man's switch", "Ping an external monitor (e.g. healthchecks.io) so you hear about it if WatchTower itself stops.",

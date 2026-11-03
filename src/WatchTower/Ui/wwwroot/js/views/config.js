@@ -74,11 +74,17 @@ export function mount(root, params, ctx) {
   }
 
   const findSection = (id) => state.data?.sections?.find((s) => s.id === id);
-  const sectionOfKey = (key) => state.data?.sections?.find((s) => s.fields.some((f) => f.key === key));
+  // Errors for one entry of an object list are keyed "<field key>:<index>[:<property>]".
+  const ownsKey = (f, key) => f.key === key || (f.type === 'ObjectList' && key.startsWith(`${f.key}:`));
+  const sectionOfKey = (key) => state.data?.sections?.find((s) => s.fields.some((f) => ownsKey(f, key)));
+  const fieldOfKey = (key) => sectionOfKey(key)?.fields.find((f) => ownsKey(f, key));
+  const itemErrorsOf = (f) => Object.fromEntries([...state.serverErrors]
+    .filter(([k]) => k.startsWith(`${f.key}:`)).map(([k, m]) => [k.slice(f.key.length + 1), m]));
   const valueOf = (key) => state.data?.values?.[key] || { value: null, source: 'default', overridden: false, hasValue: false };
   const changeCount = () => state.drafts.size + state.resets.size;
   const sectionDirty = (s) => s.fields.some((f) => state.drafts.has(f.key) || state.resets.has(f.key));
-  const sectionHasError = (s) => s.fields.some((f) => state.drafts.get(f.key)?.error || state.serverErrors.has(f.key));
+  const sectionHasError = (s) => s.fields.some((f) => state.drafts.get(f.key)?.error
+    || [...state.serverErrors.keys()].some((k) => ownsKey(f, k)));
 
   // ------------------------------------------------------------ render
   function renderAll() {
@@ -150,6 +156,7 @@ export function mount(root, params, ctx) {
     const actions = h('div', { class: 'field-actions' });
     const resetNote = h('p', { class: 'reset-note', hidden: true }, icon('undo'), 'Reverts to the default value when you save.');
 
+    const isObjectList = f.type === 'ObjectList';
     const current = draft ? draft.value : (f.type === 'Secret' ? undefined : v.value);
     const editor = createEditor(f, {
       id,
@@ -159,36 +166,43 @@ export function mount(root, params, ctx) {
       original: v.value,
       hasValue: v.hasValue,
       readOnly: readOnly || resetPending,
-      onChange: (value, error, display) => onFieldChange(f, value, error, display),
+      labelledBy: `${id}-label`,
+      itemErrors: isObjectList ? itemErrorsOf(f) : null,
+      onChange: (value, error, display, touched) => onFieldChange(f, value, error, display, touched),
     });
 
-    const labelEl = f.type === 'TimeZone'
+    const labelEl = f.type === 'TimeZone' || isObjectList
       ? h('span', { class: 'field-label', id: `${id}-label` }, f.label)
       : h('label', { class: 'field-label', for: id }, f.label);
     if (f.type === 'TimeZone') editor.el.setAttribute('aria-labelledby', `${id}-label ${id}`);
 
-    const row = h('div', { class: 'field', dataset: { key: f.key } },
+    const row = h('div', { class: `field${isObjectList ? ' field-wide' : ''}`, dataset: { key: f.key } },
       h('div', { class: 'field-meta' },
         h('div', { class: 'field-label-row' }, labelEl, badges),
         f.help ? h('p', { id: helpId, class: 'field-help' }, f.help) : null),
       h('div', { class: 'field-control' }, editor.el, resetNote, err, actions));
 
     const ctrl = {
-      focus: editor.focus,
+      // key: this field's key, or "<key>:<index>[:<property>]" for one entry of an object list
+      focus: (key) => editor.focus(key && key !== f.key ? key.slice(f.key.length + 1) : undefined),
       sync() {
         const d = state.drafts.get(f.key);
         const reset = state.resets.has(f.key);
-        const msg = d?.error || state.serverErrors.get(f.key) || null;
+        const rejected = isObjectList ? Object.keys(itemErrorsOf(f)).length : 0;
+        const msg = d?.error || state.serverErrors.get(f.key)
+          || (rejected ? `${plural(rejected, 'problem')} found when saving. See the highlighted ${f.itemNoun || 'entry'} below.` : null);
         row.classList.toggle('is-dirty', !!d || reset);
         row.classList.toggle('is-invalid', !!msg);
         row.classList.toggle('is-locked', readOnly);
         err.hidden = !msg;
         err.replaceChildren(...(msg ? [icon('critical'), h('span', null, msg)] : []));
         resetNote.hidden = !reset;
-        // aria-invalid on the actual control(s)
-        row.querySelectorAll('.field-control input, .field-control select').forEach((el) => {
-          if (msg) el.setAttribute('aria-invalid', 'true'); else el.removeAttribute('aria-invalid');
-        });
+        // aria-invalid on the actual control(s); an object list marks its own entries
+        if (!isObjectList) {
+          row.querySelectorAll('.field-control input, .field-control select').forEach((el) => {
+            if (msg) el.setAttribute('aria-invalid', 'true'); else el.removeAttribute('aria-invalid');
+          });
+        }
 
         const b = [];
         if (readOnly) b.push(h('span', { class: 'badge badge-lock' }, icon('lock'), SOURCE_BADGE[v.source] || 'Managed elsewhere'));
@@ -380,9 +394,16 @@ export function mount(root, params, ctx) {
   const norm = (v) => (v == null || (Array.isArray(v) && !v.length) ? '' : v);
   const same = (a, b) => JSON.stringify(norm(a)) === JSON.stringify(norm(b));
 
-  function onFieldChange(f, value, error, display) {
+  function onFieldChange(f, value, error, display, touched) {
     const orig = valueOf(f.key).value;
     state.serverErrors.delete(f.key);
+    // Object lists: drop the server error of the edited entry property, or all of them when
+    // entries were added or removed (indices moved).
+    if (touched === '*') {
+      for (const k of [...state.serverErrors.keys()]) if (k.startsWith(`${f.key}:`)) state.serverErrors.delete(k);
+    } else if (touched) {
+      state.serverErrors.delete(`${f.key}:${touched}`);
+    }
     state.generalError = null;
     const unchanged = f.type === 'Secret' ? value === undefined : (!error && same(value, orig));
     if (unchanged && !error) state.drafts.delete(f.key);
@@ -489,11 +510,12 @@ export function mount(root, params, ctx) {
       // make sure errors are painted in the current section
       for (const r of state.rows.values()) r.sync();
     }
-    const row = body.querySelector(`.field[data-key="${CSS.escape(key)}"]`);
+    const fieldKey = fieldOfKey(key)?.key || key;
+    const row = body.querySelector(`.field[data-key="${CSS.escape(fieldKey)}"]`);
     const det = row?.closest('details');
     if (det) det.open = true;
     row?.scrollIntoView({ block: 'center' });
-    state.rows.get(key)?.focus();
+    state.rows.get(fieldKey)?.focus(key);
   }
 
   load({ keepSection: false });

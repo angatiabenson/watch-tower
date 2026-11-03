@@ -81,11 +81,11 @@ Password rule: at least 10 characters (server enforces; show the hint in the for
 `severity` is one of `critical | warning | info`. Any metric may be `null`/empty before the
 first sample is taken — render an empty state, not an error.
 
-Endpoint checks (`Monitoring:Endpoints`: HTTP, TCP and TLS-certificate checks) are a list of
-objects, which the schema-driven settings editor cannot edit. They are configured with
-`WatchTower config import <file.json>` and shown read-only from `metrics.endpoints` (an
-"Endpoints" card: name, type, target, status badge, response time, certificate days left,
-detail). Render `Down` as critical and `Expiring` as warning.
+Endpoint checks (`Monitoring:Endpoints`: HTTP, TCP and TLS-certificate checks) are edited in
+the "Endpoint checks" settings section (an `ObjectList` field, see below; `WatchTower config
+import` still works too). Their results are shown from `metrics.endpoints` (an "Endpoints" card:
+name, type, target, status badge, response time, certificate days left, detail, and an "Edit"
+link to `#/config/endpoints`). Render `Down` as critical and `Expiring` as warning.
 
 ## Configuration
 
@@ -125,6 +125,38 @@ Field `type` (string enum) → editor:
 | `List` | editable chip/tag list (add/remove, validate items by `format`) | string[] |
 | `Services` | list + picker dialog from `GET /api/system/services` (search by name/display name; allow free text too) | string[] |
 | `AppPools` | list + picker from `GET /api/system/apppools` (if `iisInstalled` is false, show a note and allow free text) | string[] |
+| `ObjectList` | collapsible entries with add/remove; each entry's properties use the editors above, described by `fields` | object[] |
+
+`ObjectList` fields carry extra schema properties (omitted on other fields):
+
+* `fields`: the properties of one entry, as field objects whose `key` is relative to the entry
+  (e.g. `Name`). These may also have `required: true`, `default` (used for new entries and shown
+  when the property is absent), and `visibleWhen: { "key": "Type", "values": ["Http"] }` (only
+  relevant while another property of the entry has one of those values).
+* `max`: the most entries allowed. `uniqueBy`: the entry property that must be unique
+  (trimmed, case-insensitive). `itemNoun`: what one entry is called, e.g. "endpoint check".
+* On a `String` entry property, `max` is a length limit. `format: "endpoint-target"` (depends on
+  the entry's `Type`: Http = absolute http(s) URL, Tcp = `host:port`, Certificate = host,
+  `host:port` or https URL) and `format: "status-ranges"` (e.g. `200-399,404`) are checked
+  client-side and again by the server.
+
+The value read is the whole list, in order, with every property filled in (defaults for absent
+ones). Save the whole list: it replaces the previous one (`[]` removes every entry; `reset`
+returns to the shipped default). Optional properties may be left out. Example for
+`Monitoring:Endpoints`:
+
+```jsonc
+"Monitoring:Endpoints": [
+  { "Name": "intranet", "Type": "Http", "Target": "https://intranet.example/health", "IntervalSeconds": 60,
+    "TimeoutSeconds": 10, "FailuresBeforeAlert": 2, "ExpectStatus": "200-399", "ExpectBodyContains": "",
+    "CertificateWarnDays": 21 },
+  { "Name": "sql", "Type": "Tcp", "Target": "sql01.example:1433" }
+]
+```
+
+Errors about one entry are keyed `<key>:<index>` (e.g. an unknown property) or
+`<key>:<index>:<property>`, e.g. `"Monitoring:Endpoints:1:Target": "Target must be host:port."`
+(index from 0). Show them on that entry.
 
 `source`: `default | operator | portal | environment`. `overridden: true` means a higher layer
 (portal or environment variable) controls the value, so editing it here has no effect until

@@ -578,14 +578,15 @@ function certText(days) {
   return days < 1 ? '< 1 day' : `${fmt0(Math.floor(days))} d`;
 }
 
-/** Monitoring:Endpoints results (read-only; configured with `WatchTower config import`). */
+/** Monitoring:Endpoints results (the checks are edited in Settings → Endpoint checks). */
 function renderEndpoints(endpoints) {
   const list = [...endpoints].sort((a, b) => endpointState(a)[2] - endpointState(b)[2] || String(a.name).localeCompare(String(b.name)));
   const down = list.filter((e) => endpointState(e)[0] === 'critical').length;
   const expiring = list.filter((e) => endpointState(e)[0] === 'warning').length;
   const meta = [down ? `${down} down` : '', expiring ? `${expiring} expiring` : ''].filter(Boolean).join(', ') || `${list.length} checked`;
   return [
-    panelHead('h-endpoints', 'Endpoints', h('span', { class: 'panel-meta' }, meta)),
+    panelHead('h-endpoints', 'Endpoints', h('span', { class: 'panel-meta' }, meta, ' · ',
+      h('a', { href: '#/config/endpoints', 'aria-label': 'Edit endpoint checks' }, 'Edit'))),
     h('div', { class: 'table-scroll flush' }, h('table', { class: 'table endpoints' },
       h('thead', null, h('tr', null,
         h('th', { scope: 'col' }, 'Endpoint'),
