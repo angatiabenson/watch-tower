@@ -136,6 +136,7 @@ if ((Test-Path (Join-Path $InstallDir 'WatchTower.exe')) -and -not $sameFolder) 
 
 # ── 3. Install; on any failure restore the previous binaries and running state ──────────
 $backupComplete = $false   # only a fully written backup may be restored
+$keepBackup = $false       # kept when recovery fails, for a manual restore
 $filesChanged = $false     # whether the installation folder has been touched yet
 try {
     # Stopping is inside the recovery scope: a stop that times out (or any later failure)
@@ -175,25 +176,58 @@ try {
     if (-not $NoStart) { Invoke-WatchTower (@('start') + $common) }
 }
 catch {
-    Write-Warning "Installation failed: $($_.Exception.Message)"
+    $installError = $_
+    Write-Warning "Installation failed: $($installError.Exception.Message)"
+    $recovered = $true
+
     if ($filesChanged -and $backupComplete) {
         Write-Warning 'Restoring the previous version...'
         # Mirror the COMPLETE backup back (also removes files the failed version added).
         robocopy $backup $InstallDir /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -ge 8) { Write-Warning "Restoring '$backup' reported errors (robocopy $LASTEXITCODE)." }
-        else { Write-Warning 'The previous version was restored.' }
+        if ($LASTEXITCODE -ge 8) {
+            $recovered = $false
+            Write-Warning "Restoring the previous files failed (robocopy exit code $LASTEXITCODE)."
+        }
     }
     elseif ($filesChanged) {
-        Write-Warning "The installation folder was partly updated and no complete backup exists; reinstall to repair."
+        $recovered = $false
+        Write-Warning 'The installation folder was partly updated and no complete backup exists; reinstall to repair.'
     }
+
     # Whatever failed — stopping, backing up, importing or installing — bring the previous
-    # service back if it was running before.
-    if ($wasRunning) { Start-Service -Name $ServiceName -ErrorAction SilentlyContinue }
-    throw
+    # service back if it was running before, and check that it actually comes up and stays up.
+    if ($wasRunning) {
+        try {
+            Start-Service -Name $ServiceName -ErrorAction Stop
+            $svc = Get-Service -Name $ServiceName
+            $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+            Start-Sleep -Seconds 10
+            $svc.Refresh()
+            if ($svc.Status -ne 'Running') { throw "it stopped again after starting (status: $($svc.Status))" }
+        }
+        catch {
+            $recovered = $false
+            Write-Warning "The previous '$ServiceName' service could not be brought back up: $($_.Exception.Message)"
+        }
+    }
+
+    if ($recovered) {
+        if ($filesChanged) { Write-Warning 'The previous version was restored and is running.' }
+        elseif ($wasRunning) { Write-Warning 'Nothing was changed; the previous version is running.' }
+    }
+    elseif ($backupComplete) {
+        # Never delete the evidence needed for a manual restore.
+        $keepBackup = $true
+        Write-Warning "Automatic recovery did not complete. The previous installation is preserved at '$backup'."
+        Write-Warning "Restore it with: robocopy `"$backup`" `"$InstallDir`" /MIR, then: Start-Service $ServiceName"
+    }
+    throw $installError
 }
 finally {
     $plain = $null
-    if ($backup -and (Test-Path $backup)) { Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($backup -and -not $keepBackup -and (Test-Path $backup)) {
+        Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host ''
