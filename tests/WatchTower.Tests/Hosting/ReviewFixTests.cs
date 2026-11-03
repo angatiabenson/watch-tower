@@ -75,7 +75,7 @@ public class LegacyMigrationSafetyTests : IDisposable
         (await store.ProtectPlaintextSecretsAsync(TestContext.Current.CancellationToken)).Should().BeTrue();
 
         File.ReadAllText(_dir.Paths.SettingsFilePath).Should().NotContain("hand-edited");
-        File.Exists(_dir.Paths.SettingsFilePath + ".bak").Should().BeFalse();
+        File.ReadAllText(_dir.Paths.SettingsFilePath + ".bak").Should().NotContain("hand-edited"); // re-written encrypted
         (await store.ProtectPlaintextSecretsAsync(TestContext.Current.CancellationToken)).Should().BeFalse();
     }
 }

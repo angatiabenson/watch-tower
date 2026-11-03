@@ -22,6 +22,13 @@ public interface ISettingsStore
 
     /// <summary>Runs <paramref name="mutate"/> against the current document under the store lock and persists it.</summary>
     Task UpdateAsync(Action<JsonObject> mutate, CancellationToken ct = default);
+
+    /// <summary>
+    /// Read-modify-validate-write as one transaction: <paramref name="mutate"/> runs under the
+    /// store lock against the current document and returns false to abort without writing.
+    /// Use this when the change must be validated against the latest state (concurrent edits).
+    /// </summary>
+    Task<bool> TryUpdateAsync(Func<JsonObject, bool> mutate, CancellationToken ct = default);
 }
 
 public sealed class JsonSettingsStore : ISettingsStore
@@ -68,12 +75,30 @@ public sealed class JsonSettingsStore : ISettingsStore
     /// </summary>
     public async Task<bool> ProtectPlaintextSecretsAsync(CancellationToken ct = default)
     {
+        // The backup is checked independently: another writer may already have encrypted the
+        // primary file while an older backup still holds plaintext.
+        var backup = FilePath + ".bak";
+        if (File.Exists(backup) && !IsSafeBackup(backup))
+            File.Delete(backup);
+
         if (!File.Exists(FilePath) || !ContainsPlaintextSecret(Read()))
             return false;
 
         await UpdateAsync(_ => { }, ct); // ProtectSecrets runs on every write
-        File.Delete(FilePath + ".bak");
         return true;
+    }
+
+    private static bool IsSafeBackup(string path)
+    {
+        try
+        {
+            return JsonNode.Parse(File.ReadAllText(path), NodeOptions, ReadOptions) is JsonObject doc &&
+                   !ContainsPlaintextSecret(doc);
+        }
+        catch (JsonException)
+        {
+            return false; // unreadable: cannot prove it holds no plaintext
+        }
     }
 
     internal static bool ContainsPlaintextSecret(JsonObject root)
@@ -96,7 +121,14 @@ public sealed class JsonSettingsStore : ISettingsStore
         }
     }
 
-    public async Task UpdateAsync(Action<JsonObject> mutate, CancellationToken ct = default)
+    public Task UpdateAsync(Action<JsonObject> mutate, CancellationToken ct = default) =>
+        TryUpdateAsync(doc =>
+        {
+            mutate(doc);
+            return true;
+        }, ct);
+
+    public async Task<bool> TryUpdateAsync(Func<JsonObject, bool> mutate, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
         try
@@ -105,9 +137,11 @@ public sealed class JsonSettingsStore : ISettingsStore
             using var crossProcessLock = await AcquireFileLockAsync(ct);
 
             var doc = Read();
-            mutate(doc);
+            if (!mutate(doc))
+                return false;
             ProtectSecrets(doc, _protector);
             WriteAtomically(doc);
+            return true;
         }
         finally
         {
@@ -171,9 +205,30 @@ public sealed class JsonSettingsStore : ISettingsStore
     {
         var temp = FilePath + ".tmp";
         File.WriteAllText(temp, doc.ToJsonString(WriteOptions));
-        if (File.Exists(FilePath))
-            File.Copy(FilePath, FilePath + ".bak", overwrite: true);
+        WriteBackupOfCurrent();
         File.Move(temp, FilePath, overwrite: true);
+    }
+
+    /// <summary>
+    /// Keeps the previous version as .bak — with its secrets encrypted, so a file that still held
+    /// plaintext (hand-edited, legacy) never leaves a plaintext copy behind.
+    /// </summary>
+    private void WriteBackupOfCurrent()
+    {
+        var backup = FilePath + ".bak";
+        if (!File.Exists(FilePath))
+            return;
+        try
+        {
+            var previous = Read();
+            ProtectSecrets(previous, _protector);
+            File.WriteAllText(backup, previous.ToJsonString(WriteOptions));
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
+        {
+            // The current file is unreadable, so it cannot be backed up safely.
+            File.Delete(backup);
+        }
     }
 
     private async Task<FileStream> AcquireFileLockAsync(CancellationToken ct)

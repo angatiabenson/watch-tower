@@ -125,34 +125,40 @@ public sealed partial class ConfigService(
                 RemovePath(doc, field.Key);
         }
 
-        // Validate the configuration that WOULD result, before touching the file.
-        var candidate = store.Read();
-        Mutate(candidate);
-        StartupValidator.Report report;
-        bool restartRequired;
-        var candidateConfig = BuildCandidate(candidate);
-        try
+        // Mutate, validate the configuration that WOULD result, and persist — all inside the
+        // store transaction, so two concurrent edits can never each pass validation against a
+        // stale document and together produce an invalid configuration.
+        StartupValidator.Report report = new([], []);
+        var restartRequired = false;
+        var saved = await store.TryUpdateAsync(doc =>
         {
-            report = StartupValidator.Validate(candidateConfig);
-            if (!report.IsValid)
+            Mutate(doc);
+            var candidateConfig = BuildCandidate(doc);
+            try
             {
-                foreach (var message in report.Errors)
-                    errors[MatchKey(message) ?? "_"] = message;
-                return new ConfigUpdateResult(false, errors, false, report.Warnings);
+                report = StartupValidator.Validate(candidateConfig);
+                if (!report.IsValid)
+                    return false;
+
+                // Only flag a restart when a restart-bound setting's effective value really changes.
+                restartRequired = normalized.Keys.Concat(resets.Select(r => r.Key))
+                    .Select(k => ConfigSchema.TryGetField(k, out var f) ? f : null)
+                    .Any(f => f is { RestartRequired: true } &&
+                              !JsonNode.DeepEquals(ReadValue(configuration, f), ReadValue(candidateConfig, f)));
+                return true;
             }
+            finally
+            {
+                (candidateConfig as IDisposable)?.Dispose();
+            }
+        }, ct);
 
-            // Only flag a restart when a restart-bound setting's effective value really changes.
-            restartRequired = normalized.Keys.Concat(resets.Select(r => r.Key))
-                .Select(k => ConfigSchema.TryGetField(k, out var f) ? f : null)
-                .Any(f => f is { RestartRequired: true } &&
-                          !JsonNode.DeepEquals(ReadValue(configuration, f), ReadValue(candidateConfig, f)));
-        }
-        finally
+        if (!saved)
         {
-            (candidateConfig as IDisposable)?.Dispose();
+            foreach (var message in report.Errors)
+                errors[MatchKey(message) ?? "_"] = message;
+            return new ConfigUpdateResult(false, errors, false, report.Warnings);
         }
-
-        await store.UpdateAsync(Mutate, ct);
 
         logger.LogInformation("Configuration updated from the console: {Keys}",
             string.Join(", ", normalized.Keys.Concat(resets.Select(r => r.Key + " (reset)"))));
