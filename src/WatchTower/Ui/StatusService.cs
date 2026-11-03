@@ -113,6 +113,19 @@ public sealed class StatusService(
                     status = p.Status,
                     isRunning = p.IsRunning,
                 }),
+                // Read-only: endpoints are configured with `WatchTower config import` (Monitoring:Endpoints).
+                endpoints = metrics.GetLatestEndpointStatuses().OrderBy(e => e.Name).Select(e => new
+                {
+                    name = e.Name,
+                    type = e.Type,
+                    target = e.Target,
+                    status = e.Status,
+                    isUp = e.IsUp,
+                    responseTimeMs = e.ResponseTimeMs,
+                    certificateDaysLeft = e.CertificateDaysLeft,
+                    detail = e.Detail,
+                    checkedAt = DateTime.SpecifyKind(e.Timestamp, DateTimeKind.Utc),
+                }),
             },
             incidents = metrics.GetIncidents(TimeSpan.FromHours(24))
                 .OrderByDescending(i => i.Timestamp)
@@ -139,9 +152,10 @@ public sealed class StatusService(
     {
         IncidentType.CpuThresholdBreached or IncidentType.RamThresholdBreached or IncidentType.DiskCritical
             or IncidentType.ServiceDown or IncidentType.ServiceRestartFailed
-            or IncidentType.ApplicationPoolDown or IncidentType.ApplicationPoolStartFailed => "critical",
+            or IncidentType.ApplicationPoolDown or IncidentType.ApplicationPoolStartFailed
+            or IncidentType.EndpointDown => "critical",
         IncidentType.ServerRestarted => "warning",
-        IncidentType.ServiceRestarted or IncidentType.ApplicationPoolStarted => "info",
+        IncidentType.ServiceRestarted or IncidentType.ApplicationPoolStarted or IncidentType.EndpointRecovered => "info",
         _ => "warning",
     };
 

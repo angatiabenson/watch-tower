@@ -11,7 +11,8 @@ public record MetricsBatchDto(
     List<NetworkMetricDto> NetworkMetrics,
     List<ServiceStatusDto> ServiceStatuses,
     List<ApplicationPoolStatusDto> ApplicationPoolStatuses,
-    AgentTelemetryDto? Agent = null
+    AgentTelemetryDto? Agent = null,
+    List<EndpointStatusDto>? EndpointStatuses = null
 );
 
 /// <summary>Agent self-description sent with every batch (omitted by older agents).</summary>
@@ -50,6 +51,22 @@ public record ServiceStatusDto(
     string DisplayName,
     string Status,
     bool IsRunning
+);
+
+/// <summary>Latest endpoint check result (omitted when no endpoints are configured, and by older agents).</summary>
+/// <param name="Type">Http | Tcp | Certificate.</param>
+/// <param name="Target">Target without credentials or query string.</param>
+/// <param name="Status">Up | Down | Expiring.</param>
+public record EndpointStatusDto(
+    string Timestamp,
+    string Name,
+    string Type,
+    string Target,
+    string Status,
+    bool IsUp,
+    double? ResponseTimeMs,
+    double? CertificateDaysLeft,
+    string? Detail
 );
 
 public record ApplicationPoolStatusDto(

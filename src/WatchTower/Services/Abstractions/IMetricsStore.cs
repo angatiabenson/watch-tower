@@ -11,6 +11,7 @@ public interface IMetricsStore
     void AddNetworkMetric(NetworkMetric metric);
     void AddServiceStatus(ServiceStatus status);
     void AddApplicationPoolStatus(ApplicationPoolStatus status);
+    void AddEndpointStatus(EndpointStatus status);
     void AddIncident(Incident incident);
 
     IReadOnlyList<CpuMetric> GetCpuMetrics(TimeSpan period);
@@ -20,6 +21,7 @@ public interface IMetricsStore
     IReadOnlyList<NetworkMetric> GetLatestNetworkMetrics();
     IReadOnlyList<ServiceStatus> GetLatestServiceStatuses();
     IReadOnlyList<ApplicationPoolStatus> GetLatestApplicationPoolStatuses();
+    IReadOnlyList<EndpointStatus> GetLatestEndpointStatuses();
     IReadOnlyList<Incident> GetIncidents(TimeSpan period);
 
     /// <summary>Age-based safety-net purge: deletes cpu/ram/incident rows older than <paramref name="maxAge"/>.</summary>

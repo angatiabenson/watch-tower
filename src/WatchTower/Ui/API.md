@@ -57,7 +57,15 @@ Password rule: at least 10 characters (server enforces; show the hint in the for
     "diskQueues": [ { "instance": "0 C:", "queueLength": 0.0 } ],
     "network": [ { "interface": "Ethernet", "outputQueueLength": 0 } ],
     "services": [ { "name": "W3SVC", "displayName": "World Wide Web Publishing Service", "status": "Running", "isRunning": true } ],
-    "appPools": [ { "name": "DefaultAppPool", "status": "Started", "isRunning": true } ]
+    "appPools": [ { "name": "DefaultAppPool", "status": "Started", "isRunning": true } ],
+    "endpoints": [                  // Monitoring:Endpoints check results, by name (read-only, see below)
+      { "name": "intranet", "type": "Http", "target": "https://intranet.example/health", "status": "Up",
+        "isUp": true, "responseTimeMs": 84.2, "certificateDaysLeft": null, "detail": "HTTP 200",
+        "checkedAt": "2026-11-03T09:59:30Z" },
+      { "name": "intranet-tls", "type": "Certificate", "target": "intranet.example:443", "status": "Expiring",
+        "isUp": true, "responseTimeMs": 31.0, "certificateDaysLeft": 12.5,
+        "detail": "Certificate for intranet.example expires in 12.5 days (2026-11-16)", "checkedAt": "..." }
+    ]                               // status: Up | Down | Expiring (certificate valid but inside its warning window)
   },
   "incidents": [ { "timestamp": "...", "type": "CpuSpikeDetected", "severity": "warning", "description": "..." } ]  // last 24 h, newest first, ≤50
 }
@@ -65,6 +73,12 @@ Password rule: at least 10 characters (server enforces; show the hint in the for
 
 `severity` is one of `critical | warning | info`. Any metric may be `null`/empty before the
 first sample is taken — render an empty state, not an error.
+
+Endpoint checks (`Monitoring:Endpoints`: HTTP, TCP and TLS-certificate checks) are a list of
+objects, which the schema-driven settings editor cannot edit. They are configured with
+`WatchTower config import <file.json>` and shown read-only from `metrics.endpoints` (an
+"Endpoints" card: name, type, target, status badge, response time, certificate days left,
+detail). Render `Down` as critical and `Expiring` as warning.
 
 ## Configuration
 

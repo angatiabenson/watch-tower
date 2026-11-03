@@ -132,10 +132,12 @@ public class OutboxDispatchWorker : BackgroundService
             var networkMetrics = _metricsStore.GetLatestNetworkMetrics();
             var serviceStatuses = _metricsStore.GetLatestServiceStatuses();
             var appPoolStatuses = _metricsStore.GetLatestApplicationPoolStatuses();
+            var endpointStatuses = _metricsStore.GetLatestEndpointStatuses();
 
             bool hasData = cpuMetrics.Count > 0 || ramMetrics.Count > 0 ||
                            diskMetrics.Count > 0 || networkMetrics.Count > 0 ||
-                           serviceStatuses.Count > 0 || appPoolStatuses.Count > 0;
+                           serviceStatuses.Count > 0 || appPoolStatuses.Count > 0 ||
+                           endpointStatuses.Count > 0;
 
             if (!hasData)
                 return;
@@ -151,7 +153,11 @@ public class OutboxDispatchWorker : BackgroundService
                 networkMetrics.Select(m => new NetworkMetricDto(m.Timestamp.ToString("O"), m.InterfaceName, m.OutputQueueLength)).ToList(),
                 serviceStatuses.Select(m => new ServiceStatusDto(m.Timestamp.ToString("O"), m.ServiceName, m.DisplayName, m.Status, m.IsRunning)).ToList(),
                 appPoolStatuses.Select(m => new ApplicationPoolStatusDto(m.Timestamp.ToString("O"), m.ApplicationPoolName, m.Status, m.IsRunning)).ToList(),
-                _telemetry?.Snapshot()
+                _telemetry?.Snapshot(),
+                endpointStatuses.Count == 0
+                    ? null
+                    : endpointStatuses.Select(e => new EndpointStatusDto(e.Timestamp.ToString("O"), e.Name, e.Type, e.Target,
+                        e.Status, e.IsUp, e.ResponseTimeMs, e.CertificateDaysLeft, e.Detail)).ToList()
             );
 
             await _outboxStore.AddMessageAsync(

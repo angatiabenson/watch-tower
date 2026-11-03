@@ -17,6 +17,8 @@ public enum IncidentType
     ApplicationPoolDown = 10,
     ApplicationPoolStarted = 11,
     ApplicationPoolStartFailed = 12,
-    // 13-15 are taken by endpoint monitoring (EndpointDown, EndpointRecovered, CertificateExpiring).
+    EndpointDown = 13,
+    EndpointRecovered = 14,
+    CertificateExpiring = 15,
     ServerRestarted = 16,
 }

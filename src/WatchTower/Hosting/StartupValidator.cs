@@ -101,6 +101,7 @@ public static class StartupValidator
             warnings.Add($"Web console: {endpoint.Display} is reachable from the network over plain HTTP; " +
                          "the console password and session travel unencrypted.");
 
+        errors.AddRange(Services.Endpoints.EndpointCheck.Validate(Bind<EndpointMonitorOptions>(EndpointMonitorOptions.SectionName).Endpoints));
         ValidateAlerting(Bind<AlertingOptions>(AlertingOptions.SectionName), errors);
         ValidateNotifications(Bind<NotificationOptions>(NotificationOptions.SectionName), errors, warnings);
 

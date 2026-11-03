@@ -154,6 +154,9 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                     IsRunning = m.IsRunning
                 }));
 
+            if (batch.EndpointStatuses is { } endpoints)
+                payload.EndpointStatuses.AddRange(endpoints.Select(ToProto));
+
             var req = new MetricsBatchRequest { Identity = BuildIdentity(), Batch = payload };
             var reply = await _client.SendMetricsBatchAsync(req, headers: BuildMetadata(), deadline: Deadline(),
                 cancellationToken: ct);
@@ -315,6 +318,26 @@ public class GrpcPortalClient : IPortalClient, IDisposable
             _logger.LogWarning(ex, "gRPC AcknowledgeConfig failed: {Status}", ex.Status);
             return false;
         }
+    }
+
+    internal static EndpointStatusProto ToProto(EndpointStatusDto e)
+    {
+        var proto = new EndpointStatusProto
+        {
+            Timestamp = e.Timestamp,
+            Name = e.Name,
+            Type = e.Type,
+            Target = e.Target,
+            Status = e.Status,
+            IsUp = e.IsUp,
+        };
+        if (e.ResponseTimeMs is { } ms)
+            proto.ResponseTimeMs = ms;
+        if (e.CertificateDaysLeft is { } days)
+            proto.CertificateDaysLeft = days;
+        if (e.Detail is not null)
+            proto.Detail = e.Detail;
+        return proto;
     }
 
     /// <summary>

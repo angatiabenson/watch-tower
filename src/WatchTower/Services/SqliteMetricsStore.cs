@@ -64,6 +64,17 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                 status TEXT NOT NULL,
                 is_running INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS endpoint_status (
+                name                  TEXT PRIMARY KEY,
+                timestamp             TEXT NOT NULL,
+                type                  TEXT NOT NULL,
+                target                TEXT NOT NULL,
+                status                TEXT NOT NULL,
+                is_up                 INTEGER NOT NULL,
+                response_time_ms      REAL,
+                certificate_days_left REAL,
+                detail                TEXT
+            );
             CREATE TABLE IF NOT EXISTS incidents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -209,6 +220,29 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@status", status.Status);
             cmd.Parameters.AddWithValue("@running", status.IsRunning ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void AddEndpointStatus(EndpointStatus status)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO endpoint_status
+                    (name, timestamp, type, target, status, is_up, response_time_ms, certificate_days_left, detail)
+                  VALUES (@name, @ts, @type, @target, @status, @up, @ms, @days, @detail)";
+            cmd.Parameters.AddWithValue("@name", status.Name);
+            cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
+            cmd.Parameters.AddWithValue("@type", status.Type);
+            cmd.Parameters.AddWithValue("@target", status.Target);
+            cmd.Parameters.AddWithValue("@status", status.Status);
+            cmd.Parameters.AddWithValue("@up", status.IsUp ? 1 : 0);
+            cmd.Parameters.AddWithValue("@ms", status.ResponseTimeMs is { } ms ? ms : DBNull.Value);
+            cmd.Parameters.AddWithValue("@days", status.CertificateDaysLeft is { } days ? days : DBNull.Value);
+            cmd.Parameters.AddWithValue("@detail", (object?)status.Detail ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
     }
@@ -426,6 +460,38 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         return results;
     }
 
+    public IReadOnlyList<EndpointStatus> GetLatestEndpointStatuses()
+    {
+        var results = new List<EndpointStatus>();
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT name, timestamp, type, target, status, is_up, response_time_ms, certificate_days_left, detail FROM endpoint_status";
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(
+                    new EndpointStatus(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetString(4),
+                        reader.GetInt32(5) == 1,
+                        reader.IsDBNull(6) ? null : reader.GetDouble(6),
+                        reader.IsDBNull(7) ? null : reader.GetDouble(7),
+                        reader.IsDBNull(8) ? null : reader.GetString(8)
+                    )
+                );
+            }
+        }
+        return results;
+    }
+
     public IReadOnlyList<Incident> GetIncidents(TimeSpan period)
     {
         var cutoff = DateTime.UtcNow - period;
@@ -511,6 +577,7 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                     DELETE FROM network_metrics;
                     DELETE FROM service_statuses;
                     DELETE FROM application_pool_statuses;
+                    DELETE FROM endpoint_status;
                     DELETE FROM incidents WHERE timestamp <= @incidentCutoff;
                 ";
                 cmd.Parameters.AddWithValue("@cpuRow", cpuForwardedRowId);

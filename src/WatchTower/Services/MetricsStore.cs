@@ -15,6 +15,7 @@ public class MetricsStore : IMetricsStore
     private readonly ConcurrentDictionary<string, ServiceStatus> _serviceStatuses = new();
     private readonly ConcurrentDictionary<string, ApplicationPoolStatus> _applicationPoolStatuses =
         new();
+    private readonly ConcurrentDictionary<string, EndpointStatus> _endpointStatuses = new();
     private readonly ConcurrentQueue<Incident> _incidents = new();
 
     public void AddCpuMetric(CpuMetric metric) => _cpuMetrics.Enqueue(metric);
@@ -34,6 +35,8 @@ public class MetricsStore : IMetricsStore
 
     public void AddApplicationPoolStatus(ApplicationPoolStatus status) =>
         _applicationPoolStatuses[status.ApplicationPoolName] = status;
+
+    public void AddEndpointStatus(EndpointStatus status) => _endpointStatuses[status.Name] = status;
 
     public void AddIncident(Incident incident) => _incidents.Enqueue(incident);
 
@@ -62,6 +65,8 @@ public class MetricsStore : IMetricsStore
 
     public IReadOnlyList<ApplicationPoolStatus> GetLatestApplicationPoolStatuses() =>
         _applicationPoolStatuses.Values.ToList();
+
+    public IReadOnlyList<EndpointStatus> GetLatestEndpointStatuses() => _endpointStatuses.Values.ToList();
 
     public IReadOnlyList<Incident> GetIncidents(TimeSpan period)
     {
@@ -94,6 +99,7 @@ public class MetricsStore : IMetricsStore
         _networkMetrics.Clear();
         _serviceStatuses.Clear();
         _applicationPoolStatuses.Clear();
+        _endpointStatuses.Clear();
 
         var newer = new List<Incident>();
         while (_incidents.TryDequeue(out var incident))

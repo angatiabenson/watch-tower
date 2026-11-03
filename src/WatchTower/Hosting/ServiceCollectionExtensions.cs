@@ -63,6 +63,13 @@ public static class ServiceCollectionExtensions
 
         services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
 
+        // Endpoint checks: per-check timeouts are applied by the probe; redirects are followed by
+        // the probe itself (same host only), and request logging is off (targets may carry tokens).
+        services.AddSingleton<Services.Endpoints.IEndpointProbe, Services.Endpoints.EndpointProbe>();
+        services.AddHttpClient(Services.Endpoints.EndpointProbe.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(130))
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
+            .RemoveAllLoggers();
+
         // Self-update: feed client, state machine, periodic checker and the readiness beacon
         // the installer waits for after a restart.
         services.AddHttpClient(Updates.UpdateFeedClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(60));
@@ -82,6 +89,7 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<NetworkMonitorWorker>();
         services.AddHostedService<ServiceMonitorWorker>();
         services.AddHostedService<ApplicationPoolMonitorWorker>();
+        services.AddHostedService<EndpointMonitorWorker>();
         services.AddHostedService<HeartbeatWorker>();
         services.AddSingleton<IBootTimeProvider, TickCountBootTimeProvider>();
         services.AddHostedService<RebootDetectionWorker>();
@@ -98,6 +106,7 @@ public static class ServiceCollectionExtensions
         services.Configure<ServiceMonitorOptions>(config.GetSection(ServiceMonitorOptions.SectionName));
         services.Configure<ApplicationPoolMonitorOptions>(config.GetSection(ApplicationPoolMonitorOptions.SectionName));
         services.Configure<NetworkMonitorOptions>(config.GetSection(NetworkMonitorOptions.SectionName));
+        services.Configure<EndpointMonitorOptions>(config.GetSection(EndpointMonitorOptions.SectionName));
         services.Configure<HeartbeatOptions>(config.GetSection(HeartbeatOptions.SectionName));
         services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
         services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));

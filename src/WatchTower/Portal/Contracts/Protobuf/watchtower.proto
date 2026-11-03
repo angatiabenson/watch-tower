@@ -38,6 +38,7 @@ message MetricsBatchPayload {
   repeated AppPoolStatusProto    app_pool_statuses  = 8;
   string batch_id                            = 9;  // idempotency key for de-duplicating retried batches
   AgentTelemetryProto            agent              = 10; // optional: agent identity/version/update state
+  repeated EndpointStatusProto   endpoint_statuses  = 11; // latest endpoint check results (absent from older agents)
 }
 
 // Agent self-description sent with every metrics batch (additive; absent from older agents).
@@ -60,6 +61,17 @@ message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; d
 message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; }
 message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; }
 message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; }
+message EndpointStatusProto  {
+  string          timestamp             = 1;
+  string          name                  = 2;
+  string          type                  = 3;  // Http | Tcp | Certificate
+  string          target                = 4;  // without credentials or query string
+  string          status                = 5;  // Up | Down | Expiring
+  bool            is_up                 = 6;
+  optional double response_time_ms      = 7;
+  optional double certificate_days_left = 8;
+  optional string detail                = 9;
+}
 
 // ── Event ────────────────────────────────────────────────────────────────────
 
