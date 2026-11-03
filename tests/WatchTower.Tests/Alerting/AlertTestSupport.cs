@@ -67,6 +67,42 @@ internal sealed class InMemoryAlertStateStore : IAlertStateStore
     }
 }
 
+/// <summary>
+/// <see cref="IAlertStateStore"/> whose next delivery write matching a condition throws (a
+/// transient database error), once; every other call goes to <see cref="Inner"/>.
+/// </summary>
+internal sealed class FlakyAlertStateStore(IAlertStateStore inner) : IAlertStateStore
+{
+    private Func<PendingDelivery, bool>? _failNext;
+
+    public IAlertStateStore Inner { get; } = inner;
+
+    /// <summary>How many writes were failed so far.</summary>
+    public int FailedWrites { get; private set; }
+
+    /// <summary>Fails the next <see cref="UpsertDelivery"/> whose delivery matches <paramref name="when"/>.</summary>
+    public void FailNextDeliveryWrite(Func<PendingDelivery, bool> when) => _failNext = when;
+
+    public IReadOnlyList<AlertState> LoadAll() => Inner.LoadAll();
+    public void Upsert(AlertState state) => Inner.Upsert(state);
+    public IReadOnlyList<PendingDelivery> LoadDeliveries() => Inner.LoadDeliveries();
+
+    public void UpsertDelivery(PendingDelivery delivery)
+    {
+        if (_failNext is { } when && when(delivery))
+        {
+            _failNext = null;
+            FailedWrites++;
+            throw new IOException("Transient store write failure");
+        }
+        Inner.UpsertDelivery(delivery);
+    }
+
+    public void DeleteDelivery(string id) => Inner.DeleteDelivery(id);
+    public string? GetValue(string key) => Inner.GetValue(key);
+    public void SetValue(string key, string value) => Inner.SetValue(key, value);
+}
+
 /// <summary>Maintenance window a test can open and close.</summary>
 internal sealed class TestMaintenance : IMaintenanceState
 {

@@ -287,6 +287,58 @@ public class DeliveryConcurrencyTests
         alerts.GetPendingDeliveries().Should().BeEmpty();
     }
 
+    // ── A store write failing while a delivery is claimed ──────────────────
+
+    [Fact]
+    public async Task StoreWriteFailingWhileAHeldNoticeIsReleased_DoesNotStrandIt()
+    {
+        // The reviewer's probe: the write that releases the held notice fails once. The claim
+        // taken for the send must be given back, or the notice is never sent.
+        var store = new FlakyAlertStateStore(new InMemoryAlertStateStore());
+        var dispatcher = new RecordingDispatcher();
+        var alerts = TestAlerts.Create(_metrics.Object, _time, dispatcher, state: store, maintenance: _maintenance);
+        _maintenance.Active = true;
+        await Raise(alerts);
+        _maintenance.Active = false;
+
+        store.FailNextDeliveryWrite(d => !d.Held);
+        var act = () => alerts.ProcessPendingAsync(Ct).Bounded();
+        await act.Should().ThrowAsync<IOException>();
+        store.FailedWrites.Should().Be(1);
+        alerts.InFlightCount.Should().Be(0, "the claim is released although its send was never prepared");
+        dispatcher.Sent.Should().BeEmpty();
+
+        for (var i = 0; i < 3; i++)
+            await alerts.ProcessPendingAsync(Ct).Bounded();
+
+        dispatcher.Sent.Should().ContainSingle().Which.Kind.Should().Be(AlertNotificationKind.Opened);
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+        alerts.InFlightCount.Should().Be(0);
+        alerts.GetOpenAlerts().Single().NotifyCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task StoreWriteFailingWhenTheOutcomeIsRecorded_LeavesTheDeliveryRetryable()
+    {
+        var store = new FlakyAlertStateStore(new InMemoryAlertStateStore());
+        var dispatcher = new RecordingDispatcher();
+        dispatcher.Failing.Add("ch1");
+        var alerts = TestAlerts.Create(_metrics.Object, _time, dispatcher, state: store, maintenance: _maintenance);
+
+        store.FailNextDeliveryWrite(d => d.FailedAttempts > 0);
+        var act = () => Raise(alerts).Bounded();
+        await act.Should().ThrowAsync<IOException>();
+        alerts.InFlightCount.Should().Be(0);
+
+        dispatcher.Failing.Clear();
+        await alerts.ProcessPendingAsync(Ct).Bounded();
+
+        dispatcher.Sent.Should().HaveCount(2, "the failed attempt is retried");
+        dispatcher.Delivered.Should().ContainSingle();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+        alerts.InFlightCount.Should().Be(0);
+    }
+
     // ── Shutdown while a channel is still sending ──────────────────────────
 
     /// <summary>

@@ -89,6 +89,16 @@ public sealed class AlertManager : IAlertManager
             return Deliveries().Values.OrderBy(d => d.CreatedAt).ToList();
     }
 
+    /// <summary>Deliveries claimed by a sender right now (tests).</summary>
+    internal int InFlightCount
+    {
+        get
+        {
+            lock (_gate)
+                return _inFlight.Count;
+        }
+    }
+
     public async Task RaiseAsync(
         AlertKey key,
         AlertSeverity severity,
@@ -283,6 +293,10 @@ public sealed class AlertManager : IAlertManager
             }
         }
 
+        // The recovery's claim (if any) is ours until SendOrLogHeldAsync takes it over: whatever
+        // fails before that (the portal, the metrics store) gives it back, and the recovery stays
+        // pending for the delivery worker.
+        var handedOver = false;
         try
         {
             if (retiredReason is not null || recoveryIncident is null)
@@ -297,21 +311,21 @@ public sealed class AlertManager : IAlertManager
                 _metricsStore.AddIncident(recoveryIncident);
                 await _portal.PublishAlertEventAsync(recoveryIncident, key.Value, resolved: true, ct);
             }
+
+            if (retiredReason is not null)
+                _logger.LogInformation("Alert {Key} retired after {Duration}: {Reason}", key.Value, AlertText.FormatDuration(duration), retiredReason);
+            else
+                _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
+
+            handedOver = true;
+            if (recovery is not null)
+                await SendOrLogHeldAsync(recovery, ct);
         }
-        catch
+        finally
         {
-            if (recovery is { Held: false })
-                Unclaim(recovery.Id); // still pending: the delivery worker sends it
-            throw;
+            if (!handedOver && recovery is { Held: false })
+                Unclaim(recovery.Id);
         }
-
-        if (retiredReason is not null)
-            _logger.LogInformation("Alert {Key} retired after {Duration}: {Reason}", key.Value, AlertText.FormatDuration(duration), retiredReason);
-        else
-            _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
-
-        if (recovery is not null)
-            await SendOrLogHeldAsync(recovery, ct);
         return true;
     }
 
@@ -430,16 +444,12 @@ public sealed class AlertManager : IAlertManager
         lock (_gate)
         {
             // Read and claim in one section: a close in between would otherwise miss this send.
+            // Nothing that can fail happens here once the claim is taken: releasing a held
+            // delivery (a store write) is done by AttemptClaimedAsync, which always gives the
+            // claim back.
             delivery = Deliveries().GetValueOrDefault(id);
-            if (delivery is null || !_inFlight.Add(id))
+            if (delivery is null || (!delivery.Held && delivery.NextAttemptAt > now) || !_inFlight.Add(id))
                 return;
-            if (delivery.Held)
-                delivery = ReleaseLocked(delivery, now);
-            if (delivery is null || delivery.NextAttemptAt > now)
-            {
-                _inFlight.Remove(id);
-                return;
-            }
         }
 
         await AttemptClaimedAsync(delivery, ct);
@@ -555,12 +565,21 @@ public sealed class AlertManager : IAlertManager
     /// <summary>
     /// Sends <paramref name="delivery"/> to every eligible channel that does not have it yet and
     /// records the outcome: delivered channels are never sent it again, failed ones are retried
-    /// with <see cref="NotificationRetryPolicy"/>. The caller holds the in-flight claim.
+    /// with <see cref="NotificationRetryPolicy"/>. The caller holds the in-flight claim; it is
+    /// released here on every path, including a failure while the send is prepared (releasing a
+    /// held delivery) or its outcome is persisted.
     /// </summary>
-    private async Task AttemptClaimedAsync(PendingDelivery delivery, CancellationToken ct)
+    private async Task AttemptClaimedAsync(PendingDelivery claimed, CancellationToken ct)
     {
         try
         {
+            PendingDelivery? prepared;
+            lock (_gate)
+                prepared = PrepareLocked(claimed);
+            if (prepared is null)
+                return;
+
+            PendingDelivery delivery = prepared;
             var notification = delivery.Notification;
             var skip = new HashSet<string>(delivery.DeliveredChannels, StringComparer.OrdinalIgnoreCase);
             var reached = delivery.DeliveredChannels.Count > 0; // guarded by _gate
@@ -628,8 +647,20 @@ public sealed class AlertManager : IAlertManager
         finally
         {
             // Only now: until its outcome is recorded, a close must treat it as being sent.
-            Unclaim(delivery.Id);
+            Unclaim(claimed.Id);
         }
+    }
+
+    /// <summary>
+    /// The claimed delivery as it is about to be sent: its current row (null if it was superseded
+    /// meanwhile), released first if a maintenance window held it (null if it is no longer worth
+    /// sending, see <see cref="ReleaseLocked"/>).
+    /// </summary>
+    private PendingDelivery? PrepareLocked(PendingDelivery claimed)
+    {
+        if (Deliveries().GetValueOrDefault(claimed.Id) is not { } current)
+            return null;
+        return current.Held ? ReleaseLocked(current, UtcNow) : current;
     }
 
     /// <summary>
