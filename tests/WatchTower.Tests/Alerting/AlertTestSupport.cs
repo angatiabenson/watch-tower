@@ -103,6 +103,33 @@ internal sealed class FlakyAlertStateStore(IAlertStateStore inner) : IAlertState
     public void SetValue(string key, string value) => Inner.SetValue(key, value);
 }
 
+/// <summary>
+/// Portal publisher whose alert publications wait for the test to <see cref="Release"/> them, so a
+/// test can change state (start a maintenance window) while a raise or close awaits the portal.
+/// </summary>
+internal sealed class GatedPortalPublisher : WatchTower.Portal.IPortalEventPublisher
+{
+    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes when the first alert publication starts.</summary>
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Which publications wait (opened: <c>false</c>, resolved: <c>true</c>, events: null).</summary>
+    public Func<bool?, bool> Gates { get; set; } = _ => true;
+
+    public void Release() => _release.TrySetResult();
+
+    public Task PublishIncidentAsync(WatchTower.Models.Incident incident, CancellationToken ct) => Task.CompletedTask;
+
+    public Task PublishAlertEventAsync(WatchTower.Models.Incident incident, string alertKey, bool? resolved, CancellationToken ct)
+    {
+        if (!Gates(resolved))
+            return Task.CompletedTask;
+        Entered.TrySetResult();
+        return _release.Task.WaitAsync(ct);
+    }
+}
+
 /// <summary>Maintenance window a test can open and close.</summary>
 internal sealed class TestMaintenance : IMaintenanceState
 {

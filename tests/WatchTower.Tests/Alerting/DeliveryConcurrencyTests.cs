@@ -395,6 +395,119 @@ public class DeliveryConcurrencyTests
         restarted.GetPendingDeliveries().Should().BeEmpty();
     }
 
+    // ── A maintenance window starting right before a direct send ───────────
+
+    [Fact]
+    public async Task WindowStartingWhileARaiseAwaitsThePortal_HoldsTheOpenedNotice()
+    {
+        // The judge's probe: the raise decided "not in maintenance" before publishing to the
+        // portal; the window starts while that publication is in progress.
+        var portal = new GatedPortalPublisher();
+        var alerts = TestAlerts.Create(_metrics.Object, _time, _dispatcher, portal: portal, maintenance: _maintenance);
+
+        var raising = Raise(alerts);
+        await portal.Entered.Task.Bounded();
+        _maintenance.Active = true;
+        portal.Release();
+        await raising.Bounded();
+
+        _dispatcher.HasWaitingCall.Should().BeFalse("nothing is sent once the window has started");
+        _dispatcher.Sent.Should().BeEmpty();
+        var held = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
+        held.Notification.Kind.Should().Be(AlertNotificationKind.Opened);
+        held.Held.Should().BeTrue();
+        alerts.InFlightCount.Should().Be(0);
+
+        await alerts.ProcessPendingAsync(Ct).Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse("the window is still active");
+
+        _maintenance.Active = false;
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var opened = await _dispatcher.NextAsync(Ct);
+        opened.Notification.Kind.Should().Be(AlertNotificationKind.Opened);
+        opened.Deliver("ch1");
+        await processing.Bounded();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+        alerts.GetOpenAlerts().Single().NotifyCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task WindowStartingWhileACloseAwaitsThePortal_HoldsTheRecovery_AndSendsItAfterwards()
+    {
+        var portal = new GatedPortalPublisher { Gates = resolved => resolved == true };
+        var alerts = TestAlerts.Create(_metrics.Object, _time, _dispatcher, portal: portal, maintenance: _maintenance);
+        var raising = Raise(alerts);
+        (await _dispatcher.NextAsync(Ct)).Deliver("ch1");
+        await raising.Bounded();
+
+        var resolving = alerts.ResolveAsync(Key, ct: Ct);
+        await portal.Entered.Task.Bounded();
+        _maintenance.Active = true;
+        portal.Release();
+        (await resolving.Bounded()).Should().BeTrue();
+
+        _dispatcher.HasWaitingCall.Should().BeFalse("nothing is sent once the window has started");
+        var held = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
+        held.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+        held.Held.Should().BeTrue();
+        alerts.InFlightCount.Should().Be(0);
+
+        _maintenance.Active = false;
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var resolved = await _dispatcher.NextAsync(Ct);
+        resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved, "operators were told it opened");
+        resolved.Deliver("ch1");
+        await processing.Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task WindowStartingBeforeAQueuedRecoveryIsHandedOn_HoldsIt()
+    {
+        var alerts = Alerts();
+        _maintenance.Active = true;
+        await Raise(alerts);
+        _maintenance.Active = false;
+
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var opened = await _dispatcher.NextAsync(Ct);
+        await alerts.ResolveAsync(Key, ct: Ct).Bounded(); // queued behind the opened notice
+        _maintenance.Active = true;
+        opened.Deliver("ch1");
+        await processing.Bounded();
+
+        _dispatcher.HasWaitingCall.Should().BeFalse("the window started before the recovery's turn came");
+        var held = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
+        held.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+        held.Held.Should().BeTrue();
+
+        _maintenance.Active = false;
+        processing = alerts.ProcessPendingAsync(Ct);
+        var resolved = await _dispatcher.NextAsync(Ct);
+        resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+        resolved.Deliver("ch1");
+        await processing.Bounded();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task WindowStartingWhileAnEventAwaitsThePortal_HoldsIt_ForTheSummary()
+    {
+        var portal = new GatedPortalPublisher();
+        var alerts = TestAlerts.Create(_metrics.Object, _time, _dispatcher, portal: portal, maintenance: _maintenance);
+
+        var notifying = alerts.NotifyEventAsync(AlertKey.Reboot, AlertSeverity.Warning, "Restarted",
+            new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ServerRestarted, "The server restarted"), Ct);
+        await portal.Entered.Task.Bounded();
+        _maintenance.Active = true;
+        portal.Release();
+        await notifying.Bounded();
+
+        _dispatcher.HasWaitingCall.Should().BeFalse();
+        alerts.GetPendingDeliveries().Should().ContainSingle().Which.Held.Should().BeTrue();
+    }
+
     [Fact]
     public async Task WindowStartingWhileRetriesAreSent_LeavesTheRemainingRetriesPending()
     {

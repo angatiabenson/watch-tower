@@ -382,7 +382,7 @@ public sealed class AlertManager : IAlertManager
             {
                 ct.ThrowIfCancellationRequested();
                 // A window that starts while the batch is drained holds the rest of it (checked
-                // again by ContinueAsync right before each send).
+                // again right before each send, see PrepareLocked).
                 if (_maintenance.Current.Active)
                     return;
                 await ContinueAsync(id, now, ct);
@@ -499,7 +499,7 @@ public sealed class AlertManager : IAlertManager
     /// </summary>
     private async Task ContinueAsync(string id, DateTime now, CancellationToken ct)
     {
-        // Right before every send, not only when a batch starts.
+        // Shortcut: a window being active leaves it as it is (PrepareLocked checks again at the send).
         if (_maintenance.Current.Active)
             return;
 
@@ -742,11 +742,31 @@ public sealed class AlertManager : IAlertManager
     /// The claimed delivery as it is about to be sent: its current row (null if it was superseded
     /// meanwhile), released first if a maintenance window held it (null if it is no longer worth
     /// sending, see <see cref="ReleaseLocked"/>).
+    /// <para>
+    /// The one place every send passes (opened, reminder, recovery and event notices, sent
+    /// directly or by the delivery worker) right before the dispatcher, so maintenance is checked
+    /// here: callers decide earlier, sometimes before an await (the portal publication), and a
+    /// window may have started since. The notice is then held (null) until the window ends.
+    /// </para>
     /// </summary>
     private PendingDelivery? PrepareLocked(PendingDelivery claimed)
     {
         if (Deliveries().GetValueOrDefault(claimed.Id) is not { } current)
             return null;
+
+        if (_maintenance.Current is { Active: true } window)
+        {
+            if (!current.Held)
+            {
+                var held = current with { Held = true };
+                _store.UpsertDelivery(held);
+                Deliveries()[held.Id] = held;
+                _logger.LogInformation("{Kind} notification for alert {Key} held: maintenance window active until {Until:O}",
+                    held.Notification.Kind, held.AlertKey, window.Until);
+            }
+            return null;
+        }
+
         return current.Held ? ReleaseLocked(current, UtcNow) : current;
     }
 
