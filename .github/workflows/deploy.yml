@@ -8,6 +8,8 @@ on:
       - 'tests/**'
       - '.github/workflows/deploy.yml'
       - 'WatchTower.slnx'
+      - 'global.json'
+      - 'Directory.*.props'
 
 permissions:
   contents: write
@@ -17,7 +19,7 @@ jobs:
     runs-on: self-hosted
 
     env:
-      DOTNET_VERSION: '8.0.x'
+      DOTNET_VERSION: '10.0.x'
       SERVICE_NAME: 'WatchTower'
       DEPLOY_PATH: 'C:\Services\WatchTower'
       BACKUP_ROOT: 'C:\Services\WatchTower.backups'
@@ -25,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -57,7 +59,7 @@ jobs:
           "VERSION_NUMBER=$($newVersion -replace '^v', '')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -68,7 +70,7 @@ jobs:
         run: dotnet build tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-restore -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}
 
       - name: Run tests
-        run: dotnet test tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-build --verbosity normal
+        run: dotnet test --project tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-build --report-trx
 
       - name: Publish
         run: dotnet publish src/WatchTower/WatchTower.csproj --configuration Release --output ./publish --runtime win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION_NUMBER }}

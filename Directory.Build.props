@@ -1,0 +1,19 @@
+<Project>
+  <!-- Shared settings for every project in the repo. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <Authors>WatchTower contributors</Authors>
+    <Product>WatchTower</Product>
+    <Copyright>Copyright (c) WatchTower contributors</Copyright>
+    <RepositoryUrl>https://github.com/angatiabenson/watch-tower</RepositoryUrl>
+    <!-- Overridden by CI with -p:Version=x.y.z -->
+    <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
+  </PropertyGroup>
+</Project>

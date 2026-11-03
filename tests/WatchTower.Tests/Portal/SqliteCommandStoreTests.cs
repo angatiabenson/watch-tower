@@ -1,4 +1,4 @@
-using FluentAssertions;
+using AwesomeAssertions;
 
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Storage;

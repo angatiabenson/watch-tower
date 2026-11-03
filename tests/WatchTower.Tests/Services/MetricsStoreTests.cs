@@ -1,4 +1,4 @@
-using FluentAssertions;
+using AwesomeAssertions;
 
 using WatchTower.Models;
 using WatchTower.Services;
