@@ -232,7 +232,17 @@ public class UpdateServiceTests : IDisposable
         service.TryStartDownload(countdown: false, out _);
         await WaitForAsync(service, s => s.Phase == UpdatePhase.ReadyToInstall);
 
-        service.TryInstallNow(out var message).Should().BeFalse();
+        // The download task publishes ReadyToInstall a moment before releasing its operation
+        // lock, so an immediate attempt may get the transient "in progress" refusal first.
+        string message;
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (true)
+        {
+            service.TryInstallNow(out message).Should().BeFalse();
+            if (!message.Contains("in progress", StringComparison.Ordinal) || DateTime.UtcNow > deadline)
+                break;
+            await Task.Delay(10, Ct);
+        }
         message.Should().Contain("Windows service");
     }
 
