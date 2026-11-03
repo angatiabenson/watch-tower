@@ -113,6 +113,13 @@ default `Info`) the alert meets. Channels are sent in parallel with a short time
 (`Notifications:TimeoutSeconds`, default 10); a failing channel is logged by name and type
 — never its URL — and does not block the others.
 
+Delivery is tracked per channel (SQLite table `alert_delivery`, kept across restarts). A
+channel that failed is retried with backoff (1, 2, 4, 8, 16, then every 30 minutes) — the
+channels that already have the notification never get it twice. Opened and reminder notices
+are retried while their alert stays open; resolved notices and one-shot events for up to 24
+hours. An alert only counts as notified (`notifyCount`, `lastNotifiedAt`) once a notice
+actually reached a channel.
+
 | Channel | Configure (console: *Notification channels*) | Payload |
 |---|---|---|
 | Email | `Notifications:Email:Enabled` (default `true`) + the `Email` SMTP settings | Short HTML alert |

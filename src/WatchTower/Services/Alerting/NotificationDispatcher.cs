@@ -18,18 +18,25 @@ public sealed class NotificationDispatcher(
     private readonly Dictionary<NotificationChannelType, INotificationChannel> _senders =
         channels.ToDictionary(c => c.Type);
 
-    public async Task<int> DispatchAsync(AlertNotification notification, CancellationToken ct)
+    public async Task<DispatchResult> DispatchAsync(
+        AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
     {
-        var targets = Eligible(notification.Severity).ToList();
+        var targets = Eligible(notification.Severity)
+            .Where(t => skipChannels is null || !skipChannels.Contains(t.Channel.Name))
+            .ToList();
         if (targets.Count == 0)
         {
             logger.LogDebug("No notification channel accepts {Severity} {Kind} for {Key}",
                 notification.Severity, notification.Kind, notification.AlertKey);
-            return 0;
+            return DispatchResult.None;
         }
 
-        await Task.WhenAll(targets.Select(t => SendAsync(t.Channel, t.Sender, notification, ct)));
-        return targets.Count;
+        var results = await Task.WhenAll(targets.Select(async t =>
+        {
+            var result = await SendAsync(t.Channel, t.Sender, notification, ct);
+            return new ChannelDelivery(t.Channel.Name, result.Success, result.Message);
+        }));
+        return new DispatchResult(results);
     }
 
     /// <summary>

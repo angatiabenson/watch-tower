@@ -34,6 +34,26 @@ internal sealed class InMemoryAlertStateStore : IAlertStateStore
             _states[state.Key] = state;
     }
 
+    private readonly Dictionary<string, PendingDelivery> _deliveries = new(StringComparer.Ordinal);
+
+    public IReadOnlyList<PendingDelivery> LoadDeliveries()
+    {
+        lock (_deliveries)
+            return _deliveries.Values.OrderBy(d => d.CreatedAt).ToList();
+    }
+
+    public void UpsertDelivery(PendingDelivery delivery)
+    {
+        lock (_deliveries)
+            _deliveries[delivery.Id] = delivery;
+    }
+
+    public void DeleteDelivery(string id)
+    {
+        lock (_deliveries)
+            _deliveries.Remove(id);
+    }
+
     public string? GetValue(string key)
     {
         lock (_values)
@@ -54,14 +74,22 @@ internal sealed class TestMaintenance : IMaintenanceState
     public MaintenanceWindow Current => new(Active, Active ? DateTimeOffset.UtcNow.AddHours(1) : null, Active ? "patching" : null);
 }
 
-/// <summary>Captures notifications instead of delivering them.</summary>
+/// <summary>
+/// Captures notifications instead of delivering them. Channels are named <c>ch1</c>..<c>chN</c>;
+/// those in <see cref="Failing"/> report a failed send.
+/// </summary>
 internal sealed class RecordingDispatcher : INotificationDispatcher
 {
     private readonly List<AlertNotification> _sent = [];
+    private readonly List<(string Channel, AlertNotification Notification)> _delivered = [];
 
-    /// <summary>What <see cref="DispatchAsync"/> reports as the number of channels used.</summary>
+    /// <summary>How many channels are configured.</summary>
     public int Channels { get; set; } = 1;
 
+    /// <summary>Channel names whose sends fail.</summary>
+    public HashSet<string> Failing { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every dispatch call (whether or not any channel delivered it).</summary>
     public IReadOnlyList<AlertNotification> Sent
     {
         get
@@ -71,11 +99,34 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
         }
     }
 
-    public Task<int> DispatchAsync(AlertNotification notification, CancellationToken ct)
+    /// <summary>Every successful channel delivery.</summary>
+    public IReadOnlyList<(string Channel, AlertNotification Notification)> Delivered
     {
+        get
+        {
+            lock (_sent)
+                return _delivered.ToList();
+        }
+    }
+
+    public Task<DispatchResult> DispatchAsync(AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
+    {
+        var results = new List<ChannelDelivery>();
         lock (_sent)
+        {
             _sent.Add(notification);
-        return Task.FromResult(Channels);
+            for (var i = 1; i <= Channels; i++)
+            {
+                var name = $"ch{i}";
+                if (skipChannels?.Contains(name) == true)
+                    continue;
+                var ok = !Failing.Contains(name);
+                results.Add(new ChannelDelivery(name, ok, ok ? "Delivered" : "Rejected with HTTP 503"));
+                if (ok)
+                    _delivered.Add((name, notification));
+            }
+        }
+        return Task.FromResult(new DispatchResult(results));
     }
 }
 

@@ -110,12 +110,30 @@ public class NotificationChannelTests
         };
         var dispatcher = Dispatcher(options, email, teams, slack);
 
-        (await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Warning), Ct)).Should().Be(2);
+        var warning = await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Warning), null, Ct);
+        warning.Channels.Select(c => (c.Channel, c.Success)).Should().BeEquivalentTo([("email", false), ("teams", true)]);
+        warning.Failed.Single().Message.Should().Be("Failed (InvalidOperationException)");
         email.Calls.Should().ContainSingle();
         teams.Calls.Should().ContainSingle();
         slack.Calls.Should().BeEmpty("Warning is below Slack's Critical minimum");
 
-        (await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Critical), Ct)).Should().Be(3);
+        var critical = await dispatcher.DispatchAsync(Notification(severity: AlertSeverity.Critical), null, Ct);
+        critical.Delivered.Should().BeEquivalentTo("teams", "slack");
+        critical.Failed.Select(f => f.Channel).Should().Equal("email");
+    }
+
+    [Fact]
+    public async Task Dispatch_SkipsChannelsThatAlreadyDelivered()
+    {
+        var email = new FakeChannel(NotificationChannelType.Email, _ => Task.FromResult(ChannelSendResult.Ok()));
+        var teams = new FakeChannel(NotificationChannelType.Teams, _ => Task.FromResult(ChannelSendResult.Ok()));
+        var dispatcher = Dispatcher(new NotificationOptions { Teams = new WebhookNotificationSettings { Url = SecretUrl } }, email, teams);
+
+        var result = await dispatcher.DispatchAsync(Notification(), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "EMAIL" }, Ct);
+
+        result.Channels.Should().ContainSingle().Which.Channel.Should().Be("teams");
+        email.Calls.Should().BeEmpty();
+        teams.Calls.Should().ContainSingle();
     }
 
     [Fact]
@@ -123,7 +141,7 @@ public class NotificationChannelTests
     {
         var email = new FakeChannel(NotificationChannelType.Email, _ => Task.FromResult(ChannelSendResult.Ok())) { Available = false };
 
-        (await Dispatcher(new NotificationOptions(), email).DispatchAsync(Notification(), Ct)).Should().Be(0);
+        (await Dispatcher(new NotificationOptions(), email).DispatchAsync(Notification(), null, Ct)).Channels.Should().BeEmpty();
         email.Calls.Should().BeEmpty();
     }
 

@@ -196,7 +196,7 @@ public class AlertManagerTests
     public async Task DispatcherFailure_DoesNotPropagate()
     {
         var dispatcher = new Mock<INotificationDispatcher>();
-        dispatcher.Setup(d => d.DispatchAsync(It.IsAny<AlertNotification>(), It.IsAny<CancellationToken>()))
+        dispatcher.Setup(d => d.DispatchAsync(It.IsAny<AlertNotification>(), It.IsAny<IReadOnlySet<string>?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("boom"));
         var alerts = TestAlerts.Create(_metricsStore.Object, _time, dispatcher.Object);
 

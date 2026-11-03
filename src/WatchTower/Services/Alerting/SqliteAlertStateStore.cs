@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 
 using Microsoft.Data.Sqlite;
 
@@ -9,6 +10,9 @@ namespace WatchTower.Services.Alerting;
 /// <summary>SQLite <see cref="IAlertStateStore"/> sharing the agent database file.</summary>
 public sealed class SqliteAlertStateStore : IAlertStateStore
 {
+    /// <summary>Stored notification and channel-list JSON (property names as declared).</summary>
+    private static readonly JsonSerializerOptions JsonOptions = new();
+
     private readonly string _connectionString;
     private readonly Lock _lock = new();
 
@@ -34,6 +38,19 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                 notify_count     INTEGER NOT NULL DEFAULT 0,
                 resolved_at      TEXT,
                 last_description TEXT    NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alert_delivery (
+                id                 TEXT    PRIMARY KEY,
+                alert_key          TEXT    NOT NULL COLLATE NOCASE,
+                kind               INTEGER NOT NULL,
+                notification       TEXT    NOT NULL,
+                created_at         TEXT    NOT NULL,
+                delivered_channels TEXT    NOT NULL DEFAULT '[]',
+                failed_attempts    INTEGER NOT NULL DEFAULT 0,
+                first_attempt_at   TEXT,
+                next_attempt_at    TEXT    NOT NULL,
+                last_error         TEXT,
+                held               INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS agent_state (
                 key        TEXT PRIMARY KEY,
@@ -117,6 +134,98 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.Parameters.AddWithValue("@count", state.NotifyCount);
             cmd.Parameters.AddWithValue("@resolved", state.ResolvedAt is { } r ? Format(r) : DBNull.Value);
             cmd.Parameters.AddWithValue("@description", state.LastDescription);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public IReadOnlyList<PendingDelivery> LoadDeliveries()
+    {
+        var results = new List<PendingDelivery>();
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                """
+                SELECT id, notification, created_at, delivered_channels, failed_attempts, first_attempt_at,
+                       next_attempt_at, last_error, held
+                FROM alert_delivery
+                ORDER BY created_at, id
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                AlertNotification? notification;
+                List<string>? delivered;
+                try
+                {
+                    notification = JsonSerializer.Deserialize<AlertNotification>(reader.GetString(1), JsonOptions);
+                    delivered = JsonSerializer.Deserialize<List<string>>(reader.GetString(3), JsonOptions);
+                }
+                catch (JsonException)
+                {
+                    continue; // unreadable row (written by a different version): skip it
+                }
+                if (notification is null)
+                    continue;
+                results.Add(new PendingDelivery(
+                    reader.GetString(0),
+                    notification,
+                    ParseUtc(reader.GetString(2)),
+                    delivered ?? [],
+                    reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : ParseUtc(reader.GetString(5)),
+                    ParseUtc(reader.GetString(6)),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.GetInt32(8) != 0));
+            }
+        }
+        return results;
+    }
+
+    public void UpsertDelivery(PendingDelivery delivery)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                """
+                INSERT INTO alert_delivery (id, alert_key, kind, notification, created_at, delivered_channels,
+                                            failed_attempts, first_attempt_at, next_attempt_at, last_error, held)
+                VALUES (@id, @key, @kind, @notification, @created, @delivered, @failed, @first, @next, @error, @held)
+                ON CONFLICT(id) DO UPDATE SET
+                    notification = excluded.notification,
+                    delivered_channels = excluded.delivered_channels,
+                    failed_attempts = excluded.failed_attempts,
+                    first_attempt_at = excluded.first_attempt_at,
+                    next_attempt_at = excluded.next_attempt_at,
+                    last_error = excluded.last_error,
+                    held = excluded.held
+                """;
+            cmd.Parameters.AddWithValue("@id", delivery.Id);
+            cmd.Parameters.AddWithValue("@key", delivery.AlertKey);
+            cmd.Parameters.AddWithValue("@kind", (int)delivery.Notification.Kind);
+            cmd.Parameters.AddWithValue("@notification", JsonSerializer.Serialize(delivery.Notification, JsonOptions));
+            cmd.Parameters.AddWithValue("@created", Format(delivery.CreatedAt));
+            cmd.Parameters.AddWithValue("@delivered", JsonSerializer.Serialize(delivery.DeliveredChannels, JsonOptions));
+            cmd.Parameters.AddWithValue("@failed", delivery.FailedAttempts);
+            cmd.Parameters.AddWithValue("@first", delivery.FirstAttemptAt is { } f ? Format(f) : DBNull.Value);
+            cmd.Parameters.AddWithValue("@next", Format(delivery.NextAttemptAt));
+            cmd.Parameters.AddWithValue("@error", (object?)delivery.LastError ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@held", delivery.Held ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void DeleteDelivery(string id)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM alert_delivery WHERE id = @id";
+            cmd.Parameters.AddWithValue("@id", id);
             cmd.ExecuteNonQuery();
         }
     }

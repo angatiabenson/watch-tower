@@ -122,7 +122,9 @@ public class DiskMonitorWorkerTests
         await worker.PollOnceAsync(CancellationToken.None);
 
         _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.DiskCritical)), Times.Once);
-        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        // The undelivered email is retried with backoff (1, 2, 4 min): at 0 s, 60 s, 180 s and
+        // 600 s — not on every poll.
+        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Exactly(4));
         _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Never);
     }
 

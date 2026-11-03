@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
@@ -22,6 +24,13 @@ public sealed class AlertManager : IAlertManager
 
     private readonly Lock _gate = new();
     private Dictionary<string, AlertState>? _states;
+    private Dictionary<string, PendingDelivery>? _deliveries;
+
+    /// <summary>Deliveries being attempted right now (by id), so no two callers send one at once.</summary>
+    private readonly ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
+
+    /// <summary>Keeps <see cref="ProcessPendingAsync"/> runs from overlapping.</summary>
+    private readonly SemaphoreSlim _processGate = new(1, 1);
 
     public AlertManager(
         IAlertStateStore store,
@@ -57,6 +66,12 @@ public sealed class AlertManager : IAlertManager
             return States().Values.Where(s => s.IsOpen).OrderBy(s => s.OpenedAt).ToList();
     }
 
+    public IReadOnlyList<PendingDelivery> GetPendingDeliveries()
+    {
+        lock (_gate)
+            return Deliveries().Values.OrderBy(d => d.CreatedAt).ToList();
+    }
+
     public async Task RaiseAsync(
         AlertKey key,
         AlertSeverity severity,
@@ -74,13 +89,19 @@ public sealed class AlertManager : IAlertManager
 
         if (open && !escalated)
         {
-            if (!IsReminderDue(existing!, now, options))
-                return; // already open and notified: stay quiet
-            if (inMaintenance)
+            var pending = PendingNotice(key.Value);
+            var reminderDue = IsReminderDue(existing!, now, options);
+            // A notice still on its way (held, or not yet delivered anywhere) is finished rather
+            // than replaced. One that reached some channels is replaced by the next reminder, so a
+            // permanently failing channel cannot suppress reminders to the working ones.
+            if (pending is not null && (pending.Held || pending.DeliveredChannels.Count == 0 || !reminderDue))
             {
-                HoldForMaintenance(existing!);
+                if (!inMaintenance)
+                    await ContinueAsync(pending.Id, now, ct);
                 return;
             }
+            if (!reminderDue)
+                return; // already open and notified: stay quiet
         }
 
         var incident = await incidentFactory(ct);
@@ -114,12 +135,6 @@ public sealed class AlertManager : IAlertManager
                 key.Value, escalated ? "escalated" : "opened", severity, incident.Description);
         }
 
-        if (inMaintenance)
-        {
-            HoldForMaintenance(state);
-            return;
-        }
-
         // A still-pending alert (never notified) announces itself as opened, not as a reminder.
         var notification = new AlertNotification(
             isNew || state.NotifyCount == 0 ? AlertNotificationKind.Opened : AlertNotificationKind.Reminder,
@@ -134,7 +149,7 @@ public sealed class AlertManager : IAlertManager
             Incident: incident,
             NotifyCount: state.NotifyCount + 1);
 
-        await NotifyAsync(state, notification, ct);
+        await DeliverAsync(notification, now, inMaintenance, ct);
     }
 
     public async Task<bool> ResolveAsync(AlertKey key, Incident? recoveryIncident = null, CancellationToken ct = default)
@@ -146,6 +161,11 @@ public sealed class AlertManager : IAlertManager
         var now = UtcNow;
         var duration = now - existing.OpenedAt;
         Save(existing with { ResolvedAt = now });
+
+        // An opened notice that failed on every channel so far still tells its story as a
+        // resolved notice; one that was never attempted on any channel is dropped silently.
+        var pending = PendingNotice(key.Value);
+        var attempted = pending is { IsAboutOpenAlert: true, FailedAttempts: > 0 };
 
         string description;
         if (recoveryIncident is not null)
@@ -166,7 +186,7 @@ public sealed class AlertManager : IAlertManager
         _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
 
         var options = _options.CurrentValue;
-        if (options.SendRecovery && existing.NotifyCount > 0 && !_maintenance.Current.Active)
+        if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
         {
             var notification = new AlertNotification(
                 AlertNotificationKind.Resolved,
@@ -180,7 +200,11 @@ public sealed class AlertManager : IAlertManager
                 Duration: duration,
                 Incident: recoveryIncident,
                 NotifyCount: existing.NotifyCount);
-            await DispatchSafelyAsync(notification, ct);
+            await DeliverAsync(notification, now, _maintenance.Current.Active, ct);
+        }
+        else
+        {
+            RemoveNotices(key.Value);
         }
 
         return true;
@@ -195,56 +219,282 @@ public sealed class AlertManager : IAlertManager
         if (_maintenance.Current.Active)
             return; // recorded and published, not notified
 
-        await DispatchSafelyAsync(new AlertNotification(
+        await DeliverAsync(new AlertNotification(
             AlertNotificationKind.Event, key.Value, severity, title, incident.Description, _server,
-            incident.Timestamp, Incident: incident), ct);
+            incident.Timestamp, Incident: incident), UtcNow, held: false, ct);
     }
 
-    /// <summary>
-    /// Maintenance: the notification that was due is not sent. The alert is marked pending so it
-    /// notifies once on its first raise after the window ends (as "opened" if it never notified,
-    /// otherwise as a "still open" reminder).
-    /// </summary>
-    private void HoldForMaintenance(AlertState state)
+    public async Task ProcessPendingAsync(CancellationToken ct = default)
     {
-        if (state.LastNotifiedAt is not null)
-            Save(state with { LastNotifiedAt = null });
-        _logger.LogInformation("Notification for alert {Key} held: maintenance window active until {Until:O}",
-            state.Key, _maintenance.Current.Until);
+        if (_maintenance.Current.Active)
+            return;
+        if (!await _processGate.WaitAsync(0, ct))
+            return; // a run is already in progress
+
+        try
+        {
+            var now = UtcNow;
+            List<string> due;
+            lock (_gate)
+            {
+                due = Deliveries().Values
+                    .Where(d => d.Held || d.NextAttemptAt <= now)
+                    .OrderBy(d => d.CreatedAt)
+                    .Select(d => d.Id)
+                    .ToList();
+            }
+
+            foreach (var id in due)
+            {
+                ct.ThrowIfCancellationRequested();
+                await ContinueAsync(id, now, ct);
+            }
+        }
+        finally
+        {
+            _processGate.Release();
+        }
     }
 
     private static bool IsReminderDue(AlertState state, DateTime now, AlertingOptions options)
     {
-        // Never notified (no channel was configured yet): offer it again.
+        // Never notified and nothing pending (no channel was configured yet): offer it again.
         if (state.LastNotifiedAt is not { } last)
             return true;
         return options.RenotifyMinutes > 0 && now - last >= TimeSpan.FromMinutes(options.RenotifyMinutes);
     }
 
-    private async Task NotifyAsync(AlertState state, AlertNotification notification, CancellationToken ct)
-    {
-        var handedTo = await DispatchSafelyAsync(notification, ct);
-        if (handedTo == 0)
-            return; // stays pending
+    // ── Delivery ───────────────────────────────────────────────────────────
 
-        // Counted as notified whether or not delivery succeeded, so a failing channel cannot turn
-        // every poll into another send attempt (it is retried at the next reminder).
-        Save(state with { LastNotifiedAt = notification.OccurredAtUtc, NotifyCount = state.NotifyCount + 1 });
+    /// <summary>
+    /// Persists <paramref name="notification"/> as a pending delivery (an alert notice replaces the
+    /// alert's previous one) and, unless <paramref name="held"/>, attempts it right away.
+    /// </summary>
+    private async Task DeliverAsync(AlertNotification notification, DateTime now, bool held, CancellationToken ct)
+    {
+        var delivery = PendingDelivery.Create(notification, now, held);
+        if (!held)
+            _inFlight.TryAdd(delivery.Id, 0); // claimed before it becomes visible to ProcessPendingAsync
+
+        lock (_gate)
+        {
+            if (delivery.IsAlertNotice)
+                RemoveNoticesLocked(notification.AlertKey);
+            _store.UpsertDelivery(delivery);
+            Deliveries()[delivery.Id] = delivery;
+        }
+
+        if (held)
+        {
+            _logger.LogInformation("{Kind} notification for alert {Key} held: maintenance window active until {Until:O}",
+                notification.Kind, notification.AlertKey, _maintenance.Current.Until);
+            return;
+        }
+
+        await AttemptClaimedAsync(delivery, ct);
     }
 
-    private async Task<int> DispatchSafelyAsync(AlertNotification notification, CancellationToken ct)
+    /// <summary>
+    /// Releases a held delivery or retries a due one, unless another caller is already sending it.
+    /// </summary>
+    private async Task ContinueAsync(string id, DateTime now, CancellationToken ct)
+    {
+        if (!_inFlight.TryAdd(id, 0))
+            return;
+
+        PendingDelivery? delivery;
+        lock (_gate)
+        {
+            // Re-read under the claim: the snapshot the caller saw may be out of date.
+            delivery = Deliveries().GetValueOrDefault(id);
+            if (delivery is not null && delivery.Held)
+                delivery = ReleaseLocked(delivery, now);
+        }
+
+        if (delivery is null || delivery.NextAttemptAt > now)
+        {
+            _inFlight.TryRemove(id, out _);
+            return;
+        }
+
+        await AttemptClaimedAsync(delivery, ct);
+    }
+
+    /// <summary>
+    /// A maintenance window ended: an opened/reminder notice is brought up to date (still open
+    /// for how long, latest description) and sent; one whose alert is no longer open is dropped.
+    /// </summary>
+    private PendingDelivery? ReleaseLocked(PendingDelivery delivery, DateTime now)
+    {
+        var released = delivery with { Held = false, NextAttemptAt = now };
+        if (delivery.IsAboutOpenAlert)
+        {
+            var state = States().GetValueOrDefault(delivery.AlertKey);
+            if (state is not { IsOpen: true } || state.OpenedAt != delivery.Notification.OpenedAtUtc)
+            {
+                _store.DeleteDelivery(delivery.Id);
+                Deliveries().Remove(delivery.Id);
+                return null;
+            }
+
+            released = released with
+            {
+                Notification = delivery.Notification with
+                {
+                    Kind = state.NotifyCount == 0 ? AlertNotificationKind.Opened : AlertNotificationKind.Reminder,
+                    Severity = state.Severity,
+                    Title = state.Title,
+                    Description = state.LastDescription,
+                    OccurredAtUtc = now,
+                    Duration = now - state.OpenedAt,
+                    NotifyCount = state.NotifyCount + 1,
+                },
+            };
+        }
+
+        _store.UpsertDelivery(released);
+        Deliveries()[released.Id] = released;
+        return released;
+    }
+
+    /// <summary>
+    /// Sends <paramref name="delivery"/> to every eligible channel that does not have it yet and
+    /// records the outcome: delivered channels are never sent it again, failed ones are retried
+    /// with <see cref="NotificationRetryPolicy"/>. The caller holds the in-flight claim.
+    /// </summary>
+    private async Task AttemptClaimedAsync(PendingDelivery delivery, CancellationToken ct)
     {
         try
         {
-            return await _dispatcher.DispatchAsync(notification, ct);
+            var notification = delivery.Notification;
+            var skip = new HashSet<string>(delivery.DeliveredChannels, StringComparer.OrdinalIgnoreCase);
+
+            DispatchResult result;
+            string? error = null;
+            try
+            {
+                result = await _dispatcher.DispatchAsync(notification, skip, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Dispatching the {Kind} notification for alert {Key} failed",
+                    notification.Kind, notification.AlertKey);
+                result = DispatchResult.None;
+                error = $"Dispatch failed ({ex.GetType().Name})";
+            }
+
+            var now = UtcNow;
+            var delivered = delivery.DeliveredChannels.Concat(result.Delivered)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var failed = result.Failed.ToList();
+            if (error is null && failed.Count > 0)
+                error = string.Join("; ", failed.Select(f => $"{f.Channel}: {f.Message}"));
+            var firstAttempt = delivery.FirstAttemptAt ?? now;
+
+            // Counted as notified once it actually reached a channel, not when it was attempted.
+            if (delivery.DeliveredChannels.Count == 0 && delivered.Count > 0 && delivery.IsAboutOpenAlert)
+                MarkNotified(notification, now);
+
+            PendingDelivery? next;
+            if (error is not null)
+            {
+                var attempts = delivery.FailedAttempts + 1;
+                if (!delivery.IsAboutOpenAlert && now - firstAttempt >= NotificationRetryPolicy.GiveUpAfter)
+                {
+                    _logger.LogError("Giving up on the {Kind} notification for {Key} after {Attempts} failed attempts: {Error}",
+                        notification.Kind, notification.AlertKey, attempts, error);
+                    next = null;
+                }
+                else
+                {
+                    var retryAt = now + NotificationRetryPolicy.Backoff(attempts);
+                    _logger.LogWarning("{Kind} notification for {Key} not delivered everywhere (attempt {Attempts}); retrying at {RetryAt:O}: {Error}",
+                        notification.Kind, notification.AlertKey, attempts, retryAt, error);
+                    next = delivery with
+                    {
+                        DeliveredChannels = delivered,
+                        FailedAttempts = attempts,
+                        FirstAttemptAt = firstAttempt,
+                        NextAttemptAt = retryAt,
+                        LastError = error,
+                    };
+                }
+            }
+            else if (result.Channels.Count == 0 && delivered.Count == 0 && delivery.IsAboutOpenAlert)
+            {
+                // No channel is configured or available for it yet: the alert stays pending and is
+                // offered again at the next opportunity. Other notices are not worth keeping.
+                next = delivery with { FirstAttemptAt = firstAttempt, NextAttemptAt = now };
+            }
+            else
+            {
+                next = null; // every eligible channel has it
+            }
+
+            lock (_gate)
+            {
+                var deliveries = Deliveries();
+                if (!deliveries.ContainsKey(delivery.Id))
+                    return; // superseded while it was being sent
+                if (next is null)
+                {
+                    _store.DeleteDelivery(delivery.Id);
+                    deliveries.Remove(delivery.Id);
+                }
+                else
+                {
+                    _store.UpsertDelivery(next);
+                    deliveries[delivery.Id] = next;
+                }
+            }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        finally
         {
-            _logger.LogError(ex, "Dispatching the {Kind} notification for alert {Key} failed",
-                notification.Kind, notification.AlertKey);
-            return 0;
+            _inFlight.TryRemove(delivery.Id, out _);
         }
     }
+
+    /// <summary>The open alert's notice reached its first channel: it now counts as notified.</summary>
+    private void MarkNotified(AlertNotification notification, DateTime now)
+    {
+        lock (_gate)
+        {
+            if (States().GetValueOrDefault(notification.AlertKey) is not { IsOpen: true } state ||
+                state.OpenedAt != notification.OpenedAtUtc)
+                return; // the occurrence it was about is over
+            Save(state with { LastNotifiedAt = now, NotifyCount = state.NotifyCount + 1 });
+        }
+    }
+
+    /// <summary>The opened, reminder or resolved notice still being delivered for an alert.</summary>
+    private PendingDelivery? PendingNotice(string key)
+    {
+        lock (_gate)
+        {
+            return Deliveries().Values.FirstOrDefault(d =>
+                d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private void RemoveNotices(string key)
+    {
+        lock (_gate)
+            RemoveNoticesLocked(key);
+    }
+
+    private void RemoveNoticesLocked(string key)
+    {
+        var deliveries = Deliveries();
+        foreach (var old in deliveries.Values
+                     .Where(d => d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase))
+                     .ToList())
+        {
+            _store.DeleteDelivery(old.Id);
+            deliveries.Remove(old.Id);
+        }
+    }
+
+    // ── State ──────────────────────────────────────────────────────────────
 
     private AlertState? TryGet(AlertKey key)
     {
@@ -278,6 +528,24 @@ public sealed class AlertManager : IAlertManager
             _logger.LogError(ex, "Could not load persisted alert state; starting with no open alerts");
         }
         return _states = states;
+    }
+
+    private Dictionary<string, PendingDelivery> Deliveries()
+    {
+        if (_deliveries is not null)
+            return _deliveries;
+
+        var deliveries = new Dictionary<string, PendingDelivery>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var delivery in _store.LoadDeliveries())
+                deliveries[delivery.Id] = delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not load pending notification deliveries; starting with none");
+        }
+        return _deliveries = deliveries;
     }
 }
 

@@ -16,6 +16,11 @@ namespace WatchTower.Services.Alerting;
 /// <c>Alerting:SendRecovery</c> and the alert had been notified, a resolved notification with
 /// the alert's duration is sent.</item>
 /// <item>State is persisted, so an alert that was open before a restart is not re-sent.</item>
+/// <item>Every notification is persisted as a <see cref="PendingDelivery"/> until each eligible
+/// channel has it. Channels that failed are retried with <see cref="NotificationRetryPolicy"/>
+/// (also after a restart, see <see cref="ProcessPendingAsync"/>); channels that delivered are
+/// never sent it again. An alert counts as notified (<c>NotifyCount</c>, <c>LastNotifiedAt</c>)
+/// only once a notice reached at least one channel.</item>
 /// </list>
 /// </remarks>
 public interface IAlertManager
@@ -57,6 +62,15 @@ public interface IAlertManager
 
     /// <summary>Currently open alerts, oldest first.</summary>
     IReadOnlyList<AlertState> GetOpenAlerts();
+
+    /// <summary>Notifications not yet delivered to every eligible channel (held or retrying), oldest first.</summary>
+    IReadOnlyList<PendingDelivery> GetPendingDeliveries();
+
+    /// <summary>
+    /// Outside a maintenance window: sends held notifications and retries the deliveries whose
+    /// backoff has elapsed. Called periodically by <c>NotificationDeliveryWorker</c>.
+    /// </summary>
+    Task ProcessPendingAsync(CancellationToken ct = default);
 }
 
 public static class AlertManagerExtensions

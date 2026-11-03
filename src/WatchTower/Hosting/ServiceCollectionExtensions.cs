@@ -61,6 +61,7 @@ public static class ServiceCollectionExtensions
             .RemoveAllLoggers();
         services.AddSingleton<IMaintenanceState, MaintenanceState>();
         services.AddSingleton<IAlertManager, AlertManager>();
+        services.AddHostedService<NotificationDeliveryWorker>();
 
         services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
 
