@@ -83,18 +83,124 @@ Comprehensive HTML email reports sent daily at a configurable time (default 08:0
 
 All times displayed in **EAT (East Africa Time, UTC+3)**.
 
-### Emergency Alerts
+### Alerts that operators can trust
 
-Sent instantly when thresholds are breached. Each emergency email includes:
+Every problem WatchTower detects is an **alert** with a stable key — `cpu`, `ram`,
+`disk:C:\`, `diskqueue:<instance>`, `net:<interface>`, `svc:<service>`,
+`pool:<app pool>`, `endpoint:<name>` — and a lifecycle that survives restarts (SQLite
+table `alert_state`, untouched by the daily report purge):
 
-- Emergency banner with incident type and description
-- Top processes consuming the resource (for CPU/RAM)
-- Full server snapshot (same as daily report)
-- Cooldown (default 5 min) to prevent email floods
+- **Opened** — the first time the condition is seen, the incident is recorded, sent to the
+  portal and a notification goes out.
+- **Still open** — nothing new is recorded; a reminder is sent every
+  `Alerting:RenotifyMinutes` (default 60, `0` = never). A higher severity (e.g. a
+  certificate that was expiring is now expired) escalates and notifies again.
+- **Resolved** — when the condition clears, a "resolved" notification says how long it
+  lasted (`Alerting:SendRecovery`, default `true`). CPU, RAM, disk, disk-queue and network
+  alerts resolve only after staying clear for `Alerting:ResolveAfterSeconds` (default 300),
+  so values hovering around a threshold do not flap.
+- An alert that was open before a restart is **not** re-sent.
+
+CPU/RAM spike incidents are still recorded (without notifying) for the daily report.
+
+Alert emails are short (title, description, server, times, top processes). Set
+`Alerting:IncludeFullReport: true` to attach the full 24-hour server report as before.
+
+### Notification channels
+
+Alerts go to every enabled channel whose `MinSeverity` (`Info` | `Warning` | `Critical`,
+default `Info`) the alert meets. Channels are sent in parallel with a short timeout
+(`Notifications:TimeoutSeconds`, default 10); a failing channel is logged by name and type
+— never its URL — and does not block the others.
+
+| Channel | Configure (console: *Notification channels*) | Payload |
+|---|---|---|
+| Email | `Notifications:Email:Enabled` (default `true`) + the `Email` SMTP settings | Short HTML alert |
+| Microsoft Teams | `Notifications:Teams:Url` — a Teams *Workflows* "Post to a channel when a webhook request is received" URL | Adaptive Card |
+| Slack | `Notifications:Slack:Url` — an incoming-webhook URL | Block Kit |
+| Webhook | `Notifications:Webhook:Url` (+ optional `Secret`) | JSON (`schema: "watchtower.alert.v1"`) |
+
+Webhook URLs and secrets are stored DPAPI-encrypted and never returned by the console API.
+With a secret, every webhook request carries
+`X-WatchTower-Signature: sha256=<hex HMAC-SHA256(secret, raw request body)>` and
+`X-WatchTower-Event: opened|reminder|resolved|event|test`. Webhook body:
+
+```json
+{ "schema": "watchtower.alert.v1", "kind": "opened", "alertKey": "disk:C:\\", "severity": "critical",
+  "title": "Disk Critical: C:\\ at 91.0%", "description": "Drive C:\\ at 91.0% (9.7 GB free of 126.5 GB)",
+  "server": "SRV-01", "occurredAt": "2026-11-03T08:10:00Z", "openedAt": "2026-11-03T08:10:00Z",
+  "durationSeconds": 0, "notifyCount": 1, "incidentType": "DiskCritical" }
+```
+
+More channels — several Teams channels, a Slack channel for critical alerts only, a
+second webhook — go in the `Notifications:Channels` list. The console has no list editor, so
+import them (`WatchTower config import channels.json`); an entry named `email`, `teams`,
+`slack` or `webhook` replaces that fixed channel:
+
+```json
+{ "Notifications": { "Channels": [
+  { "Name": "oncall-slack", "Type": "Slack", "Url": "https://hooks.slack.com/services/...", "MinSeverity": "Critical" },
+  { "Name": "itsm", "Type": "Webhook", "Url": "https://itsm.example/hooks/watchtower", "Secret": "...", "Enabled": true }
+] } }
+```
+
+Test the setup from the console (*Send test notification*, `POST /api/actions/test-notification`)
+or from the portal (action `SendTestNotification` = 501, optional parameter `Channel`).
+
+### Maintenance windows
+
+```powershell
+WatchTower maintenance start --minutes 90 --reason "Monthly patching"
+WatchTower maintenance stop
+```
+
+This sets `Maintenance:Until` (UTC) / `Maintenance:Reason` in the operator settings (the
+console can do the same, and the portal can push `maintenance: { untilUtc, reason }`, at
+most 7 days ahead, which takes precedence). During the window incidents are still recorded
+and sent to the portal, but **notifications are held** and **services / application pools
+are not restarted automatically**. Alerts still open when the window ends notify once.
+
+### Endpoint checks
+
+`Monitoring:Endpoints` checks what the server serves:
+
+| Field | Default | |
+|---|---|---|
+| `Name` | – | Unique; alert key `endpoint:<Name>` |
+| `Type` | `Http` | `Http` (GET), `Tcp` (connect), `Certificate` (TLS handshake, days until expiry) |
+| `Target` | – | Http: URL · Tcp: `host:port` · Certificate: `host`, `host:port` (443) or an https URL |
+| `TimeoutSeconds` | 10 | 1–120 |
+| `ExpectStatus` | `200-399` | Http: e.g. `200`, `200,204,301-302` |
+| `ExpectBodyContains` | – | Http: required text (case-sensitive) |
+| `CertificateWarnDays` | 21 | Certificate: warn when fewer days are left |
+| `IntervalSeconds` | 60 | 5–86400 |
+| `FailuresBeforeAlert` | 2 | Consecutive failures before the endpoint is reported down |
+
+An endpoint alerts *Critical* (`EndpointDown`) after `FailuresBeforeAlert` failures (an
+invalid or expired certificate counts as a failure), *Warning* (`CertificateExpiring`) as
+soon as a certificate is inside its warning window, and resolves (`EndpointRecovered`) when
+the check passes. HTTP redirects are followed at most 5 times and only within the same host.
+Configure the list with `WatchTower config import endpoints.json` (it is validated first);
+the console shows the results read-only:
+
+```json
+{ "Monitoring": { "Endpoints": [
+  { "Name": "intranet", "Type": "Http", "Target": "https://intranet.example/health", "ExpectBodyContains": "OK" },
+  { "Name": "intranet-tls", "Type": "Certificate", "Target": "intranet.example" },
+  { "Name": "sql", "Type": "Tcp", "Target": "db01:1433", "IntervalSeconds": 30 }
+] } }
+```
 
 ### Dead Man's Switch
 
 WatchTower pings a healthchecks.io URL every 10 minutes. If the pings stop (because WatchTower crashed, the server is down, or there's a network issue), healthchecks.io alerts you. This ensures you're notified even when the monitoring service itself fails.
+
+The ping is **health-gated**: each monitor worker reports every successful cycle, and when
+any of them has had none for 3× its poll interval (at least 2 minutes) WatchTower pings
+`<url>/fail` instead, with the stalled workers as the reason — so a hung monitor is noticed
+even though the process is still running. After a server restart WatchTower also sends a
+one-off "Server restarted at …" notification (Warning; Info if WatchTower had been stopped
+cleanly first).
 
 ### SQLite Persistence
 
@@ -301,9 +407,29 @@ All configuration lives in `appsettings.json`. Every value supports **hot-reload
 
   // Reporting schedule
   "Reporting": {
-    "DailyReportTime": "08:00",        // 24hr format, EAT timezone
-    "EmergencyCooldownSeconds": 300     // Minimum gap between emergency emails
-  }
+    "DailyReportTime": "08:00"         // 24hr format, EAT timezone
+  },
+
+  // Alert lifecycle (see "Alerts that operators can trust")
+  "Alerting": {
+    "RenotifyMinutes": 60,             // Reminder interval while an alert stays open (0 = never)
+    "SendRecovery": true,              // Notify when an alert resolves
+    "IncludeFullReport": false,        // Attach the 24h report to alert emails
+    "ResolveAfterSeconds": 300         // Metric alerts resolve after staying clear this long
+  },
+
+  // Where alerts go (see "Notification channels")
+  "Notifications": {
+    "Email":   { "Enabled": true, "MinSeverity": "Info" },
+    "Teams":   { "Url": "", "MinSeverity": "Info" },
+    "Slack":   { "Url": "", "MinSeverity": "Info" },
+    "Webhook": { "Url": "", "Secret": "", "MinSeverity": "Info" },
+    "TimeoutSeconds": 10,
+    "Channels": []
+  },
+
+  // Maintenance window (see "Maintenance windows")
+  "Maintenance": { "Until": "", "Reason": "" }
 }
 ```
 
@@ -399,6 +525,13 @@ WatchTower tracks the following incident types in the daily report:
 | `ServiceRestarted` | Watched service was stopped and successfully restarted | Service name, display name, timestamp |
 | `ServiceDown` | Watched service found stopped | Service name |
 | `ServiceRestartFailed` | Service failed to restart after max attempts | Failure count + emergency email |
+| `ApplicationPoolDown` / `ApplicationPoolStarted` / `ApplicationPoolStartFailed` | IIS application pool stopped / started again / could not be started | Pool name |
+| `EndpointDown` (13) | Endpoint check failed `FailuresBeforeAlert` times in a row (or certificate invalid/expired) | Endpoint, target, reason |
+| `EndpointRecovered` (14) | A down or expiring endpoint passes again | Endpoint, result, response time |
+| `CertificateExpiring` (15) | TLS certificate inside its warning window | Days left, expiry date |
+| `ServerRestarted` (16) | The server rebooted since WatchTower last ran | Boot time, whether the stop was clean |
+
+Incident type numbers are a wire contract (SQLite and portal): append-only.
 
 ---
 
