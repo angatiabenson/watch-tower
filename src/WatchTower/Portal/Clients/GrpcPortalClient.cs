@@ -28,7 +28,10 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         _logger = logger;
 
         var opts = options.CurrentValue;
-        var channelOptions = new GrpcChannelOptions();
+
+        // Same transport policy as the HTTPS client: with RequireTls the BaseUrl must be https,
+        // otherwise the bearer token and remote commands would travel in plaintext (h2c).
+        PortalTls.EnsureTransportAllowed(opts);
 
         if (opts.Tls.AllowUntrustedCert)
         {
@@ -41,15 +44,16 @@ public class GrpcPortalClient : IPortalClient, IDisposable
             _logger.LogWarning(
                 "TLS certificate validation is DISABLED for the portal connection (AllowUntrustedCert=true). " +
                 "This is unsafe and must only be used in development.");
-
-            var handler = new HttpClientHandler
-            {
-                ServerCertificateCustomValidationCallback =
-                    HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-            };
-            channelOptions.HttpHandler = handler;
         }
 
+        // Throws a descriptive InvalidOperationException if ClientCertThumbprint is set but the
+        // certificate cannot be loaded, rather than silently connecting without mutual TLS.
+        var handler = PortalTls.CreateHandler(opts.Tls, allowUntrustedServerCert: opts.Tls.AllowUntrustedCert);
+        if (handler.SslOptions.ClientCertificates is { Count: > 0 })
+            _logger.LogInformation("Presenting client certificate {Thumbprint} to the portal (gRPC)",
+                PortalTls.NormalizeThumbprint(opts.Tls.ClientCertThumbprint!));
+
+        var channelOptions = new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true };
         _channel = GrpcChannel.ForAddress(opts.BaseUrl, channelOptions);
         _client = new WatchTowerPortalService.WatchTowerPortalServiceClient(_channel);
     }

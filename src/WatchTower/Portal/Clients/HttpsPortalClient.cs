@@ -30,21 +30,7 @@ public class HttpsPortalClient : IPortalClient
         _options = options;
         _logger = logger;
 
-        ValidateTls(options.CurrentValue);
-    }
-
-    private void ValidateTls(PortalOptions opts)
-    {
-        if (opts.Tls.RequireTls &&
-            !string.IsNullOrWhiteSpace(opts.BaseUrl) &&
-            !opts.BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                $"VisibilityPortal.BaseUrl must use HTTPS when Tls.RequireTls=true. " +
-                $"Current BaseUrl: '{opts.BaseUrl}'. " +
-                $"Either change the BaseUrl to start with https:// or set Tls.RequireTls=false " +
-                $"(for local/HTTP-only deployments).");
-        }
+        PortalTls.EnsureTransportAllowed(options.CurrentValue);
     }
 
     private string BuildUrl(string path)
@@ -177,7 +163,9 @@ public class HttpsPortalClient : IPortalClient
     {
         // Note: the HTTPS transport always validates server certificates. AllowUntrustedCert
         // is intentionally NOT honored here (it only affects the gRPC transport, guarded to
-        // non-production there) so HTTPS fails closed.
+        // non-production there) so HTTPS fails closed. The mutual-TLS client certificate
+        // (Tls.ClientCertThumbprint) is attached to the "PortalClient" registration via
+        // ConfigurePrimaryHttpMessageHandler + PortalTls.CreateHandler (see PortalTls).
         return _httpClientFactory.CreateClient("PortalClient");
     }
 
