@@ -36,6 +36,21 @@ public class UpdateCompatibilityTests
         reason.Should().Contain("98.0.0").And.Contain("Upgrade to");
     }
 
+    [Theory]
+    [InlineData(0, null, "invalid")]          // judge probe: schema 0 was accepted
+    [InlineData(-1, null, "invalid")]         // judge probe: schema -1 was accepted
+    [InlineData(1, "banana", "invalid minimum version")] // judge probe: unparsable minimum was ignored
+    public void MalformedCompatibilityMetadata_IsBlocked(int schema, string? minimumVersion, string expected)
+    {
+        UpdateService.BlockedReason(new UpdateManifest
+        {
+            Version = "99.0.0",
+            Schema = schema,
+            MinimumVersion = minimumVersion,
+            Assets = [],
+        }).Should().Contain(expected);
+    }
+
     [Fact]
     public void CompatibleManifest_IsNotBlocked()
     {

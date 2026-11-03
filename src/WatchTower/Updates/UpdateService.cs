@@ -491,10 +491,20 @@ public sealed class UpdateService
         if (manifest.Schema > SupportedManifestSchema)
             return $"WatchTower {manifest.Version} uses a newer release format than this version understands. " +
                    "Install it manually from the release page.";
-        if (!string.IsNullOrWhiteSpace(manifest.MinimumVersion) &&
-            SemanticVersion.TryParse(manifest.MinimumVersion, out var minimum) && CurrentVersion < minimum)
-            return $"WatchTower {manifest.Version} can only be installed over version {minimum} or later " +
-                   $"(this server runs {CurrentVersion}). Upgrade to {minimum} first, or install manually.";
+        // Only known schema versions are trusted; anything else (0, negative) is malformed metadata.
+        if (manifest.Schema < 1)
+            return $"The release information for WatchTower {manifest.Version} is invalid (schema {manifest.Schema}); " +
+                   "it will not be installed automatically.";
+        if (!string.IsNullOrWhiteSpace(manifest.MinimumVersion))
+        {
+            // A compatibility boundary we cannot read must block, never silently pass.
+            if (!SemanticVersion.TryParse(manifest.MinimumVersion, out var minimum))
+                return $"The release information for WatchTower {manifest.Version} has an invalid minimum version " +
+                       $"'{manifest.MinimumVersion}'; it will not be installed automatically.";
+            if (CurrentVersion < minimum)
+                return $"WatchTower {manifest.Version} can only be installed over version {minimum} or later " +
+                       $"(this server runs {CurrentVersion}). Upgrade to {minimum} first, or install manually.";
+        }
         return null;
     }
 
