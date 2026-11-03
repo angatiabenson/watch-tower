@@ -59,6 +59,7 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient(HttpNotificationChannel.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(130))
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
             .RemoveAllLoggers();
+        services.AddSingleton<IMaintenanceState, MaintenanceState>();
         services.AddSingleton<IAlertManager, AlertManager>();
 
         services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
@@ -112,6 +113,7 @@ public static class ServiceCollectionExtensions
         services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
         services.Configure<AlertingOptions>(config.GetSection(AlertingOptions.SectionName));
         services.Configure<NotificationOptions>(config.GetSection(NotificationOptions.SectionName));
+        services.Configure<MaintenanceOptions>(config.GetSection(MaintenanceOptions.SectionName));
         services.Configure<PortalOptions>(config.GetSection(PortalOptions.SectionName));
         services.Configure<DisplayOptions>(config.GetSection(DisplayOptions.SectionName));
         services.Configure<Ui.UiOptions>(config.GetSection(Ui.UiOptions.SectionName));

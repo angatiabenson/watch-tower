@@ -24,8 +24,12 @@ public record AgentTelemetryDto(
     long UptimeSeconds,
     string UpdatePhase,
     string? AvailableVersion,
-    AgentUpdateResultDto? LastUpdateResult
+    AgentUpdateResultDto? LastUpdateResult,
+    MaintenanceTelemetryDto? Maintenance = null
 );
+
+/// <summary>Maintenance window state (omitted by older agents). <c>UntilUtc</c> is ISO-8601 UTC.</summary>
+public record MaintenanceTelemetryDto(bool Active, string? UntilUtc, string? Reason);
 
 public record AgentUpdateResultDto(string ToVersion, bool Success, string CompletedAt);
 

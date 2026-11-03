@@ -21,7 +21,9 @@ public sealed class StatusService(
     IOptionsMonitor<EmailOptions> emailOptions,
     IOptionsMonitor<PortalOptions> portalOptions,
     Updates.UpdateService updates,
-    IWorkerHealth workerHealth)
+    IWorkerHealth workerHealth,
+    Services.Alerting.IMaintenanceState maintenance,
+    Services.Alerting.IAlertManager alerts)
 {
     private const int MaxSeriesPoints = 120;
 
@@ -54,6 +56,18 @@ public sealed class StatusService(
             },
             health = new { errors = report.Errors, warnings = report.Warnings },
             restartPending = restartState.Pending,
+            maintenance = MaintenanceSummary(maintenance.Current),
+            // Alerts currently open (oldest first); they resolve when the condition clears.
+            alerts = alerts.GetOpenAlerts().Select(a => new
+            {
+                key = a.Key,
+                severity = Services.Alerting.AlertText.Label(a.Severity),
+                title = a.Title,
+                description = a.LastDescription,
+                openedAt = DateTime.SpecifyKind(a.OpenedAt, DateTimeKind.Utc),
+                lastNotifiedAt = a.LastNotifiedAt is { } n ? DateTime.SpecifyKind(n, DateTimeKind.Utc) : (DateTime?)null,
+                notifyCount = a.NotifyCount,
+            }),
             // Liveness of the monitoring workers; any stale one makes the heartbeat report failure.
             workers = workerHealth.Snapshot().Select(w => new
             {
@@ -139,6 +153,13 @@ public sealed class StatusService(
                 }),
         };
     }
+
+    public static object MaintenanceSummary(Services.Alerting.MaintenanceWindow window) => new
+    {
+        active = window.Active,
+        until = window.Until,
+        reason = window.Reason,
+    };
 
     private static object UpdateSummary(Updates.UpdateStatus status) => new
     {

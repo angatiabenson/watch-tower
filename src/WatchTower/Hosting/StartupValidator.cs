@@ -103,6 +103,9 @@ public static class StartupValidator
 
         errors.AddRange(Services.Endpoints.EndpointCheck.Validate(Bind<EndpointMonitorOptions>(EndpointMonitorOptions.SectionName).Endpoints));
         ValidateAlerting(Bind<AlertingOptions>(AlertingOptions.SectionName), errors);
+        var maintenance = Bind<MaintenanceOptions>(MaintenanceOptions.SectionName);
+        if (!string.IsNullOrWhiteSpace(maintenance.Until) && !MaintenanceState.TryParseUntil(maintenance.Until, out _))
+            errors.Add("Maintenance:Until must be an ISO-8601 timestamp such as 2026-11-03T18:00:00Z (or empty).");
         ValidateNotifications(Bind<NotificationOptions>(NotificationOptions.SectionName), errors, warnings);
 
         var updates = Bind<Updates.UpdateOptions>(Updates.UpdateOptions.SectionName);

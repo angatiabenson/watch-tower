@@ -9,6 +9,9 @@ public class RemoteAgentConfigDto
     public RemoteServiceConfig? Services { get; set; }
     public RemoteAppPoolConfig? AppPools { get; set; }
     public RemotePortalConfig? Portal { get; set; }
+
+    /// <summary>Maintenance window pushed by the portal (overrides the operator setting while present).</summary>
+    public RemoteMaintenanceConfig? Maintenance { get; set; }
 }
 
 public class RemoteCpuConfig
@@ -56,4 +59,14 @@ public class RemotePortalConfig
     public int? OutboxFlushIntervalSeconds { get; set; }
     public int? CommandPollIntervalSeconds { get; set; }
     public int? RemoteConfigPollIntervalSeconds { get; set; }
+}
+
+/// <summary>
+/// <c>maintenance: { untilUtc, reason }</c>. <c>untilUtc</c> is an ISO-8601 timestamp at most seven days
+/// ahead; a past value (or omitting <c>maintenance</c> from a later config) ends the window.
+/// </summary>
+public class RemoteMaintenanceConfig
+{
+    public string? UntilUtc { get; set; }
+    public string? Reason { get; set; }
 }

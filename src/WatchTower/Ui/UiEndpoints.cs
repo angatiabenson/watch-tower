@@ -15,6 +15,7 @@ public static class UiEndpoints
     public sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
     public sealed record EnrollRequest(string? Code);
     public sealed record TestNotificationRequest(string? Channel);
+    public sealed record MaintenanceRequest(int? Minutes, string? Reason);
 
     public static void Map(WebApplication app)
     {
@@ -130,6 +131,50 @@ public static class UiEndpoints
                     ? $"Test notification sent to {results.Count} channel(s)."
                     : $"{failed} of {results.Count} channel(s) failed; see the results and the log.",
                 results,
+            });
+        });
+
+        api.MapPost("/actions/maintenance", async (
+            MaintenanceRequest body, ConfigService config, Services.Alerting.IMaintenanceState maintenance,
+            TimeProvider time, CancellationToken ct) =>
+        {
+            if (body.Minutes is not (>= 1 and <= Services.Alerting.MaintenanceWindowRules.MaxMinutes))
+                return Error(StatusCodes.Status400BadRequest,
+                    $"minutes must be between 1 and {Services.Alerting.MaintenanceWindowRules.MaxMinutes}.");
+            var reason = body.Reason?.Trim() ?? string.Empty;
+            if (reason.Length > Services.Alerting.MaintenanceWindowRules.MaxReasonLength)
+                return Error(StatusCodes.Status400BadRequest,
+                    $"reason must be at most {Services.Alerting.MaintenanceWindowRules.MaxReasonLength} characters.");
+
+            var until = time.GetUtcNow().AddMinutes(body.Minutes.Value);
+            var result = await config.ApplyAsync(new ConfigUpdateRequest
+            {
+                Changes = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Maintenance:Until"] = System.Text.Json.JsonSerializer.SerializeToElement(
+                        Services.Alerting.MaintenanceState.Format(until)),
+                    ["Maintenance:Reason"] = System.Text.Json.JsonSerializer.SerializeToElement(reason),
+                },
+            }, ct);
+            return result.Success
+                ? Results.Ok(new { maintenance = StatusService.MaintenanceSummary(maintenance.Current) })
+                : Results.BadRequest(new { errors = result.Errors });
+        });
+
+        api.MapPost("/actions/maintenance/stop", async (
+            ConfigService config, Services.Alerting.IMaintenanceState maintenance, CancellationToken ct) =>
+        {
+            var result = await config.ApplyAsync(new ConfigUpdateRequest { Reset = ["Maintenance:Until", "Maintenance:Reason"] }, ct);
+            if (!result.Success)
+                return Results.BadRequest(new { errors = result.Errors });
+
+            var current = maintenance.Current;
+            return Results.Ok(new
+            {
+                maintenance = StatusService.MaintenanceSummary(current),
+                message = current.Active
+                    ? "The maintenance window set by the portal is still active; end it from the portal."
+                    : "Maintenance ended.",
             });
         });
 

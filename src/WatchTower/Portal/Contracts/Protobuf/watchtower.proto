@@ -51,8 +51,10 @@ message AgentTelemetryProto {
   string                update_phase       = 6;  // Idle|Checking|UpToDate|Available|Downloading|ReadyToInstall|Installing|Failed
   optional string       available_version  = 7;
   UpdateResultProto     last_update_result = 8;  // unset when no update has been installed yet
+  MaintenanceProto      maintenance        = 9;  // maintenance window state (absent from older agents)
 }
 message UpdateResultProto { string to_version = 1; bool success = 2; string completed_at = 3; }
+message MaintenanceProto { bool active = 1; optional string until_utc = 2; optional string reason = 3; }
 
 message CpuMetricProto       { string timestamp = 1; double usage_percent = 2; }
 message RamMetricProto       { string timestamp = 1; double usage_percent = 2; double available_mb = 3; double total_mb = 4; }
@@ -140,6 +142,7 @@ message RemoteAgentConfig {
   RemoteServiceConfig services = 5;
   RemoteAppPoolConfig app_pools = 6;
   RemotePortalConfig  portal   = 7;
+  RemoteMaintenanceConfig maintenance = 8;  // optional maintenance window (absent from older portals)
 }
 
 message RemoteCpuConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
@@ -149,3 +152,4 @@ message RemoteNetworkConfig { optional int32 poll_interval_seconds = 1; optional
 message RemoteServiceConfig { optional int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
 message RemoteAppPoolConfig { optional int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
 message RemotePortalConfig  { optional int32 outbox_flush_interval_seconds = 1; optional int32 command_poll_interval_seconds = 2; optional int32 remote_config_poll_interval_seconds = 3; }
+message RemoteMaintenanceConfig { optional string until_utc = 1; optional string reason = 2; }

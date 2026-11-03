@@ -94,6 +94,14 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 };
                 if (agent.AvailableVersion is not null)
                     payload.Agent.AvailableVersion = agent.AvailableVersion;
+                if (agent.Maintenance is { } maintenance)
+                {
+                    payload.Agent.Maintenance = new MaintenanceProto { Active = maintenance.Active };
+                    if (maintenance.UntilUtc is not null)
+                        payload.Agent.Maintenance.UntilUtc = maintenance.UntilUtc;
+                    if (maintenance.Reason is not null)
+                        payload.Agent.Maintenance.Reason = maintenance.Reason;
+                }
                 if (agent.LastUpdateResult is { } result)
                     payload.Agent.LastUpdateResult = new UpdateResultProto
                     {
@@ -399,6 +407,11 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                     ? proto.Portal.CommandPollIntervalSeconds : null,
                 RemoteConfigPollIntervalSeconds = proto.Portal.HasRemoteConfigPollIntervalSeconds
                     ? proto.Portal.RemoteConfigPollIntervalSeconds : null,
+            },
+            Maintenance = proto.Maintenance == null ? null : new Contracts.RemoteMaintenanceConfig
+            {
+                UntilUtc = proto.Maintenance.HasUntilUtc ? proto.Maintenance.UntilUtc : null,
+                Reason = proto.Maintenance.HasReason ? proto.Maintenance.Reason : null,
             },
         };
     }

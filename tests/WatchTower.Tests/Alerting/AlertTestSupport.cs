@@ -47,6 +47,13 @@ internal sealed class InMemoryAlertStateStore : IAlertStateStore
     }
 }
 
+/// <summary>Maintenance window a test can open and close.</summary>
+internal sealed class TestMaintenance : IMaintenanceState
+{
+    public bool Active { get; set; }
+    public MaintenanceWindow Current => new(Active, Active ? DateTimeOffset.UtcNow.AddHours(1) : null, Active ? "patching" : null);
+}
+
 /// <summary>Captures notifications instead of delivering them.</summary>
 internal sealed class RecordingDispatcher : INotificationDispatcher
 {
@@ -80,7 +87,8 @@ internal static class TestAlerts
         INotificationDispatcher dispatcher,
         AlertingOptions? options = null,
         IPortalEventPublisher? portal = null,
-        IAlertStateStore? state = null) =>
+        IAlertStateStore? state = null,
+        IMaintenanceState? maintenance = null) =>
         new(
             state ?? new InMemoryAlertStateStore(),
             metricsStore,
@@ -89,7 +97,8 @@ internal static class TestAlerts
             new TestOptionsMonitor<AlertingOptions>(options ?? new AlertingOptions()),
             time,
             NullLogger<AlertManager>.Instance,
-            "TEST-SRV");
+            maintenance,
+            serverName: "TEST-SRV");
 
     /// <summary>An alert manager that delivers through the real email dispatcher (backed by mocks).</summary>
     public static AlertManager WithEmail(
@@ -106,6 +115,6 @@ internal static class TestAlerts
             new TestOptionsMonitor<NotificationOptions>(new NotificationOptions()),
             NullLogger<NotificationDispatcher>.Instance);
         return new AlertManager(new InMemoryAlertStateStore(), metricsStore, portal ?? new NullPortalEventPublisher(),
-            dispatcher, monitor, time, NullLogger<AlertManager>.Instance, "TEST-SRV");
+            dispatcher, monitor, time, NullLogger<AlertManager>.Instance, serverName: "TEST-SRV");
     }
 }

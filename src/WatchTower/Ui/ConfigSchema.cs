@@ -77,6 +77,18 @@ public static class ConfigSchema
                 0, 86_400, Advanced: true),
         ]),
 
+        new("maintenance", "Maintenance window",
+            "While a window is active, incidents are still recorded but notifications are held back and " +
+            "services / application pools are not restarted automatically. Still-open alerts notify once it ends.",
+        [
+            new("Maintenance:Until", "Maintenance until (UTC)", FieldType.String,
+                "ISO-8601 UTC end time, e.g. 2026-11-03T18:00:00Z. Empty or in the past = no maintenance. " +
+                "'WatchTower maintenance start --minutes 60' sets it for you.",
+                Placeholder: "2026-11-03T18:00:00Z"),
+            new("Maintenance:Reason", "Reason", FieldType.String, "Shown in the console and the portal.",
+                Placeholder: "Monthly patching"),
+        ]),
+
         new("notifications", "Notification channels",
             "Where alerts are sent besides email. Webhook URLs are stored encrypted (Windows DPAPI). " +
             "More channels, or several of one kind, can be added with 'WatchTower config import' (Notifications:Channels).",

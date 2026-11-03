@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 
 using WatchTower.Portal.Contracts;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Portal.Actions;
 
@@ -29,7 +30,7 @@ public static partial class RemoteConfigValidator
     [GeneratedRegex(@"^[\w .\-$@()]+$", RegexOptions.CultureInvariant)]
     private static partial Regex WatchedNamePattern();
 
-    public static bool Validate(RemoteAgentConfigDto config, out string error)
+    public static bool Validate(RemoteAgentConfigDto config, out string error, DateTimeOffset? nowUtc = null)
     {
         error = string.Empty;
 
@@ -67,6 +68,36 @@ public static partial class RemoteConfigValidator
         if (!Interval(config.Portal?.CommandPollIntervalSeconds, "Portal.CommandPollIntervalSeconds", ref error)) return false;
         if (!Interval(config.Portal?.RemoteConfigPollIntervalSeconds, "Portal.RemoteConfigPollIntervalSeconds", ref error)) return false;
 
+        if (!Maintenance(config.Maintenance, nowUtc ?? DateTimeOffset.UtcNow, ref error)) return false;
+
+        return true;
+    }
+
+    /// <summary>A portal may hold an agent in maintenance for at most seven days per push.</summary>
+    private static bool Maintenance(RemoteMaintenanceConfig? maintenance, DateTimeOffset now, ref string error)
+    {
+        if (maintenance == null)
+            return true;
+
+        if (maintenance.UntilUtc != null)
+        {
+            if (!MaintenanceState.TryParseUntil(maintenance.UntilUtc, out var until))
+            {
+                error = "Maintenance.UntilUtc must be an ISO-8601 timestamp";
+                return false;
+            }
+            if (until > now.AddMinutes(MaintenanceWindowRules.MaxMinutes + 5)) // small allowance for clock skew
+            {
+                error = "Maintenance.UntilUtc must be at most 7 days in the future";
+                return false;
+            }
+        }
+
+        if (maintenance.Reason is { Length: > MaintenanceWindowRules.MaxReasonLength })
+        {
+            error = $"Maintenance.Reason must not exceed {MaintenanceWindowRules.MaxReasonLength} characters";
+            return false;
+        }
         return true;
     }
 

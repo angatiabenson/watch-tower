@@ -73,6 +73,7 @@ public static class WatchTowerCli
         root.Subcommands.Add(BuildApplyUpdate(ctx));
         root.Subcommands.Add(BuildImportLegacy(ctx));
         root.Subcommands.Add(BuildEnroll(ctx));
+        root.Subcommands.Add(BuildMaintenance(ctx));
 
         var parseResult = root.Parse(args);
         var config = new InvocationConfiguration
@@ -485,6 +486,81 @@ public static class WatchTowerCli
             throw new CliException($"{what} would produce an invalid configuration; nothing was changed:" +
                                    Environment.NewLine + " - " + string.Join(Environment.NewLine + " - ", report.Errors));
         return written;
+    }
+
+    /// <summary>
+    /// <c>maintenance start --minutes N [--reason text]</c> / <c>maintenance stop</c>: writes
+    /// <c>Maintenance:Until</c>/<c>Reason</c> to the operator settings, which the running service
+    /// picks up within seconds (no restart).
+    /// </summary>
+    private static Command BuildMaintenance(CliContext ctx)
+    {
+        var minutes = new Option<int>("--minutes")
+        {
+            Required = true,
+            Description = $"Length of the window in minutes (1-{Services.Alerting.MaintenanceWindowRules.MaxMinutes}).",
+        };
+        var reason = new Option<string?>("--reason") { Description = "Why (shown in the console and the portal)." };
+        var start = new Command("start",
+            "Start a maintenance window: incidents are still recorded, but notifications are held and " +
+            "services/application pools are not restarted automatically.")
+        {
+            minutes, reason,
+        };
+        start.SetAction(parse =>
+        {
+            var length = parse.GetValue(minutes);
+            if (length is < 1 or > Services.Alerting.MaintenanceWindowRules.MaxMinutes)
+                throw new CliException($"--minutes must be between 1 and {Services.Alerting.MaintenanceWindowRules.MaxMinutes}.");
+            var text = parse.GetValue(reason)?.Trim() ?? string.Empty;
+            if (text.Length > Services.Alerting.MaintenanceWindowRules.MaxReasonLength)
+                throw new CliException($"--reason must be at most {Services.Alerting.MaintenanceWindowRules.MaxReasonLength} characters.");
+
+            RequireAdministrator();
+            var paths = ctx.PathsOf(parse);
+            paths.EnsureDirectories();
+            var until = DateTimeOffset.UtcNow.AddMinutes(length);
+            MergeValidated(paths, new JsonObject
+            {
+                ["Maintenance"] = new JsonObject
+                {
+                    ["Until"] = Services.Alerting.MaintenanceState.Format(until),
+                    ["Reason"] = text,
+                },
+            }, "The maintenance window");
+            ctx.Output.WriteLine($"Maintenance window active until {until:yyyy-MM-dd HH:mm} UTC" +
+                                 (text.Length > 0 ? $" ({text})." : "."));
+            return 0;
+        });
+
+        var stop = new Command("stop", "End the maintenance window now. Alerts still open will notify once.");
+        stop.SetAction(parse =>
+        {
+            RequireAdministrator();
+            var paths = ctx.PathsOf(parse);
+            paths.EnsureDirectories();
+            MergeValidated(paths, new JsonObject { ["Maintenance"] = null }, "Ending the maintenance window");
+            ctx.Output.WriteLine("Maintenance window ended.");
+            if (PortalSetsMaintenance(paths))
+                ctx.Output.WriteLine("note: the portal has also set a maintenance window, which takes precedence; end it from the portal.");
+            return 0;
+        });
+
+        return new Command("maintenance", "Start or end a maintenance window.") { start, stop };
+    }
+
+    private static bool PortalSetsMaintenance(WatchTowerPaths paths)
+    {
+        try
+        {
+            return File.Exists(paths.RemoteConfigFilePath) &&
+                   JsonNode.Parse(File.ReadAllText(paths.RemoteConfigFilePath), JsonSettingsStore.NodeOptions) is JsonObject root &&
+                   root["Maintenance"] is JsonObject;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return false;
+        }
     }
 
     private static Command BuildEnroll(CliContext ctx)

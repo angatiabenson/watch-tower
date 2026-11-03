@@ -155,6 +155,16 @@ public class ApplyConfigurationHandler : IActionHandler
             if (portal.Count > 0) root["VisibilityPortal"] = portal;
         }
 
+        if (config.Maintenance != null)
+        {
+            var maintenance = new Dictionary<string, object?>();
+            if (config.Maintenance.UntilUtc != null &&
+                Services.Alerting.MaintenanceState.TryParseUntil(config.Maintenance.UntilUtc, out var until))
+                maintenance["Until"] = Services.Alerting.MaintenanceState.Format(until);
+            if (config.Maintenance.Reason != null) maintenance["Reason"] = config.Maintenance.Reason.Trim();
+            if (maintenance.Count > 0) root["Maintenance"] = maintenance;
+        }
+
         return JsonSerializer.Serialize(root, new JsonSerializerOptions { WriteIndented = true });
     }
 }

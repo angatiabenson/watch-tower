@@ -33,11 +33,13 @@ public class ServiceMonitorWorker : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ServiceMonitorWorker> _logger;
     private readonly IWorkerHealth? _health;
+    private readonly IMaintenanceState _maintenance;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _activeOutages = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _disabledLogged = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task> _recoveries = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _maintenanceLogged = new(StringComparer.OrdinalIgnoreCase);
 
     private DateTime? _monitoringStartedAt;
 
@@ -49,7 +51,8 @@ public class ServiceMonitorWorker : BackgroundService
         IOptionsMonitor<ServiceMonitorOptions> options,
         TimeProvider timeProvider,
         ILogger<ServiceMonitorWorker> logger,
-        IWorkerHealth? workerHealth = null
+        IWorkerHealth? workerHealth = null,
+        IMaintenanceState? maintenance = null
     )
     {
         _serviceManager = serviceManager;
@@ -60,6 +63,7 @@ public class ServiceMonitorWorker : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _health = workerHealth;
+        _maintenance = maintenance ?? NoMaintenance.Instance;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -200,6 +204,16 @@ public class ServiceMonitorWorker : BackgroundService
             await _portalEventPublisher.PublishIncidentAsync(downIncident, ct);
         }
 
+        if (_maintenance.Current.Active)
+        {
+            // Administrators are working on the server: record the outage but leave the service alone.
+            if (_maintenanceLogged.TryAdd(serviceName, 0))
+                _logger.LogWarning("Service {ServiceName} is {Status}; not restarting it during the maintenance window",
+                    serviceName, status.Status);
+            return;
+        }
+        _maintenanceLogged.TryRemove(serviceName, out _);
+
         _logger.LogWarning("Service {ServiceName} is {Status}, attempting restart", serviceName, status.Status);
 
         // ServiceController calls block for up to the restart timeout; run each recovery on its
@@ -213,6 +227,12 @@ public class ServiceMonitorWorker : BackgroundService
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(opts.RestartDelaySeconds), _timeProvider, ct);
+
+            if (_maintenance.Current.Active)
+            {
+                _logger.LogWarning("Maintenance started; not restarting service {ServiceName}", serviceName);
+                return;
+            }
 
             var restarted = _serviceManager.RestartService(
                 serviceName,

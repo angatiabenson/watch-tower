@@ -21,9 +21,11 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ApplicationPoolMonitorWorker> _logger;
     private readonly IWorkerHealth? _health;
+    private readonly IMaintenanceState _maintenance;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
     private readonly ConcurrentDictionary<string, byte> _activeOutages = new();
+    private readonly ConcurrentDictionary<string, byte> _maintenanceLogged = new();
 
     public ApplicationPoolMonitorWorker(
         IIisApplicationPoolManager applicationPoolManager,
@@ -33,7 +35,8 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         IOptionsMonitor<ApplicationPoolMonitorOptions> options,
         TimeProvider timeProvider,
         ILogger<ApplicationPoolMonitorWorker> logger,
-        IWorkerHealth? workerHealth = null
+        IWorkerHealth? workerHealth = null,
+        IMaintenanceState? maintenance = null
     )
     {
         _applicationPoolManager = applicationPoolManager;
@@ -44,6 +47,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         _timeProvider = timeProvider;
         _logger = logger;
         _health = workerHealth;
+        _maintenance = maintenance ?? NoMaintenance.Instance;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -132,6 +136,17 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 _metricsStore.AddIncident(downIncident);
                 await _portalEventPublisher.PublishIncidentAsync(downIncident, ct);
             }
+
+            if (_maintenance.Current.Active)
+            {
+                // Administrators are working on the server: record the outage but leave the pool alone.
+                if (_maintenanceLogged.TryAdd(applicationPoolName, 0))
+                    _logger.LogWarning(
+                        "Application pool {ApplicationPoolName} is {Status}; not starting it during the maintenance window",
+                        applicationPoolName, status.Status);
+                continue;
+            }
+            _maintenanceLogged.TryRemove(applicationPoolName, out _);
 
             _logger.LogWarning(
                 "Application pool {ApplicationPoolName} is {Status}, attempting start",

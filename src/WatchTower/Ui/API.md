@@ -41,6 +41,13 @@ Password rule: at least 10 characters (server enforces; show the hint in the for
   },
   "health": { "errors": ["..."], "warnings": ["SMTP host is not configured. ..."] },
   "restartPending": false,          // a restart-required setting was saved but not yet applied
+  "maintenance": { "active": true, "until": "2026-11-03T18:00:00+00:00", "reason": "Monthly patching" },
+                                    // until/reason are null when none is set; until may be in the past (active: false)
+  "alerts": [                       // currently open alerts, oldest first
+    { "key": "disk:C:\\", "severity": "critical", "title": "Disk Critical: C:\\ at 91.0%",
+      "description": "Drive C:\\ at 91.0% (9.7 GB free of 126.5 GB)", "openedAt": "2026-11-03T08:10:00Z",
+      "lastNotifiedAt": "2026-11-03T08:10:00Z", "notifyCount": 1 }   // lastNotifiedAt null = held (maintenance / no channel)
+  ],
   "workers": [                      // monitoring worker liveness (feeds the health-gated heartbeat)
     { "name": "cpu", "lastSuccessAt": "2026-11-03T09:59:55Z", "intervalSeconds": 5, "stale": false }
   ],                                // stale = no successful cycle for 3x the interval (at least 2 min)
@@ -160,6 +167,16 @@ keep. Responses:
   channel. Channel names: `email`, `teams`, `slack`, `webhook` (the fixed fields of the "Notification
   channels" section) plus any `Notifications:Channels` entries. Uses the saved settings — save first.
   UI: a "Send test notification" button in the Notification channels section (and optionally one per channel).
+* `POST /api/actions/maintenance` body `{ "minutes": 60, "reason": "Monthly patching" }` (minutes 1–10080,
+  reason optional, ≤ 500 chars) → `200 { "maintenance": { "active", "until", "reason" } }`; `400 { "error" }`
+  for bad input. Saves `Maintenance:Until`/`Reason` to the operator settings (same as
+  `WatchTower maintenance start`).
+* `POST /api/actions/maintenance/stop` → `200 { "maintenance": {..}, "message": "..." }`. If the portal set the
+  window it stays active (`maintenance.active: true`) and the message says to end it from the portal.
+  UI: a maintenance banner on the dashboard while `maintenance.active` ("Maintenance until 18:00 — notifications
+  paused, services are not auto-restarted" + reason + **End now**), and a "Start maintenance" dialog
+  (duration presets 30 min / 1 h / 2 h / 4 h + reason). The `Maintenance:Until`/`Reason` fields also appear in
+  the settings schema for direct editing.
 * `POST /api/actions/enroll` body `{ "code": "WT1.…" }` (enrollment code from the portal's "Add server"
   dialog) → `200 { "portalUrl", "agentId", "restartRequired": true, "warnings": [..] }` — saves and enables
   the portal connection (token encrypted); offer Restart now. `400 { "error" }` for a bad code,

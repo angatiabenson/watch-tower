@@ -1,5 +1,6 @@
 using WatchTower.Hosting;
 using WatchTower.Portal.Contracts;
+using WatchTower.Services.Alerting;
 using WatchTower.Updates;
 
 namespace WatchTower.Portal;
@@ -10,11 +11,13 @@ public interface IAgentTelemetry
     AgentTelemetryDto Snapshot();
 }
 
-public sealed class AgentTelemetry(AgentInfo agent, UpdateService updates, TimeProvider time) : IAgentTelemetry
+public sealed class AgentTelemetry(AgentInfo agent, UpdateService updates, TimeProvider time, IMaintenanceState? maintenance = null)
+    : IAgentTelemetry
 {
     public AgentTelemetryDto Snapshot()
     {
         var status = updates.GetStatus();
+        var window = (maintenance ?? NoMaintenance.Instance).Current;
         return new AgentTelemetryDto(
             AgentInfo.Version,
             agent.MachineName,
@@ -25,6 +28,10 @@ public sealed class AgentTelemetry(AgentInfo agent, UpdateService updates, TimeP
             status.Available?.Version,
             status.LastResult is { } r
                 ? new AgentUpdateResultDto(r.ToVersion, r.Success, r.CompletedAt.ToString("O"))
-                : null);
+                : null,
+            new MaintenanceTelemetryDto(
+                window.Active,
+                window.Until is { } until ? MaintenanceState.Format(until) : null,
+                window.Reason));
     }
 }

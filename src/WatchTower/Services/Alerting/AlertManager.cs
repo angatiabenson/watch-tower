@@ -17,6 +17,7 @@ public sealed class AlertManager : IAlertManager
     private readonly IOptionsMonitor<AlertingOptions> _options;
     private readonly TimeProvider _time;
     private readonly ILogger<AlertManager> _logger;
+    private readonly IMaintenanceState _maintenance;
     private readonly string _server;
 
     private readonly Lock _gate = new();
@@ -30,6 +31,7 @@ public sealed class AlertManager : IAlertManager
         IOptionsMonitor<AlertingOptions> options,
         TimeProvider time,
         ILogger<AlertManager> logger,
+        IMaintenanceState? maintenance = null,
         string? serverName = null)
     {
         _store = store;
@@ -39,6 +41,7 @@ public sealed class AlertManager : IAlertManager
         _options = options;
         _time = time;
         _logger = logger;
+        _maintenance = maintenance ?? NoMaintenance.Instance;
         _server = serverName ?? Environment.MachineName;
     }
 
@@ -67,8 +70,18 @@ public sealed class AlertManager : IAlertManager
         var open = existing is { IsOpen: true };
         var escalated = open && severity > existing!.Severity;
 
-        if (open && !escalated && !IsReminderDue(existing!, now, options))
-            return; // already open and notified: stay quiet
+        var inMaintenance = _maintenance.Current.Active;
+
+        if (open && !escalated)
+        {
+            if (!IsReminderDue(existing!, now, options))
+                return; // already open and notified: stay quiet
+            if (inMaintenance)
+            {
+                HoldForMaintenance(existing!);
+                return;
+            }
+        }
 
         var incident = await incidentFactory(ct);
         var isNew = !open || escalated;
@@ -99,6 +112,12 @@ public sealed class AlertManager : IAlertManager
             await _portal.PublishAlertEventAsync(incident, key.Value, resolved: false, ct);
             _logger.LogWarning("Alert {Key} {Action} ({Severity}): {Description}",
                 key.Value, escalated ? "escalated" : "opened", severity, incident.Description);
+        }
+
+        if (inMaintenance)
+        {
+            HoldForMaintenance(state);
+            return;
         }
 
         // A still-pending alert (never notified) announces itself as opened, not as a reminder.
@@ -147,7 +166,7 @@ public sealed class AlertManager : IAlertManager
         _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
 
         var options = _options.CurrentValue;
-        if (options.SendRecovery && existing.NotifyCount > 0)
+        if (options.SendRecovery && existing.NotifyCount > 0 && !_maintenance.Current.Active)
         {
             var notification = new AlertNotification(
                 AlertNotificationKind.Resolved,
@@ -173,10 +192,25 @@ public sealed class AlertManager : IAlertManager
         _metricsStore.AddIncident(incident);
         await _portal.PublishAlertEventAsync(incident, key.Value, resolved: null, ct);
         _logger.LogInformation("Event {Key}: {Description}", key.Value, incident.Description);
+        if (_maintenance.Current.Active)
+            return; // recorded and published, not notified
 
         await DispatchSafelyAsync(new AlertNotification(
             AlertNotificationKind.Event, key.Value, severity, title, incident.Description, _server,
             incident.Timestamp, Incident: incident), ct);
+    }
+
+    /// <summary>
+    /// Maintenance: the notification that was due is not sent. The alert is marked pending so it
+    /// notifies once on its first raise after the window ends (as "opened" if it never notified,
+    /// otherwise as a "still open" reminder).
+    /// </summary>
+    private void HoldForMaintenance(AlertState state)
+    {
+        if (state.LastNotifiedAt is not null)
+            Save(state with { LastNotifiedAt = null });
+        _logger.LogInformation("Notification for alert {Key} held: maintenance window active until {Until:O}",
+            state.Key, _maintenance.Current.Until);
     }
 
     private static bool IsReminderDue(AlertState state, DateTime now, AlertingOptions options)
