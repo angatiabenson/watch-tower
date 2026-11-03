@@ -346,6 +346,10 @@ public sealed class AlertManager : IAlertManager
             foreach (var id in due)
             {
                 ct.ThrowIfCancellationRequested();
+                // A window that starts while the batch is drained holds the rest of it (checked
+                // again by ContinueAsync right before each send).
+                if (_maintenance.Current.Active)
+                    return;
                 await ContinueAsync(id, now, ct);
             }
         }
@@ -407,10 +411,15 @@ public sealed class AlertManager : IAlertManager
     }
 
     /// <summary>
-    /// Releases a held delivery or retries a due one, unless another caller is already sending it.
+    /// Releases a held delivery or retries a due one, unless another caller is already sending it
+    /// or a maintenance window is active (it then stays pending, and held, until the window ends).
     /// </summary>
     private async Task ContinueAsync(string id, DateTime now, CancellationToken ct)
     {
+        // Right before every send, not only when a batch starts.
+        if (_maintenance.Current.Active)
+            return;
+
         PendingDelivery? delivery;
         lock (_gate)
         {

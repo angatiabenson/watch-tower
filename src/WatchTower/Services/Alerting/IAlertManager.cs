@@ -82,6 +82,8 @@ public interface IAlertManager
     /// deliveries whose backoff has elapsed. Held notices for alerts that are still open, and
     /// resolutions of alerts notified before the window, are sent one by one; alerts that opened
     /// and cleared inside the window and held one-shot events are sent as one summary.
+    /// Maintenance is checked before every send: if a new window starts while a batch is being
+    /// sent, the rest stays pending until that window ends.
     /// Called periodically by <c>NotificationDeliveryWorker</c>.
     /// </summary>
     Task ProcessPendingAsync(CancellationToken ct = default);

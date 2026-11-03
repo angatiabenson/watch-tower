@@ -221,6 +221,72 @@ public class DeliveryConcurrencyTests
         }
     }
 
+    // ── A maintenance window starting while a batch is sent ────────────────
+
+    [Fact]
+    public async Task WindowStartingWhileHeldNoticesAreDrained_HoldsTheRestUntilItEnds()
+    {
+        // The reviewer's probe: two held notices; a new window starts during the first send.
+        var alerts = Alerts();
+        _maintenance.Active = true;
+        await alerts.RaiseAsync(AlertKey.Endpoint("a"), AlertSeverity.Critical, "a down", Down(), Ct);
+        await alerts.RaiseAsync(AlertKey.Endpoint("b"), AlertSeverity.Critical, "b down", Down(), Ct);
+        _maintenance.Active = false;
+
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var first = await _dispatcher.NextAsync(Ct);
+        _maintenance.Active = true;
+        first.Deliver("ch1");
+        await processing.Bounded();
+
+        _dispatcher.Sent.Should().ContainSingle("nothing is sent once the new window has started");
+        var rest = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
+        rest.AlertKey.Should().NotBe(first.Notification.AlertKey);
+        rest.Held.Should().BeTrue("it stays held, and is brought up to date when it is released");
+
+        _time.Advance(TimeSpan.FromHours(1));
+        await alerts.ProcessPendingAsync(Ct).Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse("the window is still active");
+
+        _maintenance.Active = false;
+        processing = alerts.ProcessPendingAsync(Ct);
+        var second = await _dispatcher.NextAsync(Ct);
+        second.Notification.AlertKey.Should().Be(rest.AlertKey);
+        second.Notification.Kind.Should().Be(AlertNotificationKind.Opened);
+        second.Deliver("ch1");
+        await processing.Bounded();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task WindowStartingWhileRetriesAreSent_LeavesTheRemainingRetriesPending()
+    {
+        var alerts = Alerts();
+        foreach (var name in new[] { "a", "b" })
+        {
+            var raising = alerts.RaiseAsync(AlertKey.Endpoint(name), AlertSeverity.Critical, $"{name} down", Down(), Ct);
+            (await _dispatcher.NextAsync(Ct)).Fail("ch1");
+            await raising.Bounded();
+        }
+
+        _time.Advance(NotificationRetryPolicy.Backoff(1));
+        var processing = alerts.ProcessPendingAsync(Ct);
+        var retry = await _dispatcher.NextAsync(Ct);
+        _maintenance.Active = true;
+        retry.Deliver("ch1");
+        await processing.Bounded();
+
+        _dispatcher.Sent.Should().HaveCount(3, "two first attempts and one retry");
+        var rest = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
+        rest.FailedAttempts.Should().Be(1, "it was not attempted during the window");
+
+        _maintenance.Active = false;
+        processing = alerts.ProcessPendingAsync(Ct);
+        (await _dispatcher.NextAsync(Ct)).Deliver("ch1");
+        await processing.Bounded();
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+    }
+
     // ── Shutdown while a channel is still sending ──────────────────────────
 
     /// <summary>
