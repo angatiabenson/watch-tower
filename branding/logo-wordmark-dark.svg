@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 284 64" role="img" aria-label="WatchTower">
+  <title>WatchTower</title>
+  <!-- Wordmark for dark backgrounds: icon tile + mono "WATCHTOWER" + block cursor. -->
+  <rect width="64" height="64" fill="#0A0B0D"/>
+  <rect x="0.5" y="0.5" width="63" height="63" fill="none" stroke="#23272F"/>
+  <g fill="none" stroke="#10B981" stroke-width="3.5" stroke-linejoin="miter" stroke-linecap="square">
+    <path d="M13 11H51V19.5H36V50H28V19.5H13Z"/>
+    <path d="M19.5 54H44.5"/>
+  </g>
+  <rect x="29.5" y="13.5" width="5" height="3.5" fill="#10B981"/>
+  <text x="80" y="41" fill="#F2EFEA" font-family="'Geist Mono', ui-monospace, 'JetBrains Mono', Consolas, monospace"
+        font-size="26" font-weight="600" letter-spacing="3">WATCHTOWER</text>
+  <rect x="262" y="21" width="12" height="22" fill="#10B981"/>
+</svg>
