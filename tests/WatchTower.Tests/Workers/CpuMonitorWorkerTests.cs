@@ -1,8 +1,11 @@
 using FluentAssertions;
+
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
+
 using Moq;
+
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
@@ -79,7 +82,10 @@ public class CpuMonitorWorkerTests
     {
         _options.Setup(o => o.CurrentValue).Returns(new CpuMonitorOptions
         {
-            PollIntervalSeconds = 1, ThresholdPercent = 99, SustainedSeconds = 300, TopProcessCount = 5
+            PollIntervalSeconds = 1,
+            ThresholdPercent = 99,
+            SustainedSeconds = 300,
+            TopProcessCount = 5
         });
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
 

@@ -1,7 +1,9 @@
 using Grpc.Core;
 using Grpc.Net.Client;
+
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Contracts.Protobuf;
@@ -77,31 +79,55 @@ public class GrpcPortalClient : IPortalClient, IDisposable
             var payload = new MetricsBatchPayload { BatchedAt = batch.BatchedAt, BatchId = batch.BatchId };
             payload.CpuMetrics.AddRange(
                 batch.CpuMetrics.Select(m => new CpuMetricProto
-                    { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent }));
+                { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent }));
             payload.RamMetrics.AddRange(
                 batch.RamMetrics.Select(m => new RamMetricProto
-                    { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent,
-                      AvailableMb = m.AvailableMb, TotalMb = m.TotalMb }));
+                {
+                    Timestamp = m.Timestamp,
+                    UsagePercent = m.UsagePercent,
+                    AvailableMb = m.AvailableMb,
+                    TotalMb = m.TotalMb
+                }));
             payload.DiskMetrics.AddRange(
                 batch.DiskMetrics.Select(m => new DiskMetricProto
-                    { Timestamp = m.Timestamp, DriveName = m.DriveName,
-                      TotalGb = m.TotalGb, FreeGb = m.FreeGb, UsagePercent = m.UsagePercent }));
+                {
+                    Timestamp = m.Timestamp,
+                    DriveName = m.DriveName,
+                    TotalGb = m.TotalGb,
+                    FreeGb = m.FreeGb,
+                    UsagePercent = m.UsagePercent
+                }));
             payload.DiskQueueMetrics.AddRange(
                 batch.DiskQueueMetrics.Select(m => new DiskQueueMetricProto
-                    { Timestamp = m.Timestamp, InstanceName = m.InstanceName,
-                      QueueLength = m.QueueLength }));
+                {
+                    Timestamp = m.Timestamp,
+                    InstanceName = m.InstanceName,
+                    QueueLength = m.QueueLength
+                }));
             payload.NetworkMetrics.AddRange(
                 batch.NetworkMetrics.Select(m => new NetworkMetricProto
-                    { Timestamp = m.Timestamp, InterfaceName = m.InterfaceName,
-                      OutputQueueLength = m.OutputQueueLength }));
+                {
+                    Timestamp = m.Timestamp,
+                    InterfaceName = m.InterfaceName,
+                    OutputQueueLength = m.OutputQueueLength
+                }));
             payload.ServiceStatuses.AddRange(
                 batch.ServiceStatuses.Select(m => new ServiceStatusProto
-                    { Timestamp = m.Timestamp, ServiceName = m.ServiceName,
-                      DisplayName = m.DisplayName, Status = m.Status, IsRunning = m.IsRunning }));
+                {
+                    Timestamp = m.Timestamp,
+                    ServiceName = m.ServiceName,
+                    DisplayName = m.DisplayName,
+                    Status = m.Status,
+                    IsRunning = m.IsRunning
+                }));
             payload.AppPoolStatuses.AddRange(
                 batch.ApplicationPoolStatuses.Select(m => new AppPoolStatusProto
-                    { Timestamp = m.Timestamp, AppPoolName = m.ApplicationPoolName,
-                      Status = m.Status, IsRunning = m.IsRunning }));
+                {
+                    Timestamp = m.Timestamp,
+                    AppPoolName = m.ApplicationPoolName,
+                    Status = m.Status,
+                    IsRunning = m.IsRunning
+                }));
 
             var req = new MetricsBatchRequest { Identity = BuildIdentity(), Batch = payload };
             var reply = await _client.SendMetricsBatchAsync(req, headers: BuildMetadata(), deadline: Deadline(),
@@ -130,8 +156,11 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 protoEvt.TopProcesses.AddRange(evt.TopProcesses.Select(p =>
                     new ProcessInfoProto
                     {
-                        Name = p.Name, Pid = p.Pid, CpuSeconds = p.CpuSeconds,
-                        MemoryMb = p.MemoryMb, CpuPercent = p.CpuPercent
+                        Name = p.Name,
+                        Pid = p.Pid,
+                        CpuSeconds = p.CpuSeconds,
+                        MemoryMb = p.MemoryMb,
+                        CpuPercent = p.CpuPercent
                     }));
 
             var req = new AgentEventRequest { Identity = BuildIdentity(), Event = protoEvt };

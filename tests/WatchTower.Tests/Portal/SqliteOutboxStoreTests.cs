@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using WatchTower.Portal.Storage;
 
 namespace WatchTower.Tests.Portal;

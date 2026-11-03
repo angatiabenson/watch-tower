@@ -1,4 +1,5 @@
 using System.ServiceProcess;
+
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 

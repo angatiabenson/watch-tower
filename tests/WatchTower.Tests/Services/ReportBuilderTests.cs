@@ -1,6 +1,9 @@
 using FluentAssertions;
+
 using Microsoft.Extensions.Options;
+
 using Moq;
+
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services;

@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using WatchTower.Models;
 using WatchTower.Services;
 

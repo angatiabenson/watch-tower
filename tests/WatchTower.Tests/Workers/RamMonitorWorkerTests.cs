@@ -1,8 +1,11 @@
 using FluentAssertions;
+
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
+
 using Moq;
+
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;

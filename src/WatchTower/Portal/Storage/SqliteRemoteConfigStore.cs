@@ -1,5 +1,7 @@
 using System.Text.Json;
+
 using Microsoft.Data.Sqlite;
+
 using WatchTower.Portal.Contracts;
 
 namespace WatchTower.Portal.Storage;

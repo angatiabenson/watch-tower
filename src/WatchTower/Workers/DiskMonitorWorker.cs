@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Portal;

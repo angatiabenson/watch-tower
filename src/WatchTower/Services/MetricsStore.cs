@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 

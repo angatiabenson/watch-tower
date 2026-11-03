@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
 
 namespace WatchTower.Workers;

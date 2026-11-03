@@ -1,4 +1,5 @@
 using FluentAssertions;
+
 using WatchTower.Portal.Actions;
 using WatchTower.Portal.Contracts;
 

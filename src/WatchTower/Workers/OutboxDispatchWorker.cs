@@ -1,5 +1,7 @@
 using System.Text.Json;
+
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
@@ -160,7 +162,7 @@ public class OutboxDispatchWorker : BackgroundService
                 sent = msg.MessageType switch
                 {
                     "MetricsBatch" => await SendMetricsBatchAsync(msg, ct),
-                    "AgentEvent"   => await SendEventAsync(msg, ct),
+                    "AgentEvent" => await SendEventAsync(msg, ct),
                     _ => false,
                 };
             }

@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+
 using Moq;
+
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;

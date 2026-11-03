@@ -1,5 +1,7 @@
 using System.Net.Http.Headers;
+
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
 
 namespace WatchTower.Portal.Clients;

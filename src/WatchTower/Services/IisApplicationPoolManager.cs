@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 

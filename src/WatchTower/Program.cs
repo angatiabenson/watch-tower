@@ -1,4 +1,5 @@
 using Serilog;
+
 using WatchTower.Configuration;
 using WatchTower.Portal;
 using WatchTower.Portal.Actions;
