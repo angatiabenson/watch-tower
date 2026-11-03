@@ -63,6 +63,30 @@ public class SqliteOutboxStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task MarkDropped_IsTerminal()
+    {
+        await _store.AddMessageAsync("AgentEvent", "{}");
+        var id = (await _store.GetPendingMessagesAsync(10))[0].Id;
+
+        await _store.MarkDroppedAsync(id, "expired");
+
+        (await _store.GetPendingMessagesAsync(10)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PendingMessages_ExposeCreatedAt()
+    {
+        var before = DateTime.UtcNow.AddSeconds(-1);
+        await _store.AddMessageAsync("AgentEvent", "{}");
+
+        var msg = (await _store.GetPendingMessagesAsync(10))[0];
+
+        msg.CreatedAt.Should().NotBeNull();
+        msg.CreatedAt!.Value.Kind.Should().Be(DateTimeKind.Utc);
+        msg.CreatedAt.Value.Should().BeOnOrAfter(before).And.BeOnOrBefore(DateTime.UtcNow.AddSeconds(1));
+    }
+
+    [Fact]
     public async Task SyncState_RoundTripsCursor()
     {
         (await _store.GetLastForwardedRowIdAsync("cpu_sent")).Should().Be(0);

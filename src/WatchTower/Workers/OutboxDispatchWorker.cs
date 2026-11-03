@@ -22,6 +22,15 @@ public class OutboxDispatchWorker : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<OutboxDispatchWorker> _logger;
 
+    internal const string MetricsMessageType = "MetricsBatch";
+    internal const string EventMessageType = "AgentEvent";
+
+    /// <summary>First retry delay for an undelivered incident event; doubles per attempt.</summary>
+    internal static readonly TimeSpan EventRetryBaseDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>Upper bound for the incident event retry delay.</summary>
+    internal static readonly TimeSpan EventRetryMaxDelay = TimeSpan.FromMinutes(15);
+
     private int _flushCycleCount;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -141,7 +150,7 @@ public class OutboxDispatchWorker : BackgroundService
             );
 
             await _outboxStore.AddMessageAsync(
-                "MetricsBatch",
+                MetricsMessageType,
                 JsonSerializer.Serialize(batch, JsonOpts),
                 priority: 0,
                 cpuRowId: cpuMetrics.Count > 0 ? cpuLastRowId : null,
@@ -161,6 +170,24 @@ public class OutboxDispatchWorker : BackgroundService
         }
     }
 
+
+    /// <summary>
+    /// Delivers pending outbox messages, highest priority first.
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item>The first send failure ends the cycle: the portal is probably down, so the rest of
+    /// the batch is left untouched (no attempt counted) instead of hammering it.</item>
+    /// <item><c>AgentEvent</c> messages (incidents) never fail terminally: they back off
+    /// exponentially (<see cref="EventRetryBaseDelay"/> doubling up to
+    /// <see cref="EventRetryMaxDelay"/>) and are only dropped once older than
+    /// <see cref="OutboxOptions.EventMaxAgeHours"/>.</item>
+    /// <item><c>MetricsBatch</c> keeps its bounded retries; when it gives up, the sent cursor is
+    /// still advanced so the metric rows become purgeable (at-least-once until then).</item>
+    /// <item>Messages that can never be delivered (unknown type, unreadable payload) are dropped
+    /// immediately rather than blocking the queue.</item>
+    /// </list>
+    /// </remarks>
     private async Task FlushOutboxAsync(PortalOptions opts, CancellationToken ct)
     {
         var messages = await _outboxStore.GetPendingMessagesAsync(opts.Outbox.MaxBatchSize);
@@ -168,19 +195,48 @@ public class OutboxDispatchWorker : BackgroundService
 
         _logger.LogDebug("Flushing {Count} outbox messages", messages.Count);
 
-        foreach (var msg in messages)
+        var eventMaxAge = TimeSpan.FromHours(Math.Max(1, opts.Outbox.EventMaxAgeHours));
+        int sentCount = 0, expiredEvents = 0, undeliverable = 0, droppedBatches = 0;
+
+        for (var i = 0; i < messages.Count; i++)
         {
             if (ct.IsCancellationRequested) break;
+            var msg = messages[i];
+
+            if (msg.MessageType == EventMessageType && msg.CreatedAt is { } createdAt && UtcNow - createdAt > eventMaxAge)
+            {
+                await _outboxStore.MarkDroppedAsync(msg.Id, $"Expired after {eventMaxAge.TotalHours:0}h undelivered");
+                expiredEvents++;
+                continue;
+            }
+
+            Func<CancellationToken, Task<bool>>? send;
+            try
+            {
+                send = PrepareSend(msg);
+            }
+            catch (Exception ex) when (ex is JsonException or NotSupportedException)
+            {
+                _logger.LogError(ex, "Outbox message {Id} ({Type}) has an unreadable payload", msg.Id, msg.MessageType);
+                send = null;
+            }
+
+            if (send == null)
+            {
+                await _outboxStore.MarkDroppedAsync(msg.Id, "Undeliverable: unknown type or unreadable payload");
+                await AdvanceSentCursorAsync(msg); // never deliverable: do not stall metric purging
+                undeliverable++;
+                continue;
+            }
 
             bool sent;
             try
             {
-                sent = msg.MessageType switch
-                {
-                    "MetricsBatch" => await SendMetricsBatchAsync(msg, ct),
-                    "AgentEvent" => await SendEventAsync(msg, ct),
-                    _ => false,
-                };
+                sent = await send(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -192,34 +248,79 @@ public class OutboxDispatchWorker : BackgroundService
             {
                 await _outboxStore.MarkSentAsync(msg.Id);
                 await AdvanceSentCursorAsync(msg);
+                sentCount++;
+                continue;
             }
-            else
+
+            if (await RecordFailureAsync(msg, opts))
+                droppedBatches++;
+
+            var deferred = messages.Count - i - 1;
+            if (deferred > 0)
             {
-                var nextAttempt = msg.Attempts + 1;
-                bool terminal = nextAttempt >= opts.Outbox.MaxRetryAttempts;
-                DateTime? nextRetry = terminal
-                    ? null
-                    : UtcNow.AddSeconds(opts.Outbox.RetryBackoffSeconds * nextAttempt);
-
-                await _outboxStore.MarkFailedAsync(msg.Id, "Send failed", nextRetry, opts.Outbox.MaxRetryAttempts);
-
-                if (terminal && msg.MessageType == "MetricsBatch")
-                {
-                    // The batch exhausted all retries (portal unreachable for the whole
-                    // window). Advance the sent cursor so these rows become purgeable and
-                    // the pipeline does not stall — but log loudly: this is dropped data.
-                    _logger.LogError(
-                        "Dropping metrics batch {Id} after {Attempts} failed attempts; cpu<= {Cpu}, ram<= {Ram} will not reach the portal",
-                        msg.Id, nextAttempt, msg.CpuRowId, msg.RamRowId);
-                    await AdvanceSentCursorAsync(msg);
-                }
+                _logger.LogWarning(
+                    "Portal send failed; deferring {Deferred} remaining outbox message(s) to the next cycle",
+                    deferred);
             }
+            break;
         }
+
+        if (expiredEvents > 0 || undeliverable > 0 || droppedBatches > 0)
+        {
+            _logger.LogError(
+                "Outbox dropped {Expired} expired event(s), {Undeliverable} undeliverable message(s) and " +
+                "{Batches} metrics batch(es) that exhausted their retries this cycle",
+                expiredEvents, undeliverable, droppedBatches);
+        }
+
+        if (sentCount > 0)
+            _logger.LogDebug("Delivered {Count} outbox message(s)", sentCount);
+    }
+
+    /// <summary>Schedules the retry for a failed send. Returns true if a metrics batch was given up.</summary>
+    private async Task<bool> RecordFailureAsync(OutboxMessage msg, PortalOptions opts)
+    {
+        var nextAttempt = msg.Attempts + 1;
+
+        if (msg.MessageType == EventMessageType)
+        {
+            // Incidents are the most valuable payload: keep retrying (bounded by age, not count).
+            await _outboxStore.MarkFailedAsync(
+                msg.Id, "Send failed", UtcNow + EventRetryDelay(nextAttempt), maxAttempts: int.MaxValue);
+            return false;
+        }
+
+        bool terminal = nextAttempt >= opts.Outbox.MaxRetryAttempts;
+        DateTime? nextRetry = terminal
+            ? null
+            : UtcNow.AddSeconds(opts.Outbox.RetryBackoffSeconds * nextAttempt);
+
+        await _outboxStore.MarkFailedAsync(msg.Id, "Send failed", nextRetry, opts.Outbox.MaxRetryAttempts);
+
+        if (!terminal)
+            return false;
+
+        // The batch exhausted all retries (portal unreachable for the whole window). Advance
+        // the sent cursor so these rows become purgeable and the pipeline does not stall, but
+        // log loudly: this is dropped data.
+        _logger.LogError(
+            "Dropping metrics batch {Id} after {Attempts} failed attempts; cpu<= {Cpu}, ram<= {Ram} will not reach the portal",
+            msg.Id, nextAttempt, msg.CpuRowId, msg.RamRowId);
+        await AdvanceSentCursorAsync(msg);
+        return true;
+    }
+
+    /// <summary>30s, 60s, 120s, ... capped at 15 min.</summary>
+    internal static TimeSpan EventRetryDelay(int attempt)
+    {
+        var exponent = Math.Clamp(attempt - 1, 0, 20);
+        var seconds = EventRetryBaseDelay.TotalSeconds * Math.Pow(2, exponent);
+        return TimeSpan.FromSeconds(Math.Min(seconds, EventRetryMaxDelay.TotalSeconds));
     }
 
     private async Task AdvanceSentCursorAsync(OutboxMessage msg)
     {
-        if (msg.MessageType != "MetricsBatch")
+        if (msg.MessageType != MetricsMessageType)
             return;
 
         if (msg.CpuRowId is long cpu && cpu > await _syncState.GetLastForwardedRowIdAsync("cpu_sent"))
@@ -228,18 +329,21 @@ public class OutboxDispatchWorker : BackgroundService
             await _syncState.SetLastForwardedRowIdAsync("ram_sent", ram);
     }
 
-    private async Task<bool> SendMetricsBatchAsync(OutboxMessage msg, CancellationToken ct)
+    /// <summary>
+    /// Deserializes the payload up front. Returns null for messages that can never be delivered.
+    /// </summary>
+    private Func<CancellationToken, Task<bool>>? PrepareSend(OutboxMessage msg)
     {
-        var dto = JsonSerializer.Deserialize<MetricsBatchDto>(msg.PayloadJson, JsonOpts);
-        if (dto == null) return false;
-        return await _portalClient.SendMetricsBatchAsync(dto, ct);
+        switch (msg.MessageType)
+        {
+            case MetricsMessageType:
+                var batch = JsonSerializer.Deserialize<MetricsBatchDto>(msg.PayloadJson, JsonOpts);
+                return batch == null ? null : ct => _portalClient.SendMetricsBatchAsync(batch, ct);
+            case EventMessageType:
+                var evt = JsonSerializer.Deserialize<AgentEventDto>(msg.PayloadJson, JsonOpts);
+                return evt == null ? null : ct => _portalClient.SendEventAsync(evt, ct);
+            default:
+                return null;
+        }
     }
-
-    private async Task<bool> SendEventAsync(OutboxMessage msg, CancellationToken ct)
-    {
-        var dto = JsonSerializer.Deserialize<AgentEventDto>(msg.PayloadJson, JsonOpts);
-        if (dto == null) return false;
-        return await _portalClient.SendEventAsync(dto, ct);
-    }
-
 }

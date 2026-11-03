@@ -105,7 +105,7 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
             using var conn = Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                @"SELECT id, message_type, payload_json, priority, attempts, cpu_rowid, ram_rowid
+                @"SELECT id, message_type, payload_json, priority, attempts, cpu_rowid, ram_rowid, created_at
                   FROM outbox_messages
                   WHERE status = 'Pending'
                     AND (next_retry_at IS NULL OR next_retry_at <= @now)
@@ -124,7 +124,8 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
                     reader.GetInt32(3),
                     reader.GetInt32(4),
                     reader.IsDBNull(5) ? null : reader.GetInt64(5),
-                    reader.IsDBNull(6) ? null : reader.GetInt64(6)
+                    reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    ParseUtc(reader.IsDBNull(7) ? null : reader.GetString(7))
                 ));
             }
         }
@@ -167,6 +168,30 @@ public class SqliteOutboxStore : IOutboxStore, IPortalSyncState, IDisposable
         }
         return Task.CompletedTask;
     }
+
+    public Task MarkDroppedAsync(long id, string reason)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"UPDATE outbox_messages
+                  SET status = 'Failed', last_error = @reason, next_retry_at = NULL
+                  WHERE id = @id";
+            cmd.Parameters.AddWithValue("@reason", reason);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.ExecuteNonQuery();
+        }
+        return Task.CompletedTask;
+    }
+
+    private static DateTime? ParseUtc(string? value) =>
+        DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed
+            : null;
 
     public Task PurgeDeliveredAsync(TimeSpan maxAge)
     {

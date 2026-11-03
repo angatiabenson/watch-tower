@@ -30,6 +30,13 @@ public class OutboxOptions
     public int MaxRetryAttempts { get; set; } = 5;
     public int RetryBackoffSeconds { get; set; } = 60;
     public int PurgeDeliveredAfterHours { get; set; } = 48;
+
+    /// <summary>
+    /// Incident events (AgentEvent) are retried indefinitely with capped exponential backoff and
+    /// only dropped once they have waited this long undelivered (default one week).
+    /// MaxRetryAttempts applies to metrics batches only.
+    /// </summary>
+    public int EventMaxAgeHours { get; set; } = 168;
 }
 
 public class CommandPollOptions
