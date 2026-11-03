@@ -37,7 +37,21 @@ message MetricsBatchPayload {
   repeated ServiceStatusProto    service_statuses   = 7;
   repeated AppPoolStatusProto    app_pool_statuses  = 8;
   string batch_id                            = 9;  // idempotency key for de-duplicating retried batches
+  AgentTelemetryProto            agent              = 10; // optional: agent identity/version/update state
 }
+
+// Agent self-description sent with every metrics batch (additive; absent from older agents).
+message AgentTelemetryProto {
+  string                version            = 1;
+  string                machine_name       = 2;
+  string                os                 = 3;
+  string                started_at         = 4;
+  int64                 uptime_seconds     = 5;
+  string                update_phase       = 6;  // Idle|Checking|UpToDate|Available|Downloading|ReadyToInstall|Installing|Failed
+  optional string       available_version  = 7;
+  UpdateResultProto     last_update_result = 8;  // unset when no update has been installed yet
+}
+message UpdateResultProto { string to_version = 1; bool success = 2; string completed_at = 3; }
 
 message CpuMetricProto       { string timestamp = 1; double usage_percent = 2; }
 message RamMetricProto       { string timestamp = 1; double usage_percent = 2; double available_mb = 3; double total_mb = 4; }

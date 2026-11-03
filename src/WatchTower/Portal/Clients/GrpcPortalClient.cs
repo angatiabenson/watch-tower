@@ -81,6 +81,27 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         try
         {
             var payload = new MetricsBatchPayload { BatchedAt = batch.BatchedAt, BatchId = batch.BatchId };
+            if (batch.Agent is { } agent)
+            {
+                payload.Agent = new AgentTelemetryProto
+                {
+                    Version = agent.Version,
+                    MachineName = agent.MachineName,
+                    Os = agent.Os,
+                    StartedAt = agent.StartedAt,
+                    UptimeSeconds = agent.UptimeSeconds,
+                    UpdatePhase = agent.UpdatePhase,
+                };
+                if (agent.AvailableVersion is not null)
+                    payload.Agent.AvailableVersion = agent.AvailableVersion;
+                if (agent.LastUpdateResult is { } result)
+                    payload.Agent.LastUpdateResult = new UpdateResultProto
+                    {
+                        ToVersion = result.ToVersion,
+                        Success = result.Success,
+                        CompletedAt = result.CompletedAt,
+                    };
+            }
             payload.CpuMetrics.AddRange(
                 batch.CpuMetrics.Select(m => new CpuMetricProto
                 { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent }));

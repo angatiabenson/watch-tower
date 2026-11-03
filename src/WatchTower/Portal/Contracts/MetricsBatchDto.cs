@@ -10,8 +10,23 @@ public record MetricsBatchDto(
     List<DiskQueueMetricDto> DiskQueueMetrics,
     List<NetworkMetricDto> NetworkMetrics,
     List<ServiceStatusDto> ServiceStatuses,
-    List<ApplicationPoolStatusDto> ApplicationPoolStatuses
+    List<ApplicationPoolStatusDto> ApplicationPoolStatuses,
+    AgentTelemetryDto? Agent = null
 );
+
+/// <summary>Agent self-description sent with every batch (omitted by older agents).</summary>
+public record AgentTelemetryDto(
+    string Version,
+    string MachineName,
+    string Os,
+    string StartedAt,
+    long UptimeSeconds,
+    string UpdatePhase,
+    string? AvailableVersion,
+    AgentUpdateResultDto? LastUpdateResult
+);
+
+public record AgentUpdateResultDto(string ToVersion, bool Success, string CompletedAt);
 
 public record CpuMetricDto(string Timestamp, double UsagePercent);
 

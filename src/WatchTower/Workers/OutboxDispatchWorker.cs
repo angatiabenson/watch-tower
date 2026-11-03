@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Portal;
 using WatchTower.Portal.Actions;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
@@ -21,6 +22,7 @@ public class OutboxDispatchWorker : BackgroundService
     private readonly IOptionsMonitor<PortalOptions> _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<OutboxDispatchWorker> _logger;
+    private readonly IAgentTelemetry? _telemetry;
 
     internal const string MetricsMessageType = "MetricsBatch";
     internal const string EventMessageType = "AgentEvent";
@@ -47,8 +49,10 @@ public class OutboxDispatchWorker : BackgroundService
         IMetricSnapshotTrigger snapshotTrigger,
         IOptionsMonitor<PortalOptions> options,
         TimeProvider timeProvider,
-        ILogger<OutboxDispatchWorker> logger)
+        ILogger<OutboxDispatchWorker> logger,
+        IAgentTelemetry? telemetry = null)
     {
+        _telemetry = telemetry;
         _portalClient = portalClient;
         _outboxStore = outboxStore;
         _syncState = syncState;
@@ -146,7 +150,8 @@ public class OutboxDispatchWorker : BackgroundService
                 diskQueueMetrics.Select(m => new DiskQueueMetricDto(m.Timestamp.ToString("O"), m.InstanceName, m.QueueLength)).ToList(),
                 networkMetrics.Select(m => new NetworkMetricDto(m.Timestamp.ToString("O"), m.InterfaceName, m.OutputQueueLength)).ToList(),
                 serviceStatuses.Select(m => new ServiceStatusDto(m.Timestamp.ToString("O"), m.ServiceName, m.DisplayName, m.Status, m.IsRunning)).ToList(),
-                appPoolStatuses.Select(m => new ApplicationPoolStatusDto(m.Timestamp.ToString("O"), m.ApplicationPoolName, m.Status, m.IsRunning)).ToList()
+                appPoolStatuses.Select(m => new ApplicationPoolStatusDto(m.Timestamp.ToString("O"), m.ApplicationPoolName, m.Status, m.IsRunning)).ToList(),
+                _telemetry?.Snapshot()
             );
 
             await _outboxStore.AddMessageAsync(

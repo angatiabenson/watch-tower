@@ -130,6 +130,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IActionHandler, ApplyConfigurationHandler>();
         services.AddSingleton<ActionHandlerRegistry>();
         services.AddSingleton<ICommandTargetPolicy, LocalCommandTargetPolicy>();
+        services.AddSingleton<IAgentTelemetry, AgentTelemetry>();
 
         services.AddSingleton<IPortalEventPublisher, PortalEventPublisher>();
 
