@@ -292,33 +292,65 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         }
     }
 
-    private static RemoteAgentConfigDto MapRemoteConfig(RemoteAgentConfig proto)
+    /// <summary>
+    /// Maps every section of the protobuf config onto the transport-neutral DTO. Scalar fields
+    /// are declared <c>optional</c> in the proto, so presence (not a zero value) decides whether a
+    /// setting is sent: an explicit 0 reaches <see cref="Actions.RemoteConfigValidator"/> and is
+    /// rejected there instead of being silently dropped. Repeated fields carry no presence on
+    /// the wire, so an empty watched list is treated as "not specified".
+    /// </summary>
+    internal static RemoteAgentConfigDto MapRemoteConfig(RemoteAgentConfig proto)
     {
         return new RemoteAgentConfigDto
         {
             Cpu = proto.Cpu == null ? null : new Contracts.RemoteCpuConfig
             {
-                PollIntervalSeconds = proto.Cpu.PollIntervalSeconds == 0 ? null : proto.Cpu.PollIntervalSeconds,
-                ThresholdPercent = proto.Cpu.ThresholdPercent == 0 ? null : proto.Cpu.ThresholdPercent,
-                SustainedSeconds = proto.Cpu.SustainedSeconds == 0 ? null : proto.Cpu.SustainedSeconds,
+                PollIntervalSeconds = proto.Cpu.HasPollIntervalSeconds ? proto.Cpu.PollIntervalSeconds : null,
+                ThresholdPercent = proto.Cpu.HasThresholdPercent ? proto.Cpu.ThresholdPercent : null,
+                SustainedSeconds = proto.Cpu.HasSustainedSeconds ? proto.Cpu.SustainedSeconds : null,
             },
             Ram = proto.Ram == null ? null : new Contracts.RemoteRamConfig
             {
-                PollIntervalSeconds = proto.Ram.PollIntervalSeconds == 0 ? null : proto.Ram.PollIntervalSeconds,
-                ThresholdPercent = proto.Ram.ThresholdPercent == 0 ? null : proto.Ram.ThresholdPercent,
-                SustainedSeconds = proto.Ram.SustainedSeconds == 0 ? null : proto.Ram.SustainedSeconds,
+                PollIntervalSeconds = proto.Ram.HasPollIntervalSeconds ? proto.Ram.PollIntervalSeconds : null,
+                ThresholdPercent = proto.Ram.HasThresholdPercent ? proto.Ram.ThresholdPercent : null,
+                SustainedSeconds = proto.Ram.HasSustainedSeconds ? proto.Ram.SustainedSeconds : null,
+            },
+            Disk = proto.Disk == null ? null : new Contracts.RemoteDiskConfig
+            {
+                PollIntervalSeconds = proto.Disk.HasPollIntervalSeconds ? proto.Disk.PollIntervalSeconds : null,
+                WarningThresholdPercent = proto.Disk.HasWarningThresholdPercent
+                    ? proto.Disk.WarningThresholdPercent : null,
+                CriticalThresholdPercent = proto.Disk.HasCriticalThresholdPercent
+                    ? proto.Disk.CriticalThresholdPercent : null,
+                QueueLengthWarningThreshold = proto.Disk.HasQueueLengthWarningThreshold
+                    ? proto.Disk.QueueLengthWarningThreshold : null,
+            },
+            Network = proto.Network == null ? null : new Contracts.RemoteNetworkConfig
+            {
+                PollIntervalSeconds = proto.Network.HasPollIntervalSeconds ? proto.Network.PollIntervalSeconds : null,
+                OutputQueueWarningThreshold = proto.Network.HasOutputQueueWarningThreshold
+                    ? proto.Network.OutputQueueWarningThreshold : null,
             },
             Services = proto.Services == null ? null : new Contracts.RemoteServiceConfig
             {
-                PollIntervalSeconds = proto.Services.PollIntervalSeconds == 0 ? null : proto.Services.PollIntervalSeconds,
+                PollIntervalSeconds = proto.Services.HasPollIntervalSeconds ? proto.Services.PollIntervalSeconds : null,
                 WatchedServices = proto.Services.WatchedServices.Count > 0
                     ? proto.Services.WatchedServices.ToList() : null,
             },
             AppPools = proto.AppPools == null ? null : new Contracts.RemoteAppPoolConfig
             {
-                PollIntervalSeconds = proto.AppPools.PollIntervalSeconds == 0 ? null : proto.AppPools.PollIntervalSeconds,
+                PollIntervalSeconds = proto.AppPools.HasPollIntervalSeconds ? proto.AppPools.PollIntervalSeconds : null,
                 WatchedApplicationPools = proto.AppPools.WatchedApplicationPools.Count > 0
                     ? proto.AppPools.WatchedApplicationPools.ToList() : null,
+            },
+            Portal = proto.Portal == null ? null : new Contracts.RemotePortalConfig
+            {
+                OutboxFlushIntervalSeconds = proto.Portal.HasOutboxFlushIntervalSeconds
+                    ? proto.Portal.OutboxFlushIntervalSeconds : null,
+                CommandPollIntervalSeconds = proto.Portal.HasCommandPollIntervalSeconds
+                    ? proto.Portal.CommandPollIntervalSeconds : null,
+                RemoteConfigPollIntervalSeconds = proto.Portal.HasRemoteConfigPollIntervalSeconds
+                    ? proto.Portal.RemoteConfigPollIntervalSeconds : null,
             },
         };
     }

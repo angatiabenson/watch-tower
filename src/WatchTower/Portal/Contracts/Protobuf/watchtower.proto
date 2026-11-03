@@ -114,10 +114,10 @@ message RemoteAgentConfig {
   RemotePortalConfig  portal   = 7;
 }
 
-message RemoteCpuConfig     { int32 poll_interval_seconds = 1; double threshold_percent = 2; int32 sustained_seconds = 3; }
-message RemoteRamConfig     { int32 poll_interval_seconds = 1; double threshold_percent = 2; int32 sustained_seconds = 3; }
-message RemoteDiskConfig    { int32 poll_interval_seconds = 1; double warning_threshold_percent = 2; double critical_threshold_percent = 3; double queue_length_warning_threshold = 4; }
-message RemoteNetworkConfig { int32 poll_interval_seconds = 1; double output_queue_warning_threshold = 2; }
-message RemoteServiceConfig { int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
-message RemoteAppPoolConfig { int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
-message RemotePortalConfig  { int32 outbox_flush_interval_seconds = 1; int32 command_poll_interval_seconds = 2; int32 remote_config_poll_interval_seconds = 3; }
+message RemoteCpuConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
+message RemoteRamConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
+message RemoteDiskConfig    { optional int32 poll_interval_seconds = 1; optional double warning_threshold_percent = 2; optional double critical_threshold_percent = 3; optional double queue_length_warning_threshold = 4; }
+message RemoteNetworkConfig { optional int32 poll_interval_seconds = 1; optional double output_queue_warning_threshold = 2; }
+message RemoteServiceConfig { optional int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
+message RemoteAppPoolConfig { optional int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
+message RemotePortalConfig  { optional int32 outbox_flush_interval_seconds = 1; optional int32 command_poll_interval_seconds = 2; optional int32 remote_config_poll_interval_seconds = 3; }
