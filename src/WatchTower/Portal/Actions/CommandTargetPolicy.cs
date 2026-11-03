@@ -50,13 +50,25 @@ public sealed class LocalCommandTargetPolicy(
         if (portal.CurrentValue.CommandPoll.AllowPortalManagedTargets)
             return effective;
 
-        // Environment variables outrank the portal layer, so the effective value IS local then.
-        var root = configuration as IConfigurationRoot;
-        if (root?.Providers.OfType<EnvironmentVariablesConfigurationProvider>()
-                .Any(p => p.GetChildKeys([], key).Any()) == true)
-            return effective;
-
         var layered = LayeredJsonConfigurationProvider.Find(configuration);
-        return layered is null ? effective : layered.GetLocalList(key);
+        if (layered is null)
+            return effective; // no layered configuration (tests / hosts without the portal overlay)
+
+        // Built ONLY from local sources: the portal-free JSON layers plus entries that
+        // environment variables set. Never trust the effective list wholesale — env entries are
+        // merged by index with lower layers, so the effective list can still hold portal entries
+        // at indexes the environment did not set.
+        var allowed = new List<string>(layered.GetLocalList(key));
+        var root = configuration as IConfigurationRoot;
+        foreach (var env in root?.Providers.OfType<EnvironmentVariablesConfigurationProvider>() ?? [])
+        {
+            foreach (var index in env.GetChildKeys([], key).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (env.TryGet($"{key}:{index}", out var value) && !string.IsNullOrWhiteSpace(value) &&
+                    !allowed.Contains(value.Trim(), StringComparer.OrdinalIgnoreCase))
+                    allowed.Add(value.Trim());
+            }
+        }
+        return allowed;
     }
 }

@@ -95,6 +95,7 @@ public class SqliteCommandStoreTests : IDisposable
         await _store.SaveCommandAsync(Command("done"));
         await _store.SaveCommandAsync(Command("pending"));
         await _store.MarkFailedAsync("done", "x");
+        await _store.MarkResultSentAsync("done"); // only delivered results may be purged
 
         // Cutoff in the past: nothing is old enough yet.
         (await _store.PurgeFinishedCommandsAsync(DateTime.UtcNow.AddDays(-30))).Should().Be(0);

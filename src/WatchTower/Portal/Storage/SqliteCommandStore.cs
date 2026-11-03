@@ -265,9 +265,12 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             using var cmd = conn.CreateCommand();
             // executed_at/received_at are stored as UTC "O" strings, so lexicographic order is
             // chronological. Rows that never recorded executed_at fall back to received_at.
+            // Rows whose result has not been accepted by the portal yet (result_json still set)
+            // are kept: results are retried until delivered, however old they are.
             cmd.CommandText =
                 @"DELETE FROM agent_commands
                   WHERE status IN ('Completed', 'Failed')
+                    AND result_json IS NULL
                     AND COALESCE(executed_at, received_at) < @cutoff";
             cmd.Parameters.AddWithValue("@cutoff", olderThanUtc.ToUniversalTime().ToString("O"));
             return Task.FromResult(cmd.ExecuteNonQuery());
