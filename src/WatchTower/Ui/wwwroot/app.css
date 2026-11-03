@@ -813,6 +813,26 @@ input[type="search"]::-webkit-search-cancel-button { filter: grayscale(1); }
 .advanced .fields { background: var(--bg-0); border-top: 1px solid var(--line-1); }
 
 .test-email { border-top: 1px solid var(--line-1); padding: 16px 24px 20px; display: grid; gap: 8px; justify-items: start; }
+
+/* "Connect with an enrollment code" box (Visibility Portal section) */
+.enroll {
+  display: grid; gap: 8px; justify-items: start;
+  margin: 16px 24px; padding: 16px 20px 18px;
+  background: var(--bg-0); border: 1px solid var(--line-1); border-left: 2px solid var(--wt-accent);
+}
+.enroll-title { font-size: 15px; font-weight: 600; line-height: 1.35; margin-top: -4px; }
+.enroll-help { color: var(--fg-2); font-size: 13px; max-width: 65ch; }
+.enroll .enroll-code {
+  height: auto; min-height: 4.5rem; max-width: 40rem; padding: 8px 12px; resize: vertical;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; word-break: break-all;
+}
+.enroll .enroll-code::placeholder { color: var(--fg-3); }
+.enroll-done, .enroll-hints, .enroll-result { display: grid; gap: 6px; width: 100%; max-width: 40rem; }
+.enroll-done:empty, .enroll-hints:empty, .enroll-result:empty { display: none; }
+.enroll-done:focus { outline: none; }
+.enroll-done:focus-visible { outline: 1px solid var(--wt-accent); outline-offset: 2px; }
+.enroll .btn-row { margin-top: 4px; }
+.enroll + .fields > .field:first-child { border-top: 1px solid var(--line-1); }
 .subhead { font-family: var(--font-mono); font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
 .hint-warn { display: flex; gap: 6px; align-items: flex-start; color: var(--warn); font-size: 13px; }
 .hint-warn .icon { margin-top: 2px; width: 14px; height: 14px; }
@@ -1071,6 +1091,7 @@ li:has(.check:checked) > .picker-item, .picker-item[aria-pressed="true"] { backg
   .incident-body { grid-column: 1 / -1; }
   .facts > div { grid-template-columns: 1fr; gap: 2px; }
   .field, .section-head, .test-email { padding-left: 16px; padding-right: 16px; }
+  .enroll { margin-left: 16px; margin-right: 16px; padding-left: 16px; padding-right: 16px; }
   .countdown-body { grid-template-columns: minmax(0, 1fr); padding: 16px; }
   .countdown-num { text-align: left; font-size: 40px; }
   .update-meta { margin-left: 0; }

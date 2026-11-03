@@ -4,6 +4,7 @@ import { h, icon, nextId, plural } from '../dom.js';
 import { api } from '../api.js';
 import { notice, toast, busy } from '../ui.js';
 import { createEditor } from './fields.js';
+import { enrollPanel, ENROLL_KEYS } from './enroll.js';
 
 const SOURCE_BADGE = {
   portal: 'Managed by portal',
@@ -21,6 +22,7 @@ export function mount(root, params, ctx) {
     saving: false,
     lastWarnings: [],
     rows: new Map(),       // key → row controller (current section only)
+    enroll: {},            // enrollment box state, kept across re-renders and section switches
     destroyed: false,
   };
 
@@ -114,6 +116,7 @@ export function mount(root, params, ctx) {
         h('h2', { class: 'section-title', tabindex: '-1' }, s.title),
         s.description ? h('p', { class: 'section-desc' }, s.description)
           : null),
+      s.id === 'portal' ? enrollBlock(s) : '',
       h('div', { class: 'fields' }, basic.map(fieldRow)),
       adv.length ? h('details', { class: 'advanced', open: advDirty },
         h('summary', null, `Advanced (${adv.length})`),
@@ -225,6 +228,26 @@ export function mount(root, params, ctx) {
       dirty ? h('p', { class: 'hint-warn' }, icon('warning'), 'Save your changes first. The test uses the saved settings, not the ones on screen.') : null,
       h('div', { class: 'btn-row' }, btn),
       result);
+  }
+
+  function enrollBlock(s) {
+    return enrollPanel(state.enroll, {
+      isDirty: () => sectionDirty(s),
+      labelOf: (key) => sectionOfKey(key)?.fields.find((f) => f.key === key)?.label || key,
+      async onEnrolled(r) {
+        // The server saved these settings, so on-screen edits to them are superseded.
+        for (const k of ENROLL_KEYS) {
+          state.drafts.delete(k);
+          state.resets.delete(k);
+          state.serverErrors.delete(k);
+        }
+        state.generalError = null;
+        state.lastWarnings = r.warnings || [];
+        if (r.restartRequired) ctx.setRestartPending(true);
+        toast(r.restartRequired ? 'Portal connected. Restart WatchTower to start reporting.' : 'Portal connected.');
+        await load(); // re-renders the section, so the portal fields show the new values
+      },
+    });
   }
 
   function renderSaveBar() {

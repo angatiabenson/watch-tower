@@ -114,6 +114,7 @@ export const api = {
   timeZones: () => request('/system/timezones'),
 
   testEmail: () => post('/actions/test-email'),
+  enroll: (code) => post('/actions/enroll', { code }),
   restart: () => post('/actions/restart'),
 
   logs: (lines) => request(`/logs?lines=${encodeURIComponent(lines)}`),
