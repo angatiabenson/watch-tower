@@ -1,0 +1,79 @@
+name: Release WatchTower
+
+# Builds, tests and publishes a distributable release on GitHub-hosted runners — no
+# self-hosted runner needed, so any fork can ship its own releases.
+#
+#   git tag v1.6.0 && git push origin v1.6.0      # or run the workflow manually
+#
+# Each release carries:
+#   WatchTower-<version>-win-x64.zip   self-contained exe + install.ps1 (no .NET needed)
+#   watchtower-update.json             manifest the agents' self-updater reads
+#   SHA256SUMS.txt
+# Set the repository secret WATCHTOWER_SIGNING_KEY (ECDSA P-256 private key, PEM) to sign
+# packages; agents configured with the public key (Updates:PublicKey) then only install
+# signed releases.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.6.0 or 1.6.0-beta.1)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}' }
+          $v = $v.TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.\-]+)?$') { throw "Invalid version '$v'" }
+          "number=$v" >> $env:GITHUB_OUTPUT
+          "prerelease=$($v.Contains('-').ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build --configuration Release -p:Version=${{ steps.version.outputs.number }}
+
+      - name: Test
+        run: dotnet test --project tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-build --report-trx
+
+      - name: Package
+        shell: pwsh
+        env:
+          WATCHTOWER_SIGNING_KEY: ${{ secrets.WATCHTOWER_SIGNING_KEY }}
+        run: ./build/package.ps1 -Version ${{ steps.version.outputs.number }} -Repository ${{ github.repository }} -OutputDir artifacts
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.number }}
+          name: WatchTower v${{ steps.version.outputs.number }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            artifacts/WatchTower-*.zip
+            artifacts/watchtower-update.json
+            artifacts/SHA256SUMS.txt

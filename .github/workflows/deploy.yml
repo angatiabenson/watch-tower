@@ -276,10 +276,20 @@ jobs:
           # Fail the pipeline to signal the deploy was bad
           exit 1
 
-      - name: Package binaries
+      - name: Package release
         shell: powershell
+        env:
+          WATCHTOWER_SIGNING_KEY: ${{ secrets.WATCHTOWER_SIGNING_KEY }}
         run: |
-          Compress-Archive -Path ./publish/* -DestinationPath ./WatchTower-${{ steps.version.outputs.VERSION_NUMBER }}.zip
+          # Same packaging as release.yml: distributable zip + self-update manifest + checksums.
+          # Signing needs PowerShell 7, so prefer pwsh when the runner has it.
+          $packageArgs = @('-File', './build/package.ps1',
+            '-Version', '${{ steps.version.outputs.VERSION_NUMBER }}',
+            '-Repository', '${{ github.repository }}',
+            '-OutputDir', 'artifacts', '-PublishDir', './publish')
+          if (Get-Command pwsh -ErrorAction SilentlyContinue) { pwsh -NoProfile @packageArgs }
+          else { powershell -NoProfile -ExecutionPolicy Bypass @packageArgs }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
@@ -287,4 +297,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: WatchTower ${{ steps.version.outputs.VERSION }}
           generate_release_notes: true
-          files: ./WatchTower-*.zip
+          files: |
+            artifacts/WatchTower-*.zip
+            artifacts/watchtower-update.json
+            artifacts/SHA256SUMS.txt

@@ -1,0 +1,39 @@
+WATCHTOWER — server monitoring agent for Windows
+=================================================
+
+Requirements: Windows Server 2016+ / Windows 10+ (x64). No .NET installation is needed.
+
+INSTALL (on the server, in an elevated PowerShell)
+  1. Extract this zip anywhere (e.g. C:\Temp\WatchTower).
+  2. Run:   powershell -ExecutionPolicy Bypass -File .\install.ps1
+     - installs to C:\Program Files\WatchTower, data in C:\ProgramData\WatchTower
+     - asks you for a web console password
+  3. Open the web console: Start menu > "WatchTower Console"
+     (or browse to http://127.0.0.1:8750 on the server, or run: WatchTower.exe open)
+  4. Configure email alerts, watched services / IIS app pools, thresholds and the
+     optional Visibility Portal connection from the console.
+
+UNATTENDED / FLEET INSTALL
+  .\install.ps1 -ConfigFile .\watchtower.seed.json -AdminPassword <SecureString>
+  The seed file is plain JSON with the same keys as appsettings.json, e.g.:
+    {
+      "Email": { "SmtpHost": "smtp.example.com", "Username": "alerts", "Password": "...",
+                 "FromAddress": "watchtower@example.com", "ToAddresses": ["ops@example.com"] },
+      "VisibilityPortal": { "Enabled": true, "BaseUrl": "https://portal.example.com",
+                            "AgentId": "SRV-01", "AgentToken": "<token from the portal>" }
+    }
+  Secrets in it are encrypted on import. Delete the seed file afterwards.
+
+UPGRADE
+  Use the console (Settings > Updates > Download update) or re-run install.ps1 from a newer
+  zip. Settings, history and logs are kept.
+
+USEFUL COMMANDS (from C:\Program Files\WatchTower)
+  WatchTower.exe status          service state, version, folders, console address
+  WatchTower.exe open            open the web console
+  WatchTower.exe set-password    reset the console password
+  WatchTower.exe restart         restart the service
+  WatchTower.exe uninstall       remove the service (add --purge-data to delete all data)
+  WatchTower.exe --help          everything else
+
+Documentation: https://github.com/angatiabenson/watch-tower
