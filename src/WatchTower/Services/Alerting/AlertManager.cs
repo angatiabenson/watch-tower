@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
@@ -52,9 +50,10 @@ public sealed class AlertManager : IAlertManager
     /// <summary>
     /// Serialises raising and closing per alert key, so the open/resolved lifecycle of one key is
     /// never interleaved (e.g. a retirement and a raise of the same key). Deliveries never take it,
-    /// and no code path takes two, so it cannot deadlock with the delivery worker.
+    /// and no code path takes two, so it cannot deadlock with the delivery worker. A key's lock
+    /// only exists while it is held or waited for.
     /// </summary>
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly KeyedAsyncLock _keyLocks = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Keeps <see cref="ProcessPendingAsync"/> runs from overlapping.</summary>
     private readonly SemaphoreSlim _processGate = new(1, 1);
@@ -98,6 +97,9 @@ public sealed class AlertManager : IAlertManager
         lock (_gate)
             return Deliveries().Values.OrderBy(d => d.CreatedAt).ToList();
     }
+
+    /// <summary>Alert keys whose lifecycle lock is held or waited for right now (tests).</summary>
+    internal int KeyLockCount => _keyLocks.Count;
 
     /// <summary>Deliveries claimed by a sender right now (tests).</summary>
     internal int InFlightCount
@@ -854,23 +856,7 @@ public sealed class AlertManager : IAlertManager
             d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Takes the per-key lifecycle lock (see <see cref="_keyLocks"/>).</summary>
-    private async Task<KeyLock> LockKeyAsync(AlertKey key, CancellationToken ct)
-    {
-        var semaphore = _keyLocks.GetOrAdd(key.Value, _ => new SemaphoreSlim(1, 1));
-        await semaphore.WaitAsync(ct);
-        return new KeyLock(semaphore);
-    }
-
-    private sealed class KeyLock(SemaphoreSlim semaphore) : IDisposable
-    {
-        private int _released;
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _released, 1) == 0)
-                semaphore.Release();
-        }
-    }
+    private Task<IDisposable> LockKeyAsync(AlertKey key, CancellationToken ct) => _keyLocks.LockAsync(key.Value, ct);
 
     private void RemoveNoticesLocked(string key)
     {
