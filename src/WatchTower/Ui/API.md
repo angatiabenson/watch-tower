@@ -136,6 +136,11 @@ keep. Responses:
 
 * `POST /api/actions/test-email` → `200 { "ok": true, "message": "..." }` / `200 { "ok": false, "message": "..." }`
   (uses the saved settings — save first).
+* `POST /api/actions/enroll` body `{ "code": "WT1.…" }` (enrollment code from the portal's "Add server"
+  dialog) → `200 { "portalUrl", "agentId", "restartRequired": true, "warnings": [..] }` — saves and enables
+  the portal connection (token encrypted); offer Restart now. `400 { "error" }` for a bad code,
+  `400 { "errors" }` when the resulting configuration is invalid. UI: a "Connect with an enrollment code"
+  box at the top of the Visibility Portal section.
 * `POST /api/actions/restart` → `202 { "message": "..." }` (the console goes away for a few
   seconds; poll `GET /api/auth/state` until it answers again, then reload) or
   `409 { "error": "..." }` when not running as a service.

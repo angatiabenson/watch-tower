@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 
 using WatchTower.Configuration.Settings;
 using WatchTower.Hosting;
+using WatchTower.Portal;
 using WatchTower.Ui;
 
 namespace WatchTower.Cli;
@@ -71,6 +72,7 @@ public static class WatchTowerCli
         root.Subcommands.Add(BuildSetPassword(ctx));
         root.Subcommands.Add(BuildApplyUpdate(ctx));
         root.Subcommands.Add(BuildImportLegacy(ctx));
+        root.Subcommands.Add(BuildEnroll(ctx));
 
         var parseResult = root.Parse(args);
         var config = new InvocationConfiguration
@@ -457,8 +459,19 @@ public static class WatchTowerCli
             throw new CliException($"Invalid JSON in '{file.FullName}': {ex.Message}");
         }
 
-        // Merge + validate + write under the store lock, so a concurrent console edit cannot
-        // slip in between validation and the write.
+        var written = MergeValidated(paths, patch, $"'{file.Name}'", validateOnly);
+        output.WriteLine(written
+            ? $"Imported settings from {file.FullName} into {paths.SettingsFilePath}."
+            : $"{file.FullName} is valid.");
+    }
+
+    /// <summary>
+    /// Merges <paramref name="patch"/> into the operator settings after validating the resulting
+    /// configuration — read, merge, validate and write under the store lock, so a concurrent
+    /// console edit cannot slip in between. Returns whether anything was written.
+    /// </summary>
+    internal static bool MergeValidated(WatchTowerPaths paths, JsonObject patch, string what, bool validateOnly = false)
+    {
         var report = new StartupValidator.Report([], []);
         var store = new JsonSettingsStore(paths.SettingsFilePath);
         var written = store.TryUpdateAsync(doc =>
@@ -469,12 +482,55 @@ public static class WatchTowerCli
         }).GetAwaiter().GetResult();
 
         if (!report.IsValid)
-            throw new CliException($"'{file.Name}' would produce an invalid configuration; nothing was imported:" +
+            throw new CliException($"{what} would produce an invalid configuration; nothing was changed:" +
                                    Environment.NewLine + " - " + string.Join(Environment.NewLine + " - ", report.Errors));
+        return written;
+    }
 
-        output.WriteLine(written
-            ? $"Imported settings from {file.FullName} into {paths.SettingsFilePath}."
-            : $"{file.FullName} is valid.");
+    private static Command BuildEnroll(CliContext ctx)
+    {
+        var code = new Argument<string>("code") { Description = "Enrollment code from the portal's Add server dialog (WT1.…)." };
+        var check = new Option<bool>("--check") { Description = "Only validate the code; change nothing." };
+        var noRestart = new Option<bool>("--no-restart") { Description = "Do not restart the service afterwards." };
+        var cmd = new Command("enroll", "Connect this server to a Visibility Portal using an enrollment code.")
+        {
+            code, check, noRestart,
+        };
+        cmd.SetAction(parse =>
+        {
+            if (!EnrollmentCode.TryParse(parse.GetValue(code), out var enrollment, out var error))
+                throw new CliException(error);
+
+            var output = ctx.Output;
+            if (parse.GetValue(check))
+            {
+                output.WriteLine($"Valid enrollment code for agent '{enrollment.AgentId}' at {enrollment.Url}.");
+                return 0;
+            }
+
+            RequireAdministrator();
+            var paths = ctx.PathsOf(parse);
+            paths.EnsureDirectories();
+            DataDirectorySecurity.Harden(paths.DataDirectory);
+            MergeValidated(paths, enrollment.ToSettingsPatch(), "The enrollment code");
+            output.WriteLine($"Connected to {enrollment.Url} as agent '{enrollment.AgentId}' (token stored encrypted).");
+            if (enrollment.Url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                output.WriteLine("warning: the portal uses plain HTTP; the agent token will travel unencrypted.");
+
+            var installer = new ServiceInstaller(ctx.ServiceNameOf(parse), output);
+            if (!parse.GetValue(noRestart) && installer.GetStatus() == System.ServiceProcess.ServiceControllerStatus.Running)
+            {
+                installer.Stop(TimeSpan.FromSeconds(90));
+                installer.Start(TimeSpan.FromSeconds(90));
+                output.WriteLine("Service restarted; the agent will appear in the portal within a minute.");
+            }
+            else
+            {
+                output.WriteLine("Restart the service to apply ('WatchTower restart').");
+            }
+            return 0;
+        });
+        return cmd;
     }
 
     private static StartupValidator.Report ValidateCandidate(WatchTowerPaths paths, JsonObject operatorDoc)

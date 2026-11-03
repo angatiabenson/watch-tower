@@ -13,6 +13,7 @@ public static class UiEndpoints
 {
     public sealed record PasswordRequest(string? Password);
     public sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
+    public sealed record EnrollRequest(string? Code);
 
     public static void Map(WebApplication app)
     {
@@ -105,6 +106,31 @@ public static class UiEndpoints
             return Results.Ok(sent
                 ? new { ok = true, message = "Test email sent. Check the recipients' inboxes (and spam folders)." }
                 : new { ok = false, message = "The test email could not be sent. Check the SMTP settings, then the logs for details." });
+        });
+
+        api.MapPost("/actions/enroll", async (EnrollRequest body, ConfigService config, CancellationToken ct) =>
+        {
+            if (!Portal.EnrollmentCode.TryParse(body.Code, out var code, out var error))
+                return Error(StatusCodes.Status400BadRequest, error);
+
+            var changes = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["VisibilityPortal:Enabled"] = System.Text.Json.JsonSerializer.SerializeToElement(true),
+                ["VisibilityPortal:BaseUrl"] = System.Text.Json.JsonSerializer.SerializeToElement(code.Url),
+                ["VisibilityPortal:AgentId"] = System.Text.Json.JsonSerializer.SerializeToElement(code.AgentId),
+                ["VisibilityPortal:AgentToken"] = System.Text.Json.JsonSerializer.SerializeToElement(code.Token),
+                ["VisibilityPortal:Tls:RequireTls"] = System.Text.Json.JsonSerializer.SerializeToElement(code.RequireTls),
+            };
+            var result = await config.ApplyAsync(new ConfigUpdateRequest { Changes = changes }, ct);
+            return result.Success
+                ? Results.Ok(new
+                {
+                    portalUrl = code.Url,
+                    agentId = code.AgentId,
+                    restartRequired = result.RestartRequired,
+                    warnings = result.Warnings,
+                })
+                : Results.BadRequest(new { errors = result.Errors });
         });
 
         api.MapPost("/actions/restart", (IAgentRestarter restarter) =>

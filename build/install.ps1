@@ -15,6 +15,10 @@
     .\install.ps1
 
 .EXAMPLE
+    # Install and connect to a Visibility Portal in one step (code from the portal's "Add server"):
+    .\install.ps1 -EnrollmentCode WT1.eyJ2IjoxLC...
+
+.EXAMPLE
     # Unattended (GPO, Intune, SCCM, Ansible, Invoke-Command), pre-configured for a portal:
     .\install.ps1 -ConfigFile .\watchtower.seed.json -AdminPassword (ConvertTo-SecureString $pw -AsPlainText -Force)
 
@@ -37,6 +41,10 @@ param(
 
     # JSON settings to merge into the operator settings (portal URL, agent ID/token, SMTP...).
     [string] $ConfigFile,
+
+    # Enrollment code from the portal's "Add server" dialog (WT1....): connects this server to
+    # the portal in one step.
+    [string] $EnrollmentCode,
 
     # Web console administrator password. Prompted for when omitted and no password exists yet.
     [SecureString] $AdminPassword,
@@ -99,6 +107,9 @@ if ($ConfigFile) {
     # Checked by the NEW version against its own defaults; nothing is written.
     Invoke-WatchTower (@('config', 'validate', $ConfigFile) + $common) -Exe $newExe
 }
+if ($EnrollmentCode) {
+    Invoke-WatchTower (@('enroll', $EnrollmentCode, '--check') + $common) -Exe $newExe
+}
 
 $settings = (& $newExe config path @common | Select-Object -Last 1)
 $hasPassword = (Test-Path $settings) -and ((Get-Content $settings -Raw) -match 'AdminPasswordHash')
@@ -148,6 +159,8 @@ try {
     $installArgs = @('install') + $common
     if ($ConfigFile) { $installArgs += @('--config', $ConfigFile) }
     Invoke-WatchTower $installArgs
+
+    if ($EnrollmentCode) { Invoke-WatchTower (@('enroll', $EnrollmentCode, '--no-restart') + $common) }
 
     if ($plain) { Invoke-WatchTower (@('set-password', '--password-stdin') + $common) -StandardInput $plain }
 
