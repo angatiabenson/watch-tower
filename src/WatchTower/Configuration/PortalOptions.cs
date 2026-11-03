@@ -49,6 +49,9 @@ public class CommandPollOptions
 
     /// <summary>Tolerance for clock differences between agent and portal when validating IssuedAt.</summary>
     public int ClockSkewSeconds { get; set; } = 300;
+
+    /// <summary>Completed/failed command rows are purged once older than this many days. 0 keeps them forever.</summary>
+    public int RetentionDays { get; set; } = 30;
 }
 
 public class RemoteConfigOptions

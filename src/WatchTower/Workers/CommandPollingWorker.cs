@@ -19,7 +19,17 @@ public class CommandPollingWorker : BackgroundService
     private readonly IOptionsMonitor<PortalOptions> _options;
     private readonly IOptionsMonitor<ServiceMonitorOptions> _serviceOptions;
     private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _appPoolOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<CommandPollingWorker> _logger;
+
+    /// <summary>How often finished command rows older than the retention window are purged.</summary>
+    internal static readonly TimeSpan PurgeInterval = TimeSpan.FromHours(1);
+
+    internal const string InterruptedMessage =
+        "Agent stopped while the command was executing; its outcome is unknown";
+
+    private bool _interruptedRecovered;
+    private DateTime _lastPurge = DateTime.MinValue;
 
     public CommandPollingWorker(
         IPortalClient portalClient,
@@ -28,6 +38,7 @@ public class CommandPollingWorker : BackgroundService
         IOptionsMonitor<PortalOptions> options,
         IOptionsMonitor<ServiceMonitorOptions> serviceOptions,
         IOptionsMonitor<ApplicationPoolMonitorOptions> appPoolOptions,
+        TimeProvider timeProvider,
         ILogger<CommandPollingWorker> logger)
     {
         _portalClient = portalClient;
@@ -36,8 +47,11 @@ public class CommandPollingWorker : BackgroundService
         _options = options;
         _serviceOptions = serviceOptions;
         _appPoolOptions = appPoolOptions;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -50,7 +64,7 @@ public class CommandPollingWorker : BackgroundService
                 await RunCycleAsync(stoppingToken);
 
                 var pollInterval = Math.Max(1, _options.CurrentValue.CommandPoll.PollIntervalSeconds);
-                await Task.Delay(TimeSpan.FromSeconds(pollInterval), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(pollInterval), _timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -59,7 +73,7 @@ public class CommandPollingWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Command Polling Worker");
-                await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(15), _timeProvider, stoppingToken);
             }
         }
 
@@ -73,9 +87,62 @@ public class CommandPollingWorker : BackgroundService
         if (!opts.Enabled || opts.CommandPoll.PollIntervalSeconds <= 0)
             return;
 
+        if (!_interruptedRecovered)
+        {
+            await RecoverInterruptedCommandsAsync(ct);
+            _interruptedRecovered = true;
+        }
+
         await PollAndExecuteCommandsAsync(opts, ct);
         await ExecuteDueScheduledCommandsAsync(opts, ct);
         await RetryUnsentResultsAsync(ct);
+        await PurgeFinishedCommandsAsync(opts);
+    }
+
+    /// <summary>
+    /// Commands left in 'Executing' by a previous run (crash, kill, reboot mid-command) would
+    /// otherwise stay there forever and the portal would never learn their fate. Fail them with
+    /// an explicit message and report that result. Runs once, before this process executes anything.
+    /// </summary>
+    private async Task RecoverInterruptedCommandsAsync(CancellationToken ct)
+    {
+        IReadOnlyList<CommandResultDto> interrupted;
+        try
+        {
+            interrupted = await _commandStore.FailInterruptedCommandsAsync(InterruptedMessage);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to recover commands interrupted by a previous shutdown");
+            return;
+        }
+
+        foreach (var result in interrupted)
+        {
+            if (ct.IsCancellationRequested) break;
+            _logger.LogWarning(
+                "Command {CommandId} was still executing when the agent stopped; marked failed", result.CommandId);
+            await ReportResultAsync(result, ct);
+        }
+    }
+
+    private async Task PurgeFinishedCommandsAsync(PortalOptions opts)
+    {
+        var retentionDays = opts.CommandPoll.RetentionDays;
+        if (retentionDays <= 0 || UtcNow - _lastPurge < PurgeInterval)
+            return;
+
+        _lastPurge = UtcNow;
+        try
+        {
+            var purged = await _commandStore.PurgeFinishedCommandsAsync(UtcNow - TimeSpan.FromDays(retentionDays));
+            if (purged > 0)
+                _logger.LogInformation("Purged {Count} finished command(s) older than {Days} days", purged, retentionDays);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to purge finished commands");
+        }
     }
 
     private async Task PollAndExecuteCommandsAsync(PortalOptions opts, CancellationToken ct)
@@ -95,51 +162,82 @@ public class CommandPollingWorker : BackgroundService
 
         _logger.LogInformation("Received {Count} command(s) from portal", commands.Count);
 
-        foreach (var command in commands)
+        foreach (var received in commands)
         {
             if (ct.IsCancellationRequested) break;
+            if (received == null) continue;
 
-            // Replay protection: reject stale commands at receipt (before persisting).
-            // Validated on IssuedAt, not ScheduledAt, so legitimately deferred commands
-            // (recent IssuedAt, future ScheduledAt) still pass.
-            if (!IsFresh(command, opts, out var freshnessReason))
-            {
-                _logger.LogWarning(
-                    "Rejecting command {CommandId} (ActionType={ActionType}): {Reason}",
-                    command.CommandId, command.ActionType, freshnessReason);
-                continue;
-            }
-
-            // INSERT OR IGNORE: duplicate delivery is silently discarded
-            await _commandStore.SaveCommandAsync(command);
-
-            // Acknowledge receipt immediately (fire-and-forget on failure)
+            // Each command is isolated: a malformed or throwing command must not abort the rest
+            // of the batch (they would otherwise only be retried on the next poll, if at all).
             try
             {
-                var ack = new AcknowledgeCommandDto(command.CommandId, DateTime.UtcNow.ToString("O"));
-                await _portalClient.AcknowledgeCommandAsync(ack, ct);
+                await ReceiveCommandAsync(received, opts, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex,
-                    "Failed to acknowledge command {CommandId} to portal (non-fatal)",
-                    command.CommandId);
+                _logger.LogError(ex, "Failed to process command {CommandId} (ActionType={ActionType})",
+                    received.CommandId, received.ActionType);
             }
-
-            // Check scheduled execution (parse as UTC regardless of portal formatting)
-            if (!string.IsNullOrEmpty(command.ScheduledAt) &&
-                DateTime.TryParse(command.ScheduledAt, CultureInfo.InvariantCulture,
-                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var scheduled) &&
-                scheduled > DateTime.UtcNow.AddSeconds(10))
-            {
-                _logger.LogInformation(
-                    "Command {CommandId} scheduled for {ScheduledAt}, deferring",
-                    command.CommandId, scheduled);
-                continue;
-            }
-
-            await ExecuteCommandAsync(command, opts, ct);
         }
+    }
+
+    private async Task ReceiveCommandAsync(AgentCommandDto received, PortalOptions opts, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(received.CommandId))
+        {
+            _logger.LogWarning("Ignoring command without a CommandId (ActionType={ActionType})", received.ActionType);
+            return;
+        }
+
+        // A portal may omit Parameters (JSON null); treat that as "no parameters".
+        var command = received.Parameters == null
+            ? received with { Parameters = new Dictionary<string, string>() }
+            : received;
+
+        // Replay protection: reject stale commands at receipt (before persisting).
+        // Validated on IssuedAt, not ScheduledAt, so legitimately deferred commands
+        // (recent IssuedAt, future ScheduledAt) still pass.
+        if (!IsFresh(command, opts, out var freshnessReason))
+        {
+            _logger.LogWarning(
+                "Rejecting command {CommandId} (ActionType={ActionType}): {Reason}",
+                command.CommandId, command.ActionType, freshnessReason);
+            return;
+        }
+
+        // INSERT OR IGNORE: duplicate delivery is silently discarded
+        await _commandStore.SaveCommandAsync(command);
+
+        // Acknowledge receipt immediately (fire-and-forget on failure)
+        try
+        {
+            var ack = new AcknowledgeCommandDto(command.CommandId, UtcNow.ToString("O"));
+            await _portalClient.AcknowledgeCommandAsync(ack, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to acknowledge command {CommandId} to portal (non-fatal)",
+                command.CommandId);
+        }
+
+        // Check scheduled execution (parse as UTC regardless of portal formatting)
+        if (!string.IsNullOrEmpty(command.ScheduledAt) &&
+            DateTime.TryParse(command.ScheduledAt, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var scheduled) &&
+            scheduled > UtcNow.AddSeconds(10))
+        {
+            _logger.LogInformation(
+                "Command {CommandId} scheduled for {ScheduledAt}, deferring",
+                command.CommandId, scheduled);
+            return;
+        }
+
+        await ExecuteCommandAsync(command, opts, ct);
     }
 
     private async Task ExecuteCommandAsync(
@@ -169,7 +267,7 @@ public class CommandPollingWorker : BackgroundService
             "Executing command {CommandId} ActionType={ActionType}",
             command.CommandId, command.ActionType);
 
-        var executedAt = DateTime.UtcNow;
+        var executedAt = UtcNow;
         Portal.Actions.ActionResult actionResult;
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -231,17 +329,40 @@ public class CommandPollingWorker : BackgroundService
             {
                 if (ct.IsCancellationRequested) break;
 
-                var parameters = JsonSerializer.Deserialize<Dictionary<string, string>>(record.ParamsJson)
-                    ?? new Dictionary<string, string>();
+                // Isolated per command, like the poll path: one bad record must not block the rest.
+                try
+                {
+                    Dictionary<string, string>? parameters;
+                    try
+                    {
+                        parameters = JsonSerializer.Deserialize<Dictionary<string, string>>(record.ParamsJson);
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogError(ex, "Scheduled command {CommandId} has unreadable parameters", record.CommandId);
+                        var unreadable = new AgentCommandDto(record.CommandId, record.ActionType,
+                            new Dictionary<string, string>(), record.ScheduledAt, record.IssuedAt ?? record.ReceivedAt);
+                        await FailCommandAsync(unreadable, "Stored command parameters are unreadable", ct);
+                        continue;
+                    }
 
-                var command = new AgentCommandDto(
-                    record.CommandId,
-                    record.ActionType,
-                    parameters,
-                    record.ScheduledAt,
-                    record.IssuedAt ?? record.ReceivedAt);
+                    var command = new AgentCommandDto(
+                        record.CommandId,
+                        record.ActionType,
+                        parameters ?? new Dictionary<string, string>(),
+                        record.ScheduledAt,
+                        record.IssuedAt ?? record.ReceivedAt);
 
-                await ExecuteCommandAsync(command, opts, ct);
+                    await ExecuteCommandAsync(command, opts, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to execute scheduled command {CommandId}", record.CommandId);
+                }
             }
         }
         catch (Exception ex)
@@ -258,7 +379,12 @@ public class CommandPollingWorker : BackgroundService
             return true; // freshness check disabled
 
         if (string.IsNullOrWhiteSpace(command.IssuedAt))
-            return true; // cannot validate without an issue time
+        {
+            // Accepting it would let a replayed/forged command without an issue time bypass
+            // the age check entirely.
+            reason = "missing IssuedAt (required while MaxCommandAgeSeconds > 0)";
+            return false;
+        }
 
         if (!DateTime.TryParse(command.IssuedAt, CultureInfo.InvariantCulture,
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var issued))
@@ -267,7 +393,7 @@ public class CommandPollingWorker : BackgroundService
             return false;
         }
 
-        var now = DateTime.UtcNow;
+        var now = UtcNow;
         var skew = TimeSpan.FromSeconds(opts.CommandPoll.ClockSkewSeconds);
 
         if (issued > now + skew)
@@ -311,7 +437,8 @@ public class CommandPollingWorker : BackgroundService
         AgentCommandDto command, string paramKey, IReadOnlyList<string> allowList, string label, out string reason)
     {
         reason = string.Empty;
-        if (!command.Parameters.TryGetValue(paramKey, out var target) || string.IsNullOrWhiteSpace(target))
+        if (command.Parameters is null || !command.Parameters.TryGetValue(paramKey, out var target) ||
+            string.IsNullOrWhiteSpace(target))
         {
             reason = $"missing {paramKey}";
             return false;
@@ -327,7 +454,7 @@ public class CommandPollingWorker : BackgroundService
     private async Task FailCommandAsync(AgentCommandDto command, string message, CancellationToken ct)
     {
         await _commandStore.MarkFailedAsync(command.CommandId, message);
-        var result = new CommandResultDto(command.CommandId, false, message, DateTime.UtcNow.ToString("O"));
+        var result = new CommandResultDto(command.CommandId, false, message, UtcNow.ToString("O"));
         await ReportResultAsync(result, ct);
     }
 

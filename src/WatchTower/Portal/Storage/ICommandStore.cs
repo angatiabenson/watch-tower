@@ -17,6 +17,18 @@ public interface ICommandStore
     Task<IReadOnlyList<AgentCommandRecord>> GetUnsentResultsAsync();
     Task MarkResultSentAsync(string commandId);
     Task<IReadOnlyList<AgentCommandRecord>> GetDueScheduledCommandsAsync();
+
+    /// <summary>
+    /// Marks every command still in 'Executing' (left behind by a previous process) as
+    /// 'Failed' with <paramref name="message"/> and returns the stored (unsent) results.
+    /// </summary>
+    Task<IReadOnlyList<CommandResultDto>> FailInterruptedCommandsAsync(string message);
+
+    /// <summary>
+    /// Deletes 'Completed'/'Failed' commands that finished before <paramref name="olderThanUtc"/>.
+    /// Returns the number of rows deleted.
+    /// </summary>
+    Task<int> PurgeFinishedCommandsAsync(DateTime olderThanUtc);
 }
 
 public record AgentCommandRecord(

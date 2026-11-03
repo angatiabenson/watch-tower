@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 
 using Moq;
 
@@ -20,9 +21,13 @@ public class CommandPollingWorkerTests
     private readonly Mock<IOptionsMonitor<PortalOptions>> _options = new();
     private readonly Mock<IOptionsMonitor<ServiceMonitorOptions>> _serviceOptions = new();
     private readonly Mock<IOptionsMonitor<ApplicationPoolMonitorOptions>> _poolOptions = new();
+    private readonly FakeTimeProvider _time = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
 
     public CommandPollingWorkerTests()
     {
+        _store.Setup(s => s.FailInterruptedCommandsAsync(It.IsAny<string>()))
+            .ReturnsAsync(Array.Empty<CommandResultDto>());
+        _store.Setup(s => s.PurgeFinishedCommandsAsync(It.IsAny<DateTime>())).ReturnsAsync(0);
         _options.Setup(o => o.CurrentValue).Returns(new PortalOptions
         {
             Enabled = true,
@@ -42,9 +47,9 @@ public class CommandPollingWorkerTests
             .ReturnsAsync(true);
     }
 
-    private static AgentCommandDto Command(string id, ActionType type = ActionType.ForceConfigSync,
+    private AgentCommandDto Command(string id, ActionType type = ActionType.ForceConfigSync,
         Dictionary<string, string>? parameters = null) =>
-        new(id, (int)type, parameters ?? new Dictionary<string, string>(), null, DateTime.UtcNow.ToString("O"));
+        new(id, (int)type, parameters ?? new Dictionary<string, string>(), null, _time.GetUtcNow().UtcDateTime.ToString("O"));
 
     private void Poll(params AgentCommandDto[] commands) =>
         _portal.Setup(p => p.PollCommandsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(commands);
@@ -60,6 +65,7 @@ public class CommandPollingWorkerTests
         _options.Object,
         _serviceOptions.Object,
         _poolOptions.Object,
+        _time,
         NullLogger<CommandPollingWorker>.Instance);
 
     [Fact]
@@ -114,5 +120,121 @@ public class CommandPollingWorkerTests
         await CreateWorker().RunCycleAsync(CancellationToken.None);
 
         _store.Verify(s => s.MarkResultSentAsync("c9"), Times.Once);
+    }
+
+    [Fact]
+    public async Task ThrowingCommand_DoesNotAbortTheRestOfTheBatch()
+    {
+        Poll(Command("bad"), Command("good"));
+        ResultAccepted(true);
+        _store.Setup(s => s.SaveCommandAsync(It.Is<AgentCommandDto>(c => c.CommandId == "bad")))
+            .ThrowsAsync(new InvalidOperationException("database is locked"));
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.MarkCompletedAsync("good", It.IsAny<CommandResultDto>()), Times.Once);
+        _store.Verify(s => s.MarkCompletedAsync("bad", It.IsAny<CommandResultDto>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task NullParameters_AreTreatedAsEmpty()
+    {
+        Poll(Command("c1") with { Parameters = null! });
+        ResultAccepted(true);
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _handler.Verify(h => h.ExecuteAsync(
+            It.Is<IReadOnlyDictionary<string, string>>(p => p != null && p.Count == 0), It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.SaveCommandAsync(It.Is<AgentCommandDto>(c => c.Parameters != null)), Times.Once);
+    }
+
+    [Fact]
+    public async Task NullParameters_OnTargetedCommand_IsRejectedNotCrashed()
+    {
+        Poll(Command("c1", ActionType.ServiceRestart) with { Parameters = null! });
+        ResultAccepted(true);
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.MarkFailedAsync("c1", It.Is<string>(m => m.Contains("missing ServiceName"))), Times.Once);
+    }
+
+    [Fact]
+    public async Task MissingIssuedAt_IsRejected_WhenAgeCheckEnabled()
+    {
+        Poll(Command("c1") with { IssuedAt = "" });
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.SaveCommandAsync(It.IsAny<AgentCommandDto>()), Times.Never);
+        _handler.Verify(h => h.ExecuteAsync(It.IsAny<IReadOnlyDictionary<string, string>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task MissingIssuedAt_IsAccepted_WhenAgeCheckDisabled()
+    {
+        _options.Setup(o => o.CurrentValue).Returns(new PortalOptions
+        {
+            Enabled = true,
+            CommandPoll = new CommandPollOptions { PollIntervalSeconds = 30, MaxCommandAgeSeconds = 0 },
+        });
+        Poll(Command("c1") with { IssuedAt = "" });
+        ResultAccepted(true);
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.MarkCompletedAsync("c1", It.IsAny<CommandResultDto>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task InterruptedCommands_AreFailedAndReportedOnceAtStartup()
+    {
+        Poll();
+        ResultAccepted(true);
+        var interrupted = new CommandResultDto("stuck", false, CommandPollingWorker.InterruptedMessage, "2026-01-01T00:00:00Z");
+        _store.Setup(s => s.FailInterruptedCommandsAsync(It.IsAny<string>())).ReturnsAsync(new[] { interrupted });
+        var worker = CreateWorker();
+
+        await worker.RunCycleAsync(CancellationToken.None);
+        await worker.RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.FailInterruptedCommandsAsync(It.IsAny<string>()), Times.Once);
+        _portal.Verify(p => p.ReportCommandResultAsync(interrupted, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkResultSentAsync("stuck"), Times.Once);
+    }
+
+    [Fact]
+    public async Task FinishedCommands_ArePurgedHourlyAfterRetention()
+    {
+        Poll();
+        var worker = CreateWorker();
+        var expectedCutoff = _time.GetUtcNow().UtcDateTime - TimeSpan.FromDays(30);
+
+        await worker.RunCycleAsync(CancellationToken.None);
+        await worker.RunCycleAsync(CancellationToken.None);
+        _store.Verify(s => s.PurgeFinishedCommandsAsync(expectedCutoff), Times.Once);
+
+        _time.Advance(CommandPollingWorker.PurgeInterval);
+        await worker.RunCycleAsync(CancellationToken.None);
+        _store.Verify(s => s.PurgeFinishedCommandsAsync(It.IsAny<DateTime>()), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task ScheduledCommandWithUnreadableParameters_IsFailed_AndOthersStillRun()
+    {
+        Poll();
+        ResultAccepted(true);
+        var now = _time.GetUtcNow().UtcDateTime.ToString("O");
+        _store.Setup(s => s.GetDueScheduledCommandsAsync()).ReturnsAsync(new[]
+        {
+            new AgentCommandRecord("broken", 302, "{not json", "Received", now, now, now, null),
+            new AgentCommandRecord("fine", 302, "{}", "Received", now, now, now, null),
+        });
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.MarkFailedAsync("broken", It.Is<string>(m => m.Contains("unreadable"))), Times.Once);
+        _store.Verify(s => s.MarkCompletedAsync("fine", It.IsAny<CommandResultDto>()), Times.Once);
     }
 }

@@ -217,6 +217,63 @@ public class SqliteCommandStore : ICommandStore, IDisposable
         return Task.FromResult<IReadOnlyList<AgentCommandRecord>>(results);
     }
 
+    public Task<IReadOnlyList<CommandResultDto>> FailInterruptedCommandsAsync(string message)
+    {
+        var results = new List<CommandResultDto>();
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+
+            var ids = new List<string>();
+            using (var select = conn.CreateCommand())
+            {
+                select.Transaction = tx;
+                select.CommandText = "SELECT command_id FROM agent_commands WHERE status = 'Executing'";
+                using var reader = select.ExecuteReader();
+                while (reader.Read())
+                    ids.Add(reader.GetString(0));
+            }
+
+            var now = DateTime.UtcNow.ToString("O");
+            foreach (var id in ids)
+            {
+                var result = new CommandResultDto(id, false, message, now);
+                using var update = conn.CreateCommand();
+                update.Transaction = tx;
+                update.CommandText =
+                    @"UPDATE agent_commands
+                      SET status = 'Failed', executed_at = @now, result_json = @result
+                      WHERE command_id = @id AND status = 'Executing'";
+                update.Parameters.AddWithValue("@now", now);
+                update.Parameters.AddWithValue("@result", JsonSerializer.Serialize(result));
+                update.Parameters.AddWithValue("@id", id);
+                if (update.ExecuteNonQuery() > 0)
+                    results.Add(result);
+            }
+
+            tx.Commit();
+        }
+        return Task.FromResult<IReadOnlyList<CommandResultDto>>(results);
+    }
+
+    public Task<int> PurgeFinishedCommandsAsync(DateTime olderThanUtc)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            // executed_at/received_at are stored as UTC "O" strings, so lexicographic order is
+            // chronological. Rows that never recorded executed_at fall back to received_at.
+            cmd.CommandText =
+                @"DELETE FROM agent_commands
+                  WHERE status IN ('Completed', 'Failed')
+                    AND COALESCE(executed_at, received_at) < @cutoff";
+            cmd.Parameters.AddWithValue("@cutoff", olderThanUtc.ToUniversalTime().ToString("O"));
+            return Task.FromResult(cmd.ExecuteNonQuery());
+        }
+    }
+
     private static AgentCommandRecord ReadRecord(SqliteDataReader r) =>
         new(
             r.GetString(0),

@@ -74,6 +74,37 @@ public class SqliteCommandStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task FailInterruptedCommands_FailsOnlyExecutingRows_AndQueuesTheirResults()
+    {
+        await _store.SaveCommandAsync(Command("stuck"));
+        await _store.SaveCommandAsync(Command("waiting"));
+        await _store.TryBeginExecutionAsync("stuck");
+
+        var results = await _store.FailInterruptedCommandsAsync("agent stopped");
+
+        results.Should().ContainSingle(r => r.CommandId == "stuck" && !r.Success && r.Message == "agent stopped");
+        var unsent = await _store.GetUnsentResultsAsync();
+        unsent.Should().ContainSingle(r => r.CommandId == "stuck" && r.Status == "Failed");
+        (await _store.TryBeginExecutionAsync("waiting")).Should().BeTrue();
+        (await _store.FailInterruptedCommandsAsync("again")).Select(r => r.CommandId).Should().Equal("waiting");
+    }
+
+    [Fact]
+    public async Task PurgeFinishedCommands_DeletesOnlyOldFinishedRows()
+    {
+        await _store.SaveCommandAsync(Command("done"));
+        await _store.SaveCommandAsync(Command("pending"));
+        await _store.MarkFailedAsync("done", "x");
+
+        // Cutoff in the past: nothing is old enough yet.
+        (await _store.PurgeFinishedCommandsAsync(DateTime.UtcNow.AddDays(-30))).Should().Be(0);
+
+        // Cutoff in the future: the finished row qualifies, the pending one never does.
+        (await _store.PurgeFinishedCommandsAsync(DateTime.UtcNow.AddMinutes(1))).Should().Be(1);
+        (await _store.TryBeginExecutionAsync("pending")).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task GetDueScheduledCommands_ExcludesAlreadyClaimed()
     {
         await _store.SaveCommandAsync(Command("past", DateTime.UtcNow.AddMinutes(-5).ToString("O")));
