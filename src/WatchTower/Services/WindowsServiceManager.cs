@@ -19,20 +19,37 @@ public class WindowsServiceManager : IWindowsServiceManager
         try
         {
             using var sc = new ServiceController(serviceName);
-            var status = sc.Status.ToString();
-            var isRunning = sc.Status == ServiceControllerStatus.Running;
+            var state = sc.Status;
+
+            // StartPending/ContinuePending are reported verbatim (not running, not down): the
+            // monitor treats them as transitional and re-checks on the next poll.
             return new ServiceStatus(
                 DateTime.UtcNow,
                 serviceName,
                 sc.DisplayName,
-                status,
-                isRunning
+                state.ToString(),
+                state == ServiceControllerStatus.Running,
+                TryGetStartType(sc, serviceName)
             );
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to query service: {ServiceName}", serviceName);
             return new ServiceStatus(DateTime.UtcNow, serviceName, serviceName, "NotFound", false);
+        }
+    }
+
+    private string? TryGetStartType(ServiceController sc, string serviceName)
+    {
+        try
+        {
+            return sc.StartType.ToString();
+        }
+        catch (Exception ex)
+        {
+            // Needs SERVICE_QUERY_CONFIG; a missing right must not turn a status read into "NotFound".
+            _logger.LogDebug(ex, "Failed to query start type of service: {ServiceName}", serviceName);
+            return null;
         }
     }
 

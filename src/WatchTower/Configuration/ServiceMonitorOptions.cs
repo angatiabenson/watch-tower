@@ -13,5 +13,9 @@ public class ServiceMonitorOptions
     /// before declaring success. Catches crash-looping services that come up then die.</summary>
     public int StableStateDelaySeconds { get; set; } = 5;
 
+    /// <summary>After the agent starts, down services are only recorded (not restarted) for this
+    /// long, so delayed-auto-start services coming up after a reboot are not restarted mid-start.</summary>
+    public int StartupGraceSeconds { get; set; } = 120;
+
     public List<string> WatchedServices { get; set; } = new();
 }
