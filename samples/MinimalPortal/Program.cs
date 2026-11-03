@@ -1,0 +1,82 @@
+// MinimalPortal entry point: hosting, limits and the first agent's enrollment code.
+// The agent contract itself lives in PortalApi.cs.
+
+using System.Text.Json.Serialization;
+
+namespace WatchTower.Samples.MinimalPortal;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        var app = MinimalPortalApp.Build(args);
+        var state = app.Services.GetRequiredService<PortalState>();
+
+        // One agent is created at start-up so you can enroll a server right away. More can be
+        // created with POST /admin/agents (see README.md).
+        var agentId = app.Configuration["AgentId"] ?? "agent-01";
+        var first = state.CreateAgent(agentId);
+
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            Console.WriteLine();
+            Console.WriteLine($"MinimalPortal is listening on {string.Join(", ", app.Urls)}");
+            Console.WriteLine($"Public URL (in enrollment codes): {state.Options.PublicUrl}");
+            Console.WriteLine($"Admin key (header X-Admin-Key):   {state.Options.AdminKey}");
+            Console.WriteLine();
+            Console.WriteLine($"Enrollment code for agent '{first.AgentId}':");
+            Console.WriteLine($"  {first.EnrollmentCode}");
+            Console.WriteLine();
+            Console.WriteLine("On the Windows server (elevated):");
+            Console.WriteLine($"  WatchTower.exe enroll {first.EnrollmentCode}");
+            Console.WriteLine("Or, without Windows, with the simulator:");
+            Console.WriteLine($"  dotnet run --project samples/AgentSimulator -- --code {first.EnrollmentCode}");
+            Console.WriteLine();
+        });
+
+        app.Run();
+    }
+}
+
+public static class MinimalPortalApp
+{
+    /// <summary>
+    /// Builds the portal. Tests pass <paramref name="configure"/> to swap Kestrel for an in-memory
+    /// TestServer; everything else is identical to what <c>dotnet run</c> serves.
+    /// </summary>
+    public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure = null)
+    {
+        var builder = WebApplication.CreateBuilder(args);
+
+        // Default address when neither --urls nor ASPNETCORE_URLS is given.
+        if (string.IsNullOrEmpty(builder.Configuration["urls"]))
+            builder.WebHost.UseUrls("http://localhost:5080");
+
+        // A default batch (500 CPU + 500 RAM samples plus snapshots) is well under 1 MB; the
+        // agent's Outbox:MaxBatchSize can be raised by operators, so leave generous headroom.
+        // A 413 is a failure to the agent: it retries and finally drops the batch.
+        builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = 16 * 1024 * 1024);
+
+        builder.Services.ConfigureHttpJsonOptions(o =>
+            o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
+
+        var options = new PortalOptions();
+        var urls = builder.Configuration["urls"] ?? "http://localhost:5080";
+        options.PublicUrl = builder.Configuration["PublicUrl"] ?? urls.Split(';')[0];
+        if (builder.Configuration["AdminKey"] is { Length: > 0 } adminKey)
+            options.AdminKey = adminKey;
+
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<PortalState>();
+
+        configure?.Invoke(builder);
+
+        var app = builder.Build();
+        app.MapGet("/", () => Results.Text(
+            "WatchTower MinimalPortal. Agent API under /api/v1/agent/, admin API under /admin/ (see README.md)."));
+        app.MapAgentApi();
+        app.MapAdminApi();
+        return app;
+    }
+}
