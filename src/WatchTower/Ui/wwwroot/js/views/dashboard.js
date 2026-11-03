@@ -3,11 +3,15 @@ import {
   h, icon, statusTag, fmtPct, fmt1, fmt0, fmtGb, fmtMbAsGb, fmtDateTime, fmtRelative, fmtTime,
   fmtDuration, humanize, isNum, plural,
 } from '../dom.js';
-import { api } from '../api.js';
-import { notice, restartButton, copyButton } from '../ui.js';
+import { api, msUntilServer } from '../api.js';
+import { notice, restartButton, copyButton, busy, toast } from '../ui.js';
 import { stripChart, usageBar } from '../chart.js';
+import { watchInstall, secondsLeft, countdownRunning } from './updates.js';
 
 const REFRESH_MS = 10_000;
+// One-time notice after an install: dismissal is remembered per completedAt.
+const RESULT_SEEN_KEY = 'wt.updateResultSeen';
+const RESULT_MAX_AGE_MS = 7 * 86400e3;
 
 export function mount(root, _params, ctx) {
   let timer = 0;
@@ -15,11 +19,15 @@ export function mount(root, _params, ctx) {
   let destroyed = false;
   let lastOk = null;
   const prevKeys = new Map();
+  let lastStatus = null;
+  let updTicker = 0;
+  let updEls = null; // parts of the live countdown notice
 
   const updated = h('span', { class: 'muted small' }, 'Loading…');
   const refreshBtn = h('button', { class: 'btn btn-sm', type: 'button', onclick: () => refresh() }, icon('refresh'), 'Refresh');
   const errorSlot = h('div');
   const slots = {
+    update: h('div', { class: 'dash-update' }),
     health: h('div', { class: 'dash-health' }),
     strip: h('section', { class: 'stats-strip', 'aria-label': 'Summary' }),
     readouts: h('section', { class: 'readouts', 'aria-label': 'Processor and memory' }),
@@ -32,8 +40,12 @@ export function mount(root, _params, ctx) {
   };
 
   ctx.setActions(updated, refreshBtn);
+  // Announces a scheduled restart once (the ticking countdown title itself is not live).
+  const live = h('p', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
   root.append(
+    live,
     errorSlot,
+    slots.update,
     slots.health,
     slots.strip,
     h('div', { class: 'dash-grid' },
@@ -43,9 +55,10 @@ export function mount(root, _params, ctx) {
   // readers from re-announcing unchanged banners every 10 seconds.
   const patch = (name, data, build) => {
     const key = JSON.stringify(data ?? null);
-    if (prevKeys.get(name) === key) return;
+    if (prevKeys.get(name) === key) return false;
     prevKeys.set(name, key);
     slots[name].replaceChildren(...[build(data)].flat().filter(Boolean));
+    return true;
   };
 
   async function refresh() {
@@ -63,6 +76,13 @@ export function mount(root, _params, ctx) {
     } catch (e) {
       if (e.name === 'AbortError' || destroyed) return;
       if (e.status === 401) return;
+      // The service stopping at the end of an update countdown (or mid-install) is expected.
+      const u = lastStatus?.update;
+      if (u && (u.phase === 'Installing' || (countdownRunning(u) && msUntilServer(u.restartAt) < 2000))) {
+        stopUpdateTicker();
+        watchInstall({ version: u.availableVersion, from: lastStatus.agent?.version });
+        return;
+      }
       errorSlot.replaceChildren(notice('critical', 'Live status is unavailable',
         lastOk ? `${e.message} Showing data from ${fmtTime(lastOk.toISOString(), true)}.` : e.message, null, { live: true }));
       updated.textContent = lastOk ? `Last updated ${fmtTime(lastOk.toISOString(), true)}` : 'Not loaded';
@@ -77,13 +97,21 @@ export function mount(root, _params, ctx) {
   }
 
   const onVisibility = () => {
-    if (document.visibilityState === 'visible') refresh();
-    else { clearTimeout(timer); controller?.abort(); }
+    if (document.visibilityState === 'visible') {
+      refresh();
+      if (updEls) startUpdateTicker();
+    } else {
+      clearTimeout(timer);
+      controller?.abort();
+      stopUpdateTicker();
+    }
   };
   document.addEventListener('visibilitychange', onVisibility);
 
   function render(s) {
     const m = s.metrics || {};
+    lastStatus = s;
+    renderUpdateSlot();
     patch('health', { health: s.health, restart: s.restartPending }, renderHealth);
     patch('strip', { svc: m.services, pools: m.appPools, disks: m.disks, inc: s.incidents }, renderStrip);
     patch('readouts', { cpu: m.cpu, ram: m.ram }, renderReadouts);
@@ -96,11 +124,117 @@ export function mount(root, _params, ctx) {
     patch('incidents', s.incidents, renderIncidents);
   }
 
+  // ---------------------------------------------------------------- update notice
+  function resultSeen(r) {
+    try { return localStorage.getItem(RESULT_SEEN_KEY) === r.completedAt; } catch { return false; }
+  }
+
+  function renderUpdateSlot() {
+    const s = lastStatus;
+    const u = s?.update || null;
+    const r = u?.lastResult;
+    const showResult = !!(r && !resultSeen(r) && Date.now() - Date.parse(r.completedAt) < RESULT_MAX_AGE_MS);
+    // A console-mode agent cannot install, so its countdown would never end in a restart.
+    const canRestart = s?.agent?.isWindowsService !== false;
+    const changed = patch('update', {
+      phase: u?.phase, v: u?.availableVersion, at: countdownRunning(u) && canRestart ? u.restartAt : null,
+      r: showResult ? r : null, cur: s?.agent?.version, console: !canRestart,
+    }, (d) => renderUpdate(d, u));
+    if (changed) {
+      live.textContent = updEls
+        ? `WatchTower will restart in ${secondsLeft(u.restartAt)} seconds to install version ${updEls.v}.`
+        : '';
+    }
+    if (u?.phase === 'Installing') watchInstall({ version: u.availableVersion, from: s.agent?.version });
+    if (updEls) startUpdateTicker(); else stopUpdateTicker();
+  }
+
+  function renderUpdate(d, u) {
+    updEls = null;
+    if (!u) return null;
+    const out = [];
+    const v = d.v;
+    const view = (label = 'View update') => h('a', { class: 'btn btn-sm', href: '#/updates' }, label);
+    if (d.at) {
+      const cancelBtn = h('button', { class: 'btn btn-sm', type: 'button', onclick: (e) => cancelUpdate(e.currentTarget) }, 'Cancel');
+      const n = notice('warning', `Restarting to install ${v}`,
+        'Monitoring pauses for about a minute while WatchTower installs the update.', [cancelBtn, view('Details')]);
+      updEls = { title: n.querySelector('.notice-title'), cancelBtn, v, lastSec: -1 };
+      tickUpdate();
+      out.push(n);
+    } else if (d.phase === 'Installing') {
+      out.push(notice('warning', `Installing WatchTower ${v || 'update'}…`, 'The service is restarting. This console reconnects on its own.'));
+    } else if (v && d.phase === 'Downloading') {
+      out.push(notice('info', `Downloading WatchTower ${v}`, null, view()));
+    } else if (v && d.phase === 'ReadyToInstall') {
+      out.push(notice('info', `WatchTower ${v} is ready to install`, d.console
+        ? 'The update is downloaded, but it can only be installed while WatchTower runs as a Windows service.'
+        : 'The update is downloaded and verified.', view()));
+    } else if (v) {
+      out.push(notice('info', `WatchTower ${v} is available`, d.cur ? `This server runs ${d.cur}.` : null, view()));
+    }
+    if (d.r) out.push(resultNotice(d.r));
+    return out;
+  }
+
+  function resultNotice(r) {
+    const dismiss = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Dismiss update result', title: 'Dismiss' }, icon('close'));
+    dismiss.addEventListener('click', () => {
+      try { localStorage.setItem(RESULT_SEEN_KEY, r.completedAt); } catch { /* storage blocked: hide until the next refresh */ }
+      prevKeys.delete('update');
+      slots.update.replaceChildren(...[...slots.update.children].filter((c) => !c.contains(dismiss)));
+      root.focus({ preventScroll: true });
+    });
+    const when = `Finished ${fmtDateTime(r.completedAt)}.`;
+    if (r.success) {
+      return notice('ok', `Updated to ${r.toVersion}`, `${r.message || `Updated from ${r.fromVersion} to ${r.toVersion}.`} ${when}`, dismiss);
+    }
+    const msg = r.message || `The update to ${r.toVersion} failed.`;
+    const restored = /restor|roll/i.test(msg) ? '' : ` The previous version (${r.fromVersion}) was restored.`;
+    return notice('critical', `Update to ${r.toVersion} did not complete`, `${msg}${restored} ${when}`,
+      [h('a', { class: 'btn btn-sm', href: '#/updates' }, 'Details'), dismiss]);
+  }
+
+  function tickUpdate() {
+    const u = lastStatus?.update;
+    if (!updEls || !u?.restartAt) return;
+    const sec = secondsLeft(u.restartAt);
+    if (sec === updEls.lastSec) return;
+    updEls.lastSec = sec;
+    if (sec > 0) {
+      updEls.title.textContent = `Restarting to install ${updEls.v} in ${sec} s`;
+    } else {
+      updEls.title.textContent = `Installing WatchTower ${updEls.v} now…`;
+      updEls.cancelBtn.disabled = true;
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 1500); // a failed refresh here opens the install progress
+    }
+  }
+
+  function startUpdateTicker() {
+    if (!updTicker && document.visibilityState === 'visible') updTicker = setInterval(tickUpdate, 250);
+  }
+  function stopUpdateTicker() { clearInterval(updTicker); updTicker = 0; }
+
+  async function cancelUpdate(btn) {
+    await busy(btn, 'Cancelling…', async () => {
+      try {
+        await api.cancelUpdate();
+        toast('Restart cancelled. Install the update from the Updates page when you are ready.', { kind: 'info' });
+      } catch (e) {
+        if (e.status !== 401) toast(e.message, { kind: 'error' });
+      }
+    });
+    await refresh();
+    (slots.update.querySelector('a, button') || root).focus({ preventScroll: true });
+  }
+
   refresh();
 
   return {
     unmount() {
       destroyed = true;
+      stopUpdateTicker();
       clearTimeout(timer);
       controller?.abort();
       document.removeEventListener('visibilitychange', onVisibility);

@@ -69,6 +69,7 @@ const ICONS = {
   monitor: 'M3 4h18v12H3zM8 20h8M12 16v4',
   chevron: 'M6 15l6-6 6 6',
   copy: 'M9 9h11v11H9zM5 15H4V4h11v1',
+  download: 'M12 4v11M7 10.5l5 5 5-5M5 20h14',
 };
 
 export function icon(name, cls = '') {

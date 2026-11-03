@@ -81,6 +81,33 @@ export function confirmDialog({ title, message, confirmLabel = 'Continue', cance
 // ---------- restart flow ----------
 let restarting = false;
 
+/** True when the service answers GET /api/auth/state (no auth needed, no side effects). */
+export async function serviceAlive() {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 4000);
+  try {
+    const r = await fetch('/api/auth/state', { cache: 'no-store', credentials: 'same-origin', signal: ctl.signal });
+    return r.ok;
+  } catch { return false; } finally { clearTimeout(t); }
+}
+
+/**
+ * Wait for the running process to stop answering (up to downMs; a restart quicker than the
+ * polling is fine), then for a process to answer again (up to upMs). onStage('up') fires
+ * when the second wait starts. Resolves true once the service is back, false on timeout.
+ */
+export async function waitForServiceCycle({ downMs, upMs, onStage }) {
+  const downBy = Date.now() + downMs;
+  while (Date.now() < downBy && (await serviceAlive())) await sleep(1000);
+  onStage?.('up');
+  const upBy = Date.now() + upMs;
+  while (Date.now() < upBy) {
+    if (await serviceAlive()) return true;
+    await sleep(1500);
+  }
+  return false;
+}
+
 /** POST /api/actions/restart, then wait for the service to go away and come back, then reload. */
 export async function restartWatchTower() {
   if (restarting) return;
@@ -110,27 +137,15 @@ export async function restartWatchTower() {
   document.body.append(dlg);
   dlg.showModal();
 
-  const alive = async () => {
-    try {
-      const r = await fetch('/api/auth/state', { cache: 'no-store', credentials: 'same-origin' });
-      return r.ok;
-    } catch { return false; }
-  };
-
-  // Phase 1: wait (up to 15 s) for the old process to stop answering.
-  const downBy = Date.now() + 15000;
-  while (Date.now() < downBy && (await alive())) await sleep(500);
-
-  // Phase 2: wait for the new process to answer.
-  status.textContent = 'Waiting for the service to come back…';
-  const upBy = Date.now() + 120000;
-  while (Date.now() < upBy) {
-    if (await alive()) {
-      status.textContent = 'Back online. Reloading…';
-      location.reload();
-      return;
-    }
-    await sleep(1500);
+  const back = await waitForServiceCycle({
+    downMs: 15000,
+    upMs: 120000,
+    onStage: (stage) => { if (stage === 'up') status.textContent = 'Waiting for the service to come back…'; },
+  });
+  if (back) {
+    status.textContent = 'Back online. Reloading…';
+    location.reload();
+    return;
   }
 
   restarting = false;

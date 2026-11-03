@@ -246,7 +246,29 @@ function onStatus(status) {
   shell.hostEl.title = parts.join(', ');
   shell.hostEl.setAttribute('aria-label', parts.join(', '));
   if (typeof status.restartPending === 'boolean') setRestartPending(status.restartPending);
+  if (status.update !== undefined) {
+    const u = status.update || {};
+    setUpdateMarker(u.availableVersion && u.phase !== 'Installing' ? u.availableVersion : null);
+  }
   updateDocTitle();
+}
+
+/** Small accent marker on the Updates nav item while a newer version is available. */
+function setUpdateMarker(version) {
+  const a = shell.navLinks.get('updates');
+  if (!a) return;
+  let mark = a.querySelector('.nav-mark');
+  if (!version) {
+    mark?.remove();
+    a.title = 'Updates';
+    return;
+  }
+  if (!mark) {
+    mark = h('span', { class: 'nav-mark' }, h('span', { class: 'sr-only' }));
+    a.append(mark);
+  }
+  mark.firstChild.textContent = `, version ${version} available`;
+  a.title = `Updates: WatchTower ${version} is available`;
 }
 
 function setRestartPending(pending) {
@@ -275,6 +297,7 @@ const ctx = {
   onStatus,
   setActions(...nodes) { shell.actionsEl?.replaceChildren(...nodes.flat().filter(Boolean)); },
   setRestartPending,
+  setUpdateMarker,
   get restartPending() { return shell.restartPending; },
   navigate(hash) { location.hash = hash; },
 };
