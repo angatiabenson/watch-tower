@@ -8,6 +8,7 @@ using Microsoft.Extensions.Time.Testing;
 using Moq;
 
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
@@ -198,5 +199,75 @@ public class EndpointMonitorWorkerTests
         proto.Status.Should().Be("Down");
         proto.HasResponseTimeMs.Should().BeFalse();
         proto.Detail.Should().Be("HTTP 503");
+    }
+
+    // ── Liveness ───────────────────────────────────────────────────────────
+
+    /// <summary>Advances the clock in worker ticks, giving the background loop time to run each step.</summary>
+    private async Task RunWorkerFor(TimeSpan duration)
+    {
+        for (var elapsed = TimeSpan.Zero; elapsed < duration; elapsed += EndpointMonitorWorker.Tick)
+        {
+            _time.Advance(EndpointMonitorWorker.Tick);
+            await Task.Delay(5, Ct);
+        }
+    }
+
+    [Fact]
+    public async Task Liveness_IsReportedEachCycle_AndAHungCheckMakesTheWorkerStale()
+    {
+        var health = new WorkerHealthRegistry(_time);
+        var hung = new TaskCompletionSource<EndpointProbeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probes = 0;
+        _probe.Setup(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()))
+            .Returns(() => Interlocked.Increment(ref probes) == 1
+                ? Task.FromResult(new EndpointProbeResult(EndpointState.Up, "HTTP 200", 5))
+                : hung.Task);
+        using var worker = new EndpointMonitorWorker(_probe.Object, _store.Object, TestAlerts.Create(_store.Object, _time, _dispatcher),
+            _options, _time, NullLogger<EndpointMonitorWorker>.Instance, health);
+
+        var startedAt = _time.GetUtcNow();
+        await worker.StartAsync(Ct);
+        await RunWorkerFor(TimeSpan.FromSeconds(55));
+
+        var entry = health.Snapshot().Should().ContainSingle().Subject;
+        entry.Worker.Should().Be(WorkerNames.Endpoints);
+        entry.Interval.Should().Be(TimeSpan.FromSeconds(10) + EndpointMonitorWorker.CycleSlack, "the check's timeout plus slack");
+        entry.IsStale.Should().BeFalse();
+        entry.LastSuccessAt.Should().BeAfter(startedAt, "every completed cycle reports, not only the start");
+
+        // The second run of the check (due at 60 s) never returns: the loop is stuck.
+        for (var i = 0; i < 200 && Volatile.Read(ref probes) < 2; i++)
+            await RunWorkerFor(EndpointMonitorWorker.Tick);
+        Volatile.Read(ref probes).Should().Be(2);
+        health.GetStale().Should().BeEmpty("not yet");
+        _time.Advance(WorkerHealthRegistry.StaleAfter(entry.Interval) + EndpointMonitorWorker.Tick);
+        health.GetStale().Should().ContainSingle().Which.Worker.Should().Be(WorkerNames.Endpoints);
+
+        hung.SetResult(new EndpointProbeResult(EndpointState.Up, "HTTP 200", 5));
+        for (var i = 0; i < 100 && health.GetStale().Count > 0; i++)
+            await Task.Delay(10, Ct);
+        health.GetStale().Should().BeEmpty("the loop reports again once the cycle completes");
+        await worker.StopAsync(Ct);
+    }
+
+    [Theory]
+    [InlineData(new int[0], 15)]
+    [InlineData(new[] { 10 }, 25)]
+    [InlineData(new[] { 10, 120 }, 135)]
+    [InlineData(new[] { 500 }, 135)] // invalid timeouts are clamped
+    public void LivenessInterval_CoversTheLongestCheckTimeout(int[] timeouts, int expectedSeconds)
+    {
+        var options = new EndpointMonitorOptions
+        {
+            Endpoints = timeouts.Select((t, i) => new EndpointCheckOptions { Name = $"c{i}", TimeoutSeconds = t }).ToList(),
+        };
+
+        var interval = EndpointMonitorWorker.LivenessInterval(options);
+
+        interval.Should().Be(TimeSpan.FromSeconds(expectedSeconds));
+        // A cycle that legitimately waits out a 120 s timeout is not mistaken for a dead worker.
+        WorkerHealthRegistry.StaleAfter(interval).Should().BeGreaterThan(
+            TimeSpan.FromSeconds(Math.Min(timeouts.DefaultIfEmpty(0).Max(), EndpointCheck.MaxTimeoutSeconds)) * 2);
     }
 }

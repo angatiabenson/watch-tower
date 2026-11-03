@@ -39,14 +39,14 @@ public sealed class EndpointMonitorWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Endpoint Monitor Worker started");
-        workerHealth?.ReportSuccess(WorkerNames.Endpoints, Tick);
+        ReportAlive();
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
-                workerHealth?.ReportSuccess(WorkerNames.Endpoints, Tick);
+                ReportAlive();
                 await Task.Delay(Tick, timeProvider, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -61,6 +61,26 @@ public sealed class EndpointMonitorWorker(
         }
 
         logger.LogInformation("Endpoint Monitor Worker stopped");
+    }
+
+    /// <summary>Slack on top of the longest check timeout (connection setup, redirects, recording).</summary>
+    internal static readonly TimeSpan CycleSlack = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>). A cycle waits
+    /// for every due check, so a healthy one can take as long as the longest check timeout: the
+    /// reported interval covers that, and a loop that hangs or keeps failing is still reported
+    /// stale after <see cref="WorkerHealthRegistry.StaleAfter"/> of it.
+    /// </summary>
+    private void ReportAlive() => workerHealth?.ReportSuccess(WorkerNames.Endpoints, LivenessInterval(options.CurrentValue));
+
+    internal static TimeSpan LivenessInterval(EndpointMonitorOptions opts)
+    {
+        var longest = opts.Endpoints.Count == 0
+            ? 0
+            : opts.Endpoints.Max(e => Math.Clamp(e.TimeoutSeconds, 1, EndpointCheck.MaxTimeoutSeconds));
+        var cycle = TimeSpan.FromSeconds(longest) + CycleSlack;
+        return cycle > Tick ? cycle : Tick;
     }
 
     /// <summary>Runs every check that is due, concurrently. Exposed for testing.</summary>
