@@ -42,8 +42,14 @@ jobs:
       - name: Resolve version
         id: version
         shell: pwsh
+        # Untrusted values reach the script only through environment variables, never by
+        # template expansion into the script text (avoids script injection).
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $v = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}' }
+          $v = if ($env:EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_VERSION } else { $env:REF_NAME }
           $v = $v.TrimStart('v')
           if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.\-]+)?$') { throw "Invalid version '$v'" }
           "number=$v" >> $env:GITHUB_OUTPUT

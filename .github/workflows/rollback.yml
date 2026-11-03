@@ -61,9 +61,13 @@ jobs:
       - name: Determine backup to restore
         id: resolve
         shell: powershell
+        # The dispatch input reaches the script via the environment, never by template
+        # expansion into the script text (avoids script injection on the self-hosted runner).
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          $backupRoot = "${{ env.BACKUP_ROOT }}"
-          $requestedVersion = "${{ inputs.version }}"
+          $backupRoot = $env:BACKUP_ROOT
+          $requestedVersion = $env:REQUESTED_VERSION
 
           if (-not (Test-Path $backupRoot)) {
             Write-Host "::error::No backup directory found at $backupRoot"
