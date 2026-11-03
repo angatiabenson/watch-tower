@@ -90,6 +90,29 @@ public class RamMonitorWorkerTests
             Times.Once);
     }
 
+    [Fact]
+    public async Task PollOnce_RamUnavailable_SkipsCycleWithoutRecording()
+    {
+        _metricsProvider.Setup(m => m.GetRamMetric())
+            .Returns(new RamMetric(_time.GetUtcNow().UtcDateTime, double.NaN, double.NaN, 0));
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddRamMetric(It.IsAny<RamMetric>()), Times.Never);
+        _metricsStore.Verify(s => s.AddIncident(It.IsAny<Incident>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PollOnce_RamProviderThrows_SkipsCycleInsteadOfFailing()
+    {
+        _metricsProvider.Setup(m => m.GetRamMetric()).Throws(new InvalidOperationException("counter registry corrupt"));
+
+        var act = () => CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        _metricsStore.Verify(s => s.AddRamMetric(It.IsAny<RamMetric>()), Times.Never);
+    }
+
     private RamMonitorWorker CreateWorker() => new(
         _metricsProvider.Object,
         _metricsStore.Object,

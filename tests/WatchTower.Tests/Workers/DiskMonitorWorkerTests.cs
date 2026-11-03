@@ -1,3 +1,5 @@
+using AwesomeAssertions;
+
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -80,6 +82,18 @@ public class DiskMonitorWorkerTests
 
         _emailService.Verify(e => e.SendEmailAsync(
             It.Is<string>(s => s.Contains("Disk Queue High")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_DiskQueueProviderThrows_StillRecordsDiskUsage()
+    {
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(new List<DiskMetric> { new(_time.GetUtcNow().UtcDateTime, "C:\\", 500, 300, 40) });
+        _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Throws(new InvalidOperationException("counters unavailable"));
+
+        var act = () => CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        _metricsStore.Verify(s => s.AddDiskMetric(It.IsAny<DiskMetric>()), Times.Once);
     }
 
     private DiskMonitorWorker CreateWorker() => new(

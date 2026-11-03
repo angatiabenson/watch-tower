@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
@@ -21,6 +23,7 @@ public class RamMonitorWorker : BackgroundService
 
     private DateTime? _firstBreachTime;
     private DateTime _lastEmergencyEmail = DateTime.MinValue;
+    private bool _metricUnavailable;
 
     public RamMonitorWorker(
         ISystemMetricsProvider metricsProvider,
@@ -78,7 +81,9 @@ public class RamMonitorWorker : BackgroundService
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
-        var ramMetric = _metricsProvider.GetRamMetric();
+        if (!TryReadRam(out var ramMetric))
+            return;
+
         _metricsStore.AddRamMetric(ramMetric);
 
         _logger.LogDebug(
@@ -118,6 +123,38 @@ public class RamMonitorWorker : BackgroundService
         {
             _firstBreachTime = null;
         }
+    }
+
+    /// <summary>
+    /// Reads RAM usage, tolerating an unavailable metric source (NaN usage or a throwing
+    /// provider): the cycle is skipped with a warning on the first miss of a streak.
+    /// </summary>
+    private bool TryReadRam([NotNullWhen(true)] out RamMetric? ramMetric)
+    {
+        RamMetric? read = null;
+        try
+        {
+            read = _metricsProvider.GetRamMetric();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading RAM usage threw");
+        }
+
+        if (read != null && double.IsFinite(read.UsagePercent))
+        {
+            if (_metricUnavailable)
+                _logger.LogInformation("RAM usage is available again");
+            _metricUnavailable = false;
+            ramMetric = read;
+            return true;
+        }
+
+        if (!_metricUnavailable)
+            _logger.LogWarning("RAM usage is unavailable; skipping this cycle");
+        _metricUnavailable = true;
+        ramMetric = null;
+        return false;
     }
 
     private async Task HandleEmergencyAsync(

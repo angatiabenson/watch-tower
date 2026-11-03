@@ -130,6 +130,40 @@ public class CpuMonitorWorkerTests
             Times.Exactly(2));
     }
 
+    [Fact]
+    public async Task PollOnce_CpuUnavailable_SkipsCycleWithoutRecording()
+    {
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(float.NaN);
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddCpuMetric(It.IsAny<CpuMetric>()), Times.Never);
+        _metricsStore.Verify(s => s.AddIncident(It.IsAny<Incident>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PollOnce_CpuProviderThrows_SkipsCycleInsteadOfFailing()
+    {
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Throws(new InvalidOperationException("counter registry corrupt"));
+
+        var act = () => CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        _metricsStore.Verify(s => s.AddCpuMetric(It.IsAny<CpuMetric>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PollOnce_CpuRecoversAfterOutage_RecordsAgain()
+    {
+        _metricsProvider.SetupSequence(m => m.GetCpuUsage()).Returns(float.NaN).Returns(10f);
+        var worker = CreateWorker();
+
+        await worker.PollOnceAsync(CancellationToken.None);
+        await worker.PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddCpuMetric(It.Is<CpuMetric>(m => m.UsagePercent == 10)), Times.Once);
+    }
+
     private CpuMonitorWorker CreateWorker() => new(
         _metricsProvider.Object,
         _metricsStore.Object,

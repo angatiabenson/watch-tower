@@ -1,3 +1,5 @@
+using AwesomeAssertions;
+
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -65,6 +67,17 @@ public class NetworkMonitorWorkerTests
 
         _emailService.Verify(e => e.SendEmailAsync(
             It.Is<string>(s => s.Contains("Network Saturated")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_ProviderThrows_SkipsCycleInsteadOfFailing()
+    {
+        _metricsProvider.Setup(m => m.GetNetworkMetrics()).Throws(new InvalidOperationException("counters unavailable"));
+
+        var act = () => CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        _metricsStore.Verify(s => s.AddNetworkMetric(It.IsAny<NetworkMetric>()), Times.Never);
     }
 
     private NetworkMonitorWorker CreateWorker() => new(

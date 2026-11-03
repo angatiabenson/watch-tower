@@ -79,7 +79,16 @@ public class NetworkMonitorWorker : BackgroundService
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
-        var networkMetrics = _metricsProvider.GetNetworkMetrics();
+        IReadOnlyList<NetworkMetric> networkMetrics;
+        try
+        {
+            networkMetrics = _metricsProvider.GetNetworkMetrics();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Reading network metrics failed; skipping this cycle");
+            return;
+        }
 
         foreach (var metric in networkMetrics)
         {

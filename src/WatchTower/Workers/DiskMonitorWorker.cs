@@ -80,7 +80,8 @@ public class DiskMonitorWorker : BackgroundService
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
-        var diskMetrics = _metricsProvider.GetDiskMetrics();
+        if (!TryRead(_metricsProvider.GetDiskMetrics, "disk usage", out var diskMetrics))
+            return;
 
         foreach (var disk in diskMetrics)
         {
@@ -102,7 +103,9 @@ public class DiskMonitorWorker : BackgroundService
         }
 
         // Disk queue length monitoring
-        var queueMetrics = _metricsProvider.GetDiskQueueMetrics();
+        if (!TryRead(_metricsProvider.GetDiskQueueMetrics, "disk queue length", out var queueMetrics))
+            return;
+
         foreach (var queue in queueMetrics)
         {
             _metricsStore.AddDiskQueueMetric(queue);
@@ -118,6 +121,25 @@ public class DiskMonitorWorker : BackgroundService
             {
                 _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
             }
+        }
+    }
+
+    /// <summary>
+    /// Reads a metric set, skipping the rest of the cycle with a warning (instead of failing the
+    /// iteration) when the underlying source throws.
+    /// </summary>
+    private bool TryRead<T>(Func<IReadOnlyList<T>> read, string what, out IReadOnlyList<T> metrics)
+    {
+        try
+        {
+            metrics = read();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Reading {What} failed; skipping this cycle", what);
+            metrics = Array.Empty<T>();
+            return false;
         }
     }
 

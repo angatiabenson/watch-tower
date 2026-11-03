@@ -21,6 +21,7 @@ public class CpuMonitorWorker : BackgroundService
 
     private DateTime? _firstBreachTime;
     private DateTime _lastEmergencyEmail = DateTime.MinValue;
+    private bool _metricUnavailable;
 
     public CpuMonitorWorker(
         ISystemMetricsProvider metricsProvider,
@@ -78,7 +79,9 @@ public class CpuMonitorWorker : BackgroundService
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
-        var cpuUsage = _metricsProvider.GetCpuUsage();
+        if (!TryReadCpu(out var cpuUsage))
+            return;
+
         var metric = new CpuMetric(UtcNow, cpuUsage);
         _metricsStore.AddCpuMetric(metric);
 
@@ -114,6 +117,37 @@ public class CpuMonitorWorker : BackgroundService
         {
             _firstBreachTime = null;
         }
+    }
+
+    /// <summary>
+    /// Reads CPU usage, tolerating an unavailable metric source (NaN or a throwing provider):
+    /// the cycle is skipped with a warning on the first miss of a streak instead of failing.
+    /// Breach tracking is left untouched so a single missed sample does not reset it.
+    /// </summary>
+    private bool TryReadCpu(out double cpuUsage)
+    {
+        try
+        {
+            cpuUsage = _metricsProvider.GetCpuUsage();
+        }
+        catch (Exception ex)
+        {
+            cpuUsage = double.NaN;
+            _logger.LogDebug(ex, "Reading CPU usage threw");
+        }
+
+        if (double.IsFinite(cpuUsage))
+        {
+            if (_metricUnavailable)
+                _logger.LogInformation("CPU usage is available again");
+            _metricUnavailable = false;
+            return true;
+        }
+
+        if (!_metricUnavailable)
+            _logger.LogWarning("CPU usage is unavailable; skipping this cycle");
+        _metricUnavailable = true;
+        return false;
     }
 
     private async Task HandleEmergencyAsync(
