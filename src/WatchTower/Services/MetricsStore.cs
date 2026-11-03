@@ -83,10 +83,10 @@ public class MetricsStore : IMetricsStore
             _incidents.TryDequeue(out _);
     }
 
-    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId)
+    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc)
     {
         // In-memory cursors are running indices; clear everything that has been
-        // collected. Snapshots and incidents are always cleared.
+        // collected. Snapshots are always cleared; incidents only up to the report cutoff.
         _cpuMetrics.Clear();
         _ramMetrics.Clear();
         _diskMetrics.Clear();
@@ -94,7 +94,16 @@ public class MetricsStore : IMetricsStore
         _networkMetrics.Clear();
         _serviceStatuses.Clear();
         _applicationPoolStatuses.Clear();
-        _incidents.Clear();
+
+        var newer = new List<Incident>();
+        while (_incidents.TryDequeue(out var incident))
+        {
+            if (incident.Timestamp > incidentsUpToUtc)
+                newer.Add(incident);
+        }
+        foreach (var incident in newer)
+            _incidents.Enqueue(incident);
+
         return new PurgeReportResult(CpuTableEmptied: true, RamTableEmptied: true);
     }
 

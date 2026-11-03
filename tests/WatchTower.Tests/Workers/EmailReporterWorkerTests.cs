@@ -1,3 +1,5 @@
+using AwesomeAssertions;
+
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -42,8 +44,81 @@ public class EmailReporterWorkerTests : IDisposable
             ReportPeriod = TimeSpan.FromHours(24)
         });
         _reportBuilder.Setup(r => r.RenderScheduledReportHtml(It.IsAny<ServerReport>())).Returns("<html/>");
-        _metricsStore.Setup(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>()))
+        _metricsStore.Setup(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>(), It.IsAny<DateTime>()))
             .Returns(new PurgeReportResult(true, true));
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
+    }
+
+    private void SendSucceeds(params bool[] outcomes)
+    {
+        var sequence = _emailService.SetupSequence(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()));
+        foreach (var outcome in outcomes)
+            sequence = sequence.ReturnsAsync(outcome);
+    }
+
+    private (EmailReporterWorker Worker, List<TimeSpan> Delays) CreateWorkerRecordingRetries()
+    {
+        var delays = new List<TimeSpan>();
+        var worker = CreateWorker();
+        worker.RetryDelayAsync = (delay, _) =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        };
+        return (worker, delays);
+    }
+
+    [Fact]
+    public async Task RunWithRetries_SendFailure_RetriesWithBackoffUntilSent()
+    {
+        SendSucceeds(false, false, true);
+        var (worker, delays) = CreateWorkerRecordingRetries();
+
+        await worker.RunDailyReportWithRetriesAsync(CancellationToken.None);
+
+        // Previously a failed send meant waiting a full day for the next report.
+        delays.Should().Equal(TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(15));
+        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Exactly(3));
+        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>(), It.IsAny<DateTime>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task RunWithRetries_PersistentFailure_GivesUpAfterFourRetries()
+    {
+        SendSucceeds(false, false, false, false, false, false);
+        var (worker, delays) = CreateWorkerRecordingRetries();
+
+        await worker.RunDailyReportWithRetriesAsync(CancellationToken.None);
+
+        delays.Should().Equal(
+            TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(60));
+        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Exactly(5));
+        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>(), It.IsAny<DateTime>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task RunWithRetries_SmtpNotConfigured_NeitherBuildsNorRetries()
+    {
+        _emailService.Setup(e => e.IsConfigured).Returns(false);
+        var (worker, delays) = CreateWorkerRecordingRetries();
+
+        await worker.RunDailyReportWithRetriesAsync(CancellationToken.None);
+
+        delays.Should().BeEmpty();
+        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Never);
+        _metricsStore.Verify(s => s.Purge(It.IsAny<TimeSpan>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task RunDailyReport_PurgesIncidentsOnlyUpToTheReportSnapshot()
+    {
+        var snapshot = _time.GetUtcNow().UtcDateTime.AddMinutes(-3);
+        _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport { GeneratedAt = snapshot });
+        SendSucceeds(true);
+
+        await CreateWorker().RunDailyReportAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>(), snapshot), Times.Once);
     }
 
     [Fact]
@@ -56,7 +131,7 @@ public class EmailReporterWorkerTests : IDisposable
 
         _emailService.Verify(e => e.SendEmailAsync(
             It.Is<string>(s => s.Contains("Daily Report")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
-        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>()), Times.Once);
+        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>(), It.IsAny<DateTime>()), Times.Once);
     }
 
     [Fact]
@@ -68,7 +143,7 @@ public class EmailReporterWorkerTests : IDisposable
         await CreateWorker().RunDailyReportAsync(CancellationToken.None);
 
         // Reported data must be preserved when the email never sent (only the age-based backstop runs).
-        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>()), Times.Never);
+        _metricsStore.Verify(s => s.PurgeReportedData(It.IsAny<long>(), It.IsAny<long>(), It.IsAny<DateTime>()), Times.Never);
         _metricsStore.Verify(s => s.Purge(It.IsAny<TimeSpan>()), Times.Once);
     }
 
@@ -83,7 +158,7 @@ public class EmailReporterWorkerTests : IDisposable
 
         await CreateWorker().RunDailyReportAsync(CancellationToken.None);
 
-        _metricsStore.Verify(s => s.PurgeReportedData(42L, 7L), Times.Once);
+        _metricsStore.Verify(s => s.PurgeReportedData(42L, 7L, It.IsAny<DateTime>()), Times.Once);
     }
 
     private EmailReporterWorker CreateWorker() => new(

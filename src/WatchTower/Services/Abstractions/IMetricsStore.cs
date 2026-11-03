@@ -27,12 +27,14 @@ public interface IMetricsStore
 
     /// <summary>
     /// Post-report purge. Deletes cpu/ram rows only up to the rowids that have been
-    /// confirmed delivered to the portal (so un-acked rows are never lost), and clears
-    /// all snapshot tables and incidents. Returns which append tables became empty so
-    /// the caller can reset the forwarding cursors (SQLite reuses rowids from 1 once a
-    /// table is emptied).
+    /// confirmed delivered to the portal (so un-acked rows are never lost), clears all
+    /// snapshot tables, and deletes incidents with a timestamp at or before
+    /// <paramref name="incidentsUpToUtc"/> (the report's snapshot time) so incidents raised
+    /// while the report was being built and sent survive for the next report. Returns which
+    /// append tables became empty so the caller can reset the forwarding cursors (SQLite
+    /// reuses rowids from 1 once a table is emptied).
     /// </summary>
-    PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId);
+    PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc);
 
     (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit);
     (long LastRowId, IReadOnlyList<RamMetric> Metrics) GetRamMetricsSince(long afterRowId, int limit);

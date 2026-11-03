@@ -27,6 +27,11 @@ public class ReportBuilder : IReportBuilder
 
     public ServerReport BuildReport(TimeSpan period)
     {
+        // Captured before any data is read: GeneratedAt is the report's snapshot cutoff, and the
+        // post-report purge deletes incidents only up to it. Taking it first means an incident
+        // racing the read can at worst be reported twice, never purged without being reported.
+        var generatedAt = DateTime.UtcNow;
+
         var cpuMetrics = _metricsStore.GetCpuMetrics(period);
         var ramMetrics = _metricsStore.GetRamMetrics(period);
         var diskMetrics = _metricsStore.GetLatestDiskMetrics();
@@ -38,7 +43,7 @@ public class ReportBuilder : IReportBuilder
 
         var report = new ServerReport
         {
-            GeneratedAt = DateTime.UtcNow,
+            GeneratedAt = generatedAt,
             ReportPeriod = period,
             DiskSnapshots = diskMetrics.ToList(),
             DiskQueueSnapshots = diskQueueMetrics.ToList(),

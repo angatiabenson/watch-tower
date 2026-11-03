@@ -485,7 +485,7 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         }
     }
 
-    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId)
+    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc)
     {
         lock (_lock)
         {
@@ -495,8 +495,10 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             // Delete cpu/ram rows only up to the confirmed-delivered rowid. Rows the
             // portal has not yet acknowledged (rowid > forwarded cursor) are preserved
             // so a later send failure can never cause silent data loss. Snapshot tables
-            // (latest-state) and incidents (already queued to the portal as events) are
-            // cleared in full. All in one transaction for atomicity.
+            // (latest-state) are cleared in full. Incidents (already queued to the portal as
+            // events) are deleted only up to the report's snapshot time: anything recorded
+            // after the report was built was not in it and must survive for the next one.
+            // All in one transaction for atomicity.
             using (var cmd = conn.CreateCommand())
             {
                 cmd.Transaction = tx;
@@ -509,10 +511,13 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                     DELETE FROM network_metrics;
                     DELETE FROM service_statuses;
                     DELETE FROM application_pool_statuses;
-                    DELETE FROM incidents;
+                    DELETE FROM incidents WHERE timestamp <= @incidentCutoff;
                 ";
                 cmd.Parameters.AddWithValue("@cpuRow", cpuForwardedRowId);
                 cmd.Parameters.AddWithValue("@ramRow", ramForwardedRowId);
+                // Timestamps are stored as UTC round-trip ("O") strings, so lexicographic
+                // comparison is chronological.
+                cmd.Parameters.AddWithValue("@incidentCutoff", ToUtc(incidentsUpToUtc).ToString("O"));
                 cmd.ExecuteNonQuery();
             }
 
@@ -523,6 +528,13 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             return new PurgeReportResult(cpuEmpty, ramEmpty);
         }
     }
+
+    private static DateTime ToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
 
     private static long CountRows(SqliteConnection conn, SqliteTransaction tx, string table)
     {
