@@ -75,6 +75,8 @@ message AgentEvent {
   int32                    incident_type = 3;
   string                   description   = 4;
   repeated ProcessInfoProto top_processes = 5;
+  optional string          alert_key     = 6;  // alert lifecycle key, e.g. "cpu", "svc:W3SVC"; unset outside an alert
+  optional bool            resolved      = 7;  // false = alert opened/escalated, true = cleared; unset for one-shot events
 }
 message ProcessInfoProto { string name = 1; int32 pid = 2; double cpu_seconds = 3; double memory_mb = 4; double cpu_percent = 5; }
 

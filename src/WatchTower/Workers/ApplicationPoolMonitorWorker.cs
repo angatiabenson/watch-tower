@@ -6,6 +6,7 @@ using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Workers;
 
@@ -13,37 +14,30 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 {
     private readonly IIisApplicationPoolManager _applicationPoolManager;
     private readonly IMetricsStore _metricsStore;
-    private readonly IEmailService _emailService;
-    private readonly IReportBuilder _reportBuilder;
+    private readonly IAlertManager _alerts;
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<ApplicationPoolMonitorOptions> _options;
-    private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ApplicationPoolMonitorWorker> _logger;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
-    private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerPool = new();
     private readonly ConcurrentDictionary<string, byte> _activeOutages = new();
 
     public ApplicationPoolMonitorWorker(
         IIisApplicationPoolManager applicationPoolManager,
         IMetricsStore metricsStore,
-        IEmailService emailService,
-        IReportBuilder reportBuilder,
+        IAlertManager alerts,
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ApplicationPoolMonitorOptions> options,
-        IOptionsMonitor<ReportingOptions> reportingOptions,
         TimeProvider timeProvider,
         ILogger<ApplicationPoolMonitorWorker> logger
     )
     {
         _applicationPoolManager = applicationPoolManager;
         _metricsStore = metricsStore;
-        _emailService = emailService;
-        _reportBuilder = reportBuilder;
+        _alerts = alerts;
         _portalEventPublisher = portalEventPublisher;
         _options = options;
-        _reportingOptions = reportingOptions;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -98,6 +92,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 _consecutiveFailures.TryRemove(applicationPoolName, out _);
                 _activeOutages.TryRemove(applicationPoolName, out _);
                 _logger.LogDebug("Application pool {ApplicationPoolName}: Started", applicationPoolName);
+                await _alerts.ResolveAsync(AlertKey.AppPool(applicationPoolName), ct: ct);
                 continue;
             }
 
@@ -164,8 +159,11 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                         IncidentType.ApplicationPoolStarted,
                         $"IIS application pool '{applicationPoolName}' was found stopped and started successfully"
                     );
-                    _metricsStore.AddIncident(startedIncident);
-                    await _portalEventPublisher.PublishIncidentAsync(startedIncident, ct);
+                    if (!await _alerts.ResolveAsync(AlertKey.AppPool(applicationPoolName), startedIncident, ct))
+                    {
+                        _metricsStore.AddIncident(startedIncident);
+                        await _portalEventPublisher.PublishIncidentAsync(startedIncident, ct);
+                    }
 
                     continue;
                 }
@@ -178,36 +176,20 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 applicationPoolName, failures);
 
             if (failures >= opts.MaxStartAttempts)
-                await HandleEmergencyAsync(applicationPoolName, failures, ct);
+                await RaiseStartFailedAsync(applicationPoolName, failures, ct);
         }
     }
 
-    private async Task HandleEmergencyAsync(
-        string applicationPoolName,
-        int failures,
-        CancellationToken ct
-    )
-    {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastEmergencyPerPool.GetValueOrDefault(applicationPoolName, DateTime.MinValue);
-
-        if (UtcNow - lastEmail < cooldown)
-            return;
-
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.ApplicationPoolStartFailed,
-            $"IIS application pool '{applicationPoolName}' failed to start after {failures} attempts"
-        );
-
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-
-        // Per-pool cooldown starts once the incident is recorded, regardless of the email outcome.
-        _lastEmergencyPerPool[applicationPoolName] = UtcNow;
-
-        await EmergencyEmail.TrySendAsync(
-            _emailService, _reportBuilder, incident,
-            $"[WatchTower] IIS App Pool Down: {applicationPoolName}", _logger, ct);
-    }
+    /// <summary>Start attempts keep failing: raise (or keep open) the <c>pool:&lt;name&gt;</c> alert.</summary>
+    private Task RaiseStartFailedAsync(string applicationPoolName, int failures, CancellationToken ct) =>
+        _alerts.RaiseAsync(
+            AlertKey.AppPool(applicationPoolName),
+            AlertSeverity.Critical,
+            $"IIS App Pool Down: {applicationPoolName}",
+            new Incident(
+                UtcNow,
+                IncidentType.ApplicationPoolStartFailed,
+                $"IIS application pool '{applicationPoolName}' failed to start after {failures} attempts"
+            ),
+            ct);
 }

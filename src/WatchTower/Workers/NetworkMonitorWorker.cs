@@ -1,11 +1,9 @@
-using System.Collections.Concurrent;
-
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
 using WatchTower.Models;
-using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Workers;
 
@@ -13,35 +11,26 @@ public class NetworkMonitorWorker : BackgroundService
 {
     private readonly ISystemMetricsProvider _metricsProvider;
     private readonly IMetricsStore _metricsStore;
-    private readonly IEmailService _emailService;
-    private readonly IReportBuilder _reportBuilder;
-    private readonly IPortalEventPublisher _portalEventPublisher;
+    private readonly IAlertManager _alerts;
     private readonly IOptionsMonitor<NetworkMonitorOptions> _options;
-    private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<NetworkMonitorWorker> _logger;
 
-    private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerInterface = new();
+    private readonly RecoveryDebouncer _recovery = new();
 
     public NetworkMonitorWorker(
         ISystemMetricsProvider metricsProvider,
         IMetricsStore metricsStore,
-        IEmailService emailService,
-        IReportBuilder reportBuilder,
-        IPortalEventPublisher portalEventPublisher,
+        IAlertManager alerts,
         IOptionsMonitor<NetworkMonitorOptions> options,
-        IOptionsMonitor<ReportingOptions> reportingOptions,
         TimeProvider timeProvider,
         ILogger<NetworkMonitorWorker> logger
     )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
-        _emailService = emailService;
-        _reportBuilder = reportBuilder;
-        _portalEventPublisher = portalEventPublisher;
+        _alerts = alerts;
         _options = options;
-        _reportingOptions = reportingOptions;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -93,45 +82,32 @@ public class NetworkMonitorWorker : BackgroundService
         foreach (var metric in networkMetrics)
         {
             _metricsStore.AddNetworkMetric(metric);
+            var key = AlertKey.Network(metric.InterfaceName);
 
             if (metric.OutputQueueLength > opts.OutputQueueWarningThreshold)
             {
                 _logger.LogWarning(
                     "NETWORK QUEUE SATURATED: {Interface} output queue {Queue:F0} (threshold: > {Threshold})",
                     metric.InterfaceName, metric.OutputQueueLength, opts.OutputQueueWarningThreshold);
-                await HandleEmergencyAsync(metric, ct);
+                _recovery.Breached(key);
+                await _alerts.RaiseAsync(
+                    key,
+                    AlertSeverity.Warning,
+                    $"Network Saturated: {metric.InterfaceName}",
+                    new Incident(
+                        UtcNow,
+                        IncidentType.NetworkQueueSaturated,
+                        $"Network interface '{metric.InterfaceName}' output queue at {metric.OutputQueueLength:F0} (threshold: > {opts.OutputQueueWarningThreshold})"),
+                    ct);
             }
             else
             {
                 _logger.LogDebug(
                     "Network {Interface}: output queue {Queue:F0}",
                     metric.InterfaceName, metric.OutputQueueLength);
+                if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
+                    await _alerts.ResolveAsync(key, ct: ct);
             }
         }
-    }
-
-    private async Task HandleEmergencyAsync(NetworkMetric metric, CancellationToken ct)
-    {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastEmergencyPerInterface.GetValueOrDefault(metric.InterfaceName, DateTime.MinValue);
-
-        if (UtcNow - lastEmail < cooldown)
-            return;
-
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.NetworkQueueSaturated,
-            $"Network interface '{metric.InterfaceName}' output queue at {metric.OutputQueueLength:F0} (threshold: > {_options.CurrentValue.OutputQueueWarningThreshold})"
-        );
-
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-
-        // Per-interface cooldown starts once the incident is recorded, regardless of the email outcome.
-        _lastEmergencyPerInterface[metric.InterfaceName] = UtcNow;
-
-        await EmergencyEmail.TrySendAsync(
-            _emailService, _reportBuilder, incident,
-            $"[WatchTower] Network Saturated: {metric.InterfaceName}", _logger, ct);
     }
 }

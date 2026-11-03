@@ -23,7 +23,13 @@ public class PortalEventPublisher : IPortalEventPublisher
         _logger = logger;
     }
 
-    public async Task PublishIncidentAsync(Incident incident, CancellationToken ct)
+    public Task PublishIncidentAsync(Incident incident, CancellationToken ct) =>
+        PublishAsync(incident, alertKey: null, resolved: null);
+
+    public Task PublishAlertEventAsync(Incident incident, string alertKey, bool? resolved, CancellationToken ct) =>
+        PublishAsync(incident, alertKey, resolved);
+
+    private async Task PublishAsync(Incident incident, string? alertKey, bool? resolved)
     {
         try
         {
@@ -34,7 +40,9 @@ public class PortalEventPublisher : IPortalEventPublisher
                 incident.Description,
                 incident.TopProcesses?.Select(p =>
                     new ProcessInfoDto(p.Name, p.Pid, p.CpuSeconds, p.MemoryMb, p.CpuPercent)
-                ).ToList()
+                ).ToList(),
+                alertKey,
+                resolved
             );
 
             var json = JsonSerializer.Serialize(dto, JsonOpts);

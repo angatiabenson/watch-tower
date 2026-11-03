@@ -6,6 +6,7 @@ using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Workers;
 
@@ -13,37 +14,31 @@ public class RamMonitorWorker : BackgroundService
 {
     private readonly ISystemMetricsProvider _metricsProvider;
     private readonly IMetricsStore _metricsStore;
-    private readonly IEmailService _emailService;
-    private readonly IReportBuilder _reportBuilder;
+    private readonly IAlertManager _alerts;
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<RamMonitorOptions> _options;
-    private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<RamMonitorWorker> _logger;
 
+    private readonly RecoveryDebouncer _recovery = new();
     private DateTime? _firstBreachTime;
-    private DateTime _lastEmergencyIncident = DateTime.MinValue;
     private bool _metricUnavailable;
 
     public RamMonitorWorker(
         ISystemMetricsProvider metricsProvider,
         IMetricsStore metricsStore,
-        IEmailService emailService,
-        IReportBuilder reportBuilder,
+        IAlertManager alerts,
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<RamMonitorOptions> options,
-        IOptionsMonitor<ReportingOptions> reportingOptions,
         TimeProvider timeProvider,
         ILogger<RamMonitorWorker> logger
     )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
-        _emailService = emailService;
-        _reportBuilder = reportBuilder;
+        _alerts = alerts;
         _portalEventPublisher = portalEventPublisher;
         _options = options;
-        _reportingOptions = reportingOptions;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -95,6 +90,8 @@ public class RamMonitorWorker : BackgroundService
 
         if (ramMetric.UsagePercent >= opts.ThresholdPercent)
         {
+            _recovery.Breached(AlertKey.Ram);
+
             if (_firstBreachTime == null)
             {
                 _firstBreachTime = UtcNow;
@@ -115,13 +112,15 @@ public class RamMonitorWorker : BackgroundService
             var elapsed = UtcNow - _firstBreachTime.Value;
             if (elapsed.TotalSeconds >= opts.SustainedSeconds)
             {
-                await HandleEmergencyAsync(ramMetric, opts, ct);
+                await RaiseEmergencyAsync(ramMetric, opts, ct);
                 _firstBreachTime = UtcNow;
             }
         }
         else
         {
             _firstBreachTime = null;
+            if (_recovery.Clear(AlertKey.Ram, UtcNow, _alerts.RecoveryWindow))
+                await _alerts.ResolveAsync(AlertKey.Ram, ct: ct);
         }
     }
 
@@ -157,37 +156,21 @@ public class RamMonitorWorker : BackgroundService
         return false;
     }
 
-    private async Task HandleEmergencyAsync(
-        RamMetric ramMetric,
-        RamMonitorOptions opts,
-        CancellationToken ct
-    )
-    {
-        var cooldown = TimeSpan.FromSeconds(
-            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
-        );
-        if (UtcNow - _lastEmergencyIncident < cooldown)
-            return;
-
-        var topProcesses = (await _metricsProvider.GetTopMemoryProcessesAsync(opts.TopProcessCount, ct)).ToList();
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.RamThresholdBreached,
-            $"RAM at {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available) for over {opts.SustainedSeconds}s",
-            topProcesses
-        );
-
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-        _logger.LogWarning("RAM EMERGENCY: {Description}", incident.Description);
-
-        // The cooldown starts once the incident is recorded, whatever happens to the email:
-        // with SMTP unconfigured or down, restarting it only on delivery made every poll
-        // record a new incident, publish a portal event and rebuild a 24h report.
-        _lastEmergencyIncident = UtcNow;
-
-        await EmergencyEmail.TrySendAsync(
-            _emailService, _reportBuilder, incident,
-            $"[WatchTower] RAM Emergency: {ramMetric.UsagePercent:F1}%", _logger, ct);
-    }
+    /// <summary>Sustained breach: raise (or keep open) the <c>ram</c> alert; see CpuMonitorWorker.</summary>
+    private Task RaiseEmergencyAsync(RamMetric ramMetric, RamMonitorOptions opts, CancellationToken ct) =>
+        _alerts.RaiseAsync(
+            AlertKey.Ram,
+            AlertSeverity.Critical,
+            $"RAM Emergency: {ramMetric.UsagePercent:F1}%",
+            async token =>
+            {
+                var topProcesses = (await _metricsProvider.GetTopMemoryProcessesAsync(opts.TopProcessCount, token)).ToList();
+                return new Incident(
+                    UtcNow,
+                    IncidentType.RamThresholdBreached,
+                    $"RAM at {ramMetric.UsagePercent:F1}% ({ramMetric.AvailableMb:F0} MB available) for over {opts.SustainedSeconds}s",
+                    topProcesses
+                );
+            },
+            ct);
 }

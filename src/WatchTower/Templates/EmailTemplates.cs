@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 
 using WatchTower.Models;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Templates;
 
@@ -393,6 +394,105 @@ public static class EmailTemplates
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Short alert email (opened / reminder / resolved / event / test): a banner, the facts and,
+    /// for CPU/RAM alerts, the top processes. Every system-sourced value is HTML-encoded.
+    /// </summary>
+    public static string RenderAlert(AlertNotification n, TimeZoneInfo zone, string zoneLabel)
+    {
+        zoneLabel = H(zoneLabel);
+        var (banner, accent, background) = n.Kind switch
+        {
+            AlertNotificationKind.Resolved => ("RESOLVED", "#1e8449", "#eefaf1"),
+            AlertNotificationKind.Test => ("TEST NOTIFICATION", "#1565c0", "#eef4fc"),
+            AlertNotificationKind.Reminder => ($"STILL OPEN · {AlertText.Label(n.Severity).ToUpperInvariant()}",
+                SeverityColor(n.Severity), SeverityBackground(n.Severity)),
+            _ => ($"{AlertText.Label(n.Severity).ToUpperInvariant()} ALERT", SeverityColor(n.Severity), SeverityBackground(n.Severity)),
+        };
+
+        var facts = new List<(string Label, string Value)>
+        {
+            ("Server", H(n.Server)),
+            ("Alert", H(n.AlertKey)),
+            (n.Kind == AlertNotificationKind.Resolved ? "Resolved at" : "Detected at",
+                $"{ToLocalFull(n.OccurredAtUtc, zone)} {zoneLabel}"),
+        };
+        if (n.OpenedAtUtc is { } opened && n.Kind is AlertNotificationKind.Reminder or AlertNotificationKind.Resolved)
+            facts.Add(("Open since", $"{ToLocalFull(opened, zone)} {zoneLabel}"));
+        if (n.Duration is { } duration && n.Kind is AlertNotificationKind.Reminder or AlertNotificationKind.Resolved)
+            facts.Add((n.Kind == AlertNotificationKind.Resolved ? "Lasted" : "Open for", H(AlertText.FormatDuration(duration))));
+        if (n.Kind == AlertNotificationKind.Reminder)
+            facts.Add(("Notification", $"#{n.NotifyCount}"));
+
+        var sb = new StringBuilder();
+        sb.AppendLine(
+            $@"<!DOCTYPE html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'></head>
+<body style='margin:0;padding:0;background-color:#f4f6f9;'>
+<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='background-color:#f4f6f9;'>
+<tr><td align='center' style='padding:20px 10px;'>
+<table role='presentation' width='600' cellpadding='0' cellspacing='0' style='background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e8ecf1;'>
+<tr><td style='background:{background};border-left:4px solid {accent};padding:18px 24px;font-family:Segoe UI,Arial,sans-serif;'>
+<span style='font-size:12px;font-weight:700;letter-spacing:0.6px;color:{accent};'>{H(banner)}</span><br>
+<span style='font-size:18px;font-weight:700;color:#222;'>{H(n.Title)}</span><br>
+<span style='font-size:14px;color:#444;'>{H(n.Description)}</span>
+</td></tr>
+<tr><td style='padding:16px 24px;'>
+<table width='100%' cellpadding='0' cellspacing='0'>");
+
+        foreach (var (label, value) in facts)
+        {
+            sb.AppendLine(
+                $@"<tr><td style='padding:4px 0;width:120px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#888;'>{H(label)}</td>
+<td style='padding:4px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{value}</td></tr>");
+        }
+        sb.AppendLine("</table>");
+
+        if (n.Incident?.TopProcesses is { Count: > 0 } processes)
+        {
+            sb.AppendLine(
+                @"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top:14px;border:1px solid #e8ecf1;border-radius:4px;'>
+<tr style='background:#f8f9fb;'>
+<td style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#5a6a85;'>PROCESS</td>
+<td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#5a6a85;'>PID</td>
+<td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#5a6a85;'>CPU %</td>
+<td align='right' style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:11px;font-weight:600;color:#5a6a85;'>MEMORY</td></tr>");
+            foreach (var p in processes)
+            {
+                sb.AppendLine(
+                    $@"<tr>
+<td style='padding:6px 10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#333;border-top:1px solid #eef0f4;'>{H(p.Name)}</td>
+<td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #eef0f4;'>{p.Pid}</td>
+<td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #eef0f4;'>{p.CpuPercent:F1}%</td>
+<td align='right' style='padding:6px 10px;font-family:monospace;font-size:12px;color:#666;border-top:1px solid #eef0f4;'>{p.MemoryMb:F0} MB</td></tr>");
+            }
+            sb.AppendLine("</table>");
+        }
+
+        sb.AppendLine(
+            $@"</td></tr>
+<tr><td style='background:#f8f9fb;padding:12px 24px;border-top:1px solid #e8ecf1;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#aaa;'>
+WatchTower Monitoring Service · {H(n.Server)}</td></tr>
+</table>
+</td></tr></table>
+</body></html>");
+        return sb.ToString();
+    }
+
+    private static string SeverityColor(AlertSeverity severity) => severity switch
+    {
+        AlertSeverity.Critical => "#c0392b",
+        AlertSeverity.Warning => "#b9770e",
+        _ => "#1565c0",
+    };
+
+    private static string SeverityBackground(AlertSeverity severity) => severity switch
+    {
+        AlertSeverity.Critical => "#fef0f0",
+        AlertSeverity.Warning => "#fff8e6",
+        _ => "#eef4fc",
+    };
 
     private static string FormatDuration(TimeSpan span)
     {

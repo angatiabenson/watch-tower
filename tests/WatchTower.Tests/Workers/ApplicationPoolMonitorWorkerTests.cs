@@ -6,6 +6,8 @@ using Moq;
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
+using WatchTower.Tests.Alerting;
 using WatchTower.Workers;
 
 namespace WatchTower.Tests.Workers;
@@ -17,7 +19,6 @@ public class ApplicationPoolMonitorWorkerTests
     private readonly Mock<IEmailService> _emailService = new();
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IOptionsMonitor<ApplicationPoolMonitorOptions>> _options = new();
-    private readonly Mock<IOptionsMonitor<ReportingOptions>> _reportingOptions = new();
     private readonly Mock<ILogger<ApplicationPoolMonitorWorker>> _logger = new();
 
     public ApplicationPoolMonitorWorkerTests()
@@ -32,12 +33,12 @@ public class ApplicationPoolMonitorWorkerTests
             StableStateDelaySeconds = 0,
             WatchedApplicationPools = new List<string> { "DefaultAppPool" }
         });
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
         _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
         _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
+        _reportBuilder.Setup(r => r.RenderAlertHtml(It.IsAny<AlertNotification>())).Returns("<html/>");
     }
 
     private static ApplicationPoolStatus Pool(string state, bool running) =>
@@ -114,7 +115,7 @@ public class ApplicationPoolMonitorWorkerTests
     }
 
     [Fact]
-    public async Task PollOnce_RepeatedFailedStartWithFailingEmail_RecordsOneEmergencyPerCooldown()
+    public async Task PollOnce_RepeatedFailedStartWithFailingEmail_RecordsOneEmergencyWhileOpen()
     {
         PoolStatusIs(Pool("Stopped", false));
         StartReturns(false);
@@ -125,9 +126,28 @@ public class ApplicationPoolMonitorWorkerTests
         for (var i = 0; i < 6; i++)
             await worker.PollOnceAsync(CancellationToken.None);
 
-        // Attempts 3..6 are all past MaxStartAttempts, but the cooldown started at attempt 3.
+        // Attempts 3..6 are all past MaxStartAttempts, but the alert opened at attempt 3.
         _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.ApplicationPoolStartFailed)), Times.Once);
-        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Once);
+        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_PoolRunningAfterAlert_SendsResolvedWithStartedIncident()
+    {
+        PoolStatusIs(Pool("Stopped", false));
+        StartReturns(false);
+        var worker = CreateWorker();
+        for (var i = 0; i < 3; i++)
+            await worker.PollOnceAsync(CancellationToken.None);
+
+        // Next attempt works: the started incident resolves the alert.
+        PoolStatusSequence(Pool("Stopped", false), Pool("Started", true));
+        StartReturns(true);
+        await worker.PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.ApplicationPoolStarted)), Times.Once);
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.Contains("Resolved: IIS App Pool Down")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -187,11 +207,9 @@ public class ApplicationPoolMonitorWorkerTests
     private ApplicationPoolMonitorWorker CreateWorker() => new(
         _applicationPoolManager.Object,
         _metricsStore.Object,
-        _emailService.Object,
-        _reportBuilder.Object,
+        TestAlerts.WithEmail(_metricsStore.Object, TimeProvider.System, _emailService.Object, _reportBuilder.Object),
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
-        _reportingOptions.Object,
         TimeProvider.System,
         _logger.Object
     );

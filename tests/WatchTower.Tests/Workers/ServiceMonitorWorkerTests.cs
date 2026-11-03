@@ -9,6 +9,8 @@ using Moq;
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
+using WatchTower.Tests.Alerting;
 using WatchTower.Workers;
 
 namespace WatchTower.Tests.Workers;
@@ -20,7 +22,6 @@ public class ServiceMonitorWorkerTests
     private readonly Mock<IEmailService> _emailService = new();
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IOptionsMonitor<ServiceMonitorOptions>> _options = new();
-    private readonly Mock<IOptionsMonitor<ReportingOptions>> _reportingOptions = new();
     private readonly FakeTimeProvider _time = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
     private readonly Mock<ILogger<ServiceMonitorWorker>> _logger = new();
 
@@ -28,12 +29,12 @@ public class ServiceMonitorWorkerTests
     {
         // Zero intra-iteration delays and no startup grace so a poll recovers immediately.
         UseOptions();
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
         _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
         _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
+        _reportBuilder.Setup(r => r.RenderAlertHtml(It.IsAny<AlertNotification>())).Returns("<html/>");
     }
 
     private void UseOptions(int startupGraceSeconds = 0, int restartDelaySeconds = 0, params string[] services) =>
@@ -236,7 +237,7 @@ public class ServiceMonitorWorkerTests
     }
 
     [Fact]
-    public async Task PollOnce_RepeatedFailedRestarts_EscalateOncePerCooldown()
+    public async Task PollOnce_RepeatedFailedRestarts_EscalateOnceWhileOpen()
     {
         _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Stopped", false));
         _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(false);
@@ -250,14 +251,32 @@ public class ServiceMonitorWorkerTests
         _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.ServiceRestartFailed)), Times.Once);
     }
 
+    [Fact]
+    public async Task PollOnce_ServiceRunningAgainAfterAlert_SendsResolved()
+    {
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Stopped", false));
+        _serviceManager.Setup(s => s.RestartService("TestService", It.IsAny<TimeSpan>())).Returns(false);
+        var worker = CreateWorker();
+        for (var i = 0; i < 3; i++)
+            await PollAsync(worker);
+
+        // Started by an operator: the next check finds it running.
+        _serviceManager.Setup(s => s.GetServiceStatus("TestService")).Returns(Status("Running", true));
+        await PollAsync(worker);
+        await PollAsync(worker);
+
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.StartsWith("[WatchTower] Service Down: TestService")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.Contains("Resolved: Service Down: TestService")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     private ServiceMonitorWorker CreateWorker() => new(
         _serviceManager.Object,
         _metricsStore.Object,
-        _emailService.Object,
-        _reportBuilder.Object,
+        TestAlerts.WithEmail(_metricsStore.Object, _time, _emailService.Object, _reportBuilder.Object),
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
-        _reportingOptions.Object,
         _time,
         _logger.Object);
 }

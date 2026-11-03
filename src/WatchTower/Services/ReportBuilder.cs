@@ -85,4 +85,10 @@ public class ReportBuilder : IReportBuilder
         var (zone, label) = ResolveZone();
         return EmailTemplates.RenderReport(report, emergencyIncident, zone, label);
     }
+
+    public string RenderAlertHtml(Alerting.AlertNotification notification)
+    {
+        var (zone, label) = ResolveZone();
+        return EmailTemplates.RenderAlert(notification, zone, label);
+    }
 }

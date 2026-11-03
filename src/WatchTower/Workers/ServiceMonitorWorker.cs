@@ -6,6 +6,7 @@ using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Workers;
 
@@ -25,16 +26,13 @@ public class ServiceMonitorWorker : BackgroundService
 {
     private readonly IWindowsServiceManager _serviceManager;
     private readonly IMetricsStore _metricsStore;
-    private readonly IEmailService _emailService;
-    private readonly IReportBuilder _reportBuilder;
+    private readonly IAlertManager _alerts;
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<ServiceMonitorOptions> _options;
-    private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ServiceMonitorWorker> _logger;
 
     private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerService = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _activeOutages = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _disabledLogged = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task> _recoveries = new(StringComparer.OrdinalIgnoreCase);
@@ -44,22 +42,18 @@ public class ServiceMonitorWorker : BackgroundService
     public ServiceMonitorWorker(
         IWindowsServiceManager serviceManager,
         IMetricsStore metricsStore,
-        IEmailService emailService,
-        IReportBuilder reportBuilder,
+        IAlertManager alerts,
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<ServiceMonitorOptions> options,
-        IOptionsMonitor<ReportingOptions> reportingOptions,
         TimeProvider timeProvider,
         ILogger<ServiceMonitorWorker> logger
     )
     {
         _serviceManager = serviceManager;
         _metricsStore = metricsStore;
-        _emailService = emailService;
-        _reportBuilder = reportBuilder;
+        _alerts = alerts;
         _portalEventPublisher = portalEventPublisher;
         _options = options;
-        _reportingOptions = reportingOptions;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -151,6 +145,8 @@ public class ServiceMonitorWorker : BackgroundService
             _activeOutages.TryRemove(serviceName, out _);
             _disabledLogged.TryRemove(serviceName, out _);
             _logger.LogDebug("Service {ServiceName}: Running", serviceName);
+            // Running again (e.g. started by an operator): close any open restart-failed alert.
+            await _alerts.ResolveAsync(AlertKey.Service(serviceName), ct: ct);
             return;
         }
 
@@ -236,8 +232,12 @@ public class ServiceMonitorWorker : BackgroundService
                     IncidentType.ServiceRestarted,
                     $"Service '{status.DisplayName}' ({serviceName}) was found stopped and restarted successfully"
                 );
-                _metricsStore.AddIncident(restartIncident);
-                await _portalEventPublisher.PublishIncidentAsync(restartIncident, ct);
+                // Recorded either way; with an open alert it also resolves it (and says so).
+                if (!await _alerts.ResolveAsync(AlertKey.Service(serviceName), restartIncident, ct))
+                {
+                    _metricsStore.AddIncident(restartIncident);
+                    await _portalEventPublisher.PublishIncidentAsync(restartIncident, ct);
+                }
                 return;
             }
 
@@ -247,7 +247,7 @@ public class ServiceMonitorWorker : BackgroundService
                 serviceName, restarted, failures);
 
             if (failures >= opts.MaxRestartAttempts)
-                await HandleEmergencyAsync(serviceName, failures, ct);
+                await RaiseRestartFailedAsync(serviceName, failures, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -266,27 +266,19 @@ public class ServiceMonitorWorker : BackgroundService
     private static bool IsDisabled(ServiceStatus status) =>
         string.Equals(status.StartType, "Disabled", StringComparison.OrdinalIgnoreCase);
 
-    private async Task HandleEmergencyAsync(string serviceName, int failures, CancellationToken ct)
-    {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastEmergencyPerService.GetValueOrDefault(serviceName, DateTime.MinValue);
-
-        if (UtcNow - lastEmail < cooldown)
-            return;
-
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.ServiceRestartFailed,
-            $"Service '{serviceName}' failed to restart after {failures} attempts"
-        );
-
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-
-        // Per-service cooldown starts once the incident is recorded, regardless of the email outcome.
-        _lastEmergencyPerService[serviceName] = UtcNow;
-
-        await EmergencyEmail.TrySendAsync(
-            _emailService, _reportBuilder, incident, $"[WatchTower] Service Down: {serviceName}", _logger, ct);
-    }
+    /// <summary>
+    /// Recovery keeps failing: raise (or keep open) the <c>svc:&lt;name&gt;</c> alert. Later failed
+    /// attempts are quiet until the re-notify interval; the alert resolves once the service runs.
+    /// </summary>
+    private Task RaiseRestartFailedAsync(string serviceName, int failures, CancellationToken ct) =>
+        _alerts.RaiseAsync(
+            AlertKey.Service(serviceName),
+            AlertSeverity.Critical,
+            $"Service Down: {serviceName}",
+            new Incident(
+                UtcNow,
+                IncidentType.ServiceRestartFailed,
+                $"Service '{serviceName}' failed to restart after {failures} attempts"
+            ),
+            ct);
 }

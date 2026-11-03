@@ -177,6 +177,10 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 IncidentType = evt.IncidentType,
                 Description = evt.Description,
             };
+            if (evt.AlertKey is not null)
+                protoEvt.AlertKey = evt.AlertKey;
+            if (evt.Resolved is { } resolved)
+                protoEvt.Resolved = resolved;
             if (evt.TopProcesses != null)
                 protoEvt.TopProcesses.AddRange(evt.TopProcesses.Select(p =>
                     new ProcessInfoProto

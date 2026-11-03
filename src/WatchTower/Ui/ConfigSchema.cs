@@ -60,8 +60,19 @@ public static class ConfigSchema
                 "Time zone used for the report schedule and all timestamps in emails."),
             new("Display:TimezoneLabel", "Time zone label", FieldType.String,
                 "Short label shown after timestamps, e.g. EAT or UTC.", Placeholder: "UTC"),
-            new("Reporting:EmergencyCooldownSeconds", "Emergency alert cooldown (s)", FieldType.Int,
-                "Minimum gap between repeated emergency emails for the same condition.", 0, 86_400),
+        ]),
+
+        new("alerting", "Alerting", "When operators are notified about a problem, and how often.",
+        [
+            new("Alerting:RenotifyMinutes", "Remind every (min)", FieldType.Int,
+                "While an alert stays open, send a reminder this often. 0 = notify once per occurrence.", 0, 10_080),
+            new("Alerting:SendRecovery", "Notify when resolved", FieldType.Bool,
+                "Send a \"resolved\" message (with how long it lasted) when an alert clears."),
+            new("Alerting:IncludeFullReport", "Attach full server report to alert emails", FieldType.Bool,
+                "Off: alert emails are short. On: they also contain the 24-hour server report."),
+            new("Alerting:ResolveAfterSeconds", "Resolve after clear for (s)", FieldType.Int,
+                "CPU, memory, disk, disk-queue and network alerts resolve only once the condition stayed clear this long, so values hovering around a threshold do not flap.",
+                0, 86_400, Advanced: true),
         ]),
 
         new("email", "Email alerts", "SMTP server and recipients for daily reports and emergency alerts.",

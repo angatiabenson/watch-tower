@@ -7,6 +7,7 @@ using WatchTower.Portal.Clients;
 using WatchTower.Portal.Storage;
 using WatchTower.Services;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 using WatchTower.Workers;
 
 namespace WatchTower.Hosting;
@@ -37,12 +38,17 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(_ => new SqliteOutboxStore(dbPath));
         services.AddSingleton<IOutboxStore>(sp => sp.GetRequiredService<SqliteOutboxStore>());
         services.AddSingleton<IPortalSyncState>(sp => sp.GetRequiredService<SqliteOutboxStore>());
+        services.AddSingleton<IAlertStateStore>(_ => new SqliteAlertStateStore(dbPath));
 
         services.AddSingleton<ISystemMetricsProvider, SystemMetricsProvider>();
         services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
         services.AddSingleton<IIisApplicationPoolManager, IisApplicationPoolManager>();
         services.AddTransient<IEmailService, EmailService>();
         services.AddTransient<IReportBuilder, ReportBuilder>();
+
+        // Alerting: open/resolved lifecycle, re-notify policy and delivery.
+        services.AddSingleton<INotificationDispatcher, EmailNotificationDispatcher>();
+        services.AddSingleton<IAlertManager, AlertManager>();
 
         services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
 
@@ -82,6 +88,7 @@ public static class ServiceCollectionExtensions
         services.Configure<HeartbeatOptions>(config.GetSection(HeartbeatOptions.SectionName));
         services.Configure<EmailOptions>(config.GetSection(EmailOptions.SectionName));
         services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
+        services.Configure<AlertingOptions>(config.GetSection(AlertingOptions.SectionName));
         services.Configure<PortalOptions>(config.GetSection(PortalOptions.SectionName));
         services.Configure<DisplayOptions>(config.GetSection(DisplayOptions.SectionName));
         services.Configure<Ui.UiOptions>(config.GetSection(Ui.UiOptions.SectionName));
