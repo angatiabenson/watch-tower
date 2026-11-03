@@ -108,6 +108,7 @@ public sealed class UpdateService
     public UpdateStatus GetStatus()
     {
         RefreshLastResult();
+        _ = IsInstalling(); // applies the stuck-installer timeout
         lock (_lock)
         {
             var (canInstall, reason) = CanInstall();
@@ -119,6 +120,8 @@ public sealed class UpdateService
     /// <summary>Asks the feed for the newest release.</summary>
     public async Task<UpdateStatus> CheckAsync(CancellationToken ct)
     {
+        if (IsInstalling())
+            return GetStatus(); // never let a check rewrite the phase while the installer runs
         if (!await _operation.WaitAsync(0, ct))
             return GetStatus(); // a check/download is already running
 
@@ -168,6 +171,11 @@ public sealed class UpdateService
     public bool TryStartDownload(bool countdown, out string message)
     {
         UpdateManifest? manifest;
+        if (IsInstalling())
+        {
+            message = "An installation is already in progress.";
+            return false;
+        }
         lock (_lock)
         {
             manifest = _available;
@@ -228,6 +236,25 @@ public sealed class UpdateService
     /// <summary>Launches the installer helper, which stops this service, swaps binaries and restarts it.</summary>
     public bool TryInstallNow(out string message)
     {
+        // Exclude a concurrent check/download for the moment the installer is launched; after
+        // that the Installing phase itself blocks them (see IsInstalling).
+        if (!_operation.Wait(0))
+        {
+            message = "A check or download is in progress; try again in a moment.";
+            return false;
+        }
+        try
+        {
+            return LaunchInstaller(out message);
+        }
+        finally
+        {
+            _operation.Release();
+        }
+    }
+
+    private bool LaunchInstaller(out string message)
+    {
         string staged;
         UpdateManifest manifest;
         lock (_lock)
@@ -241,6 +268,7 @@ public sealed class UpdateService
             staged = _stagedDirectory!;
             manifest = _available!;
             _phase = UpdatePhase.Installing;
+            _installingSince = _time.GetUtcNow();
             _restartAt = null;
         }
 
@@ -384,6 +412,31 @@ public sealed class UpdateService
             throw new InvalidDataException(
                 $"The package contains version '{productVersion}', but the release says '{expectedVersion}'.");
     }
+
+    /// <summary>
+    /// True while an installer launched by this process should be running. The installer stops
+    /// this service within seconds; if we are still alive after <see cref="InstallerTimeout"/>
+    /// it never got going, so the update becomes installable again instead of staying stuck.
+    /// </summary>
+    private bool IsInstalling()
+    {
+        lock (_lock)
+        {
+            if (_phase != UpdatePhase.Installing)
+                return false;
+            if (_installingSince is { } since && _time.GetUtcNow() - since < InstallerTimeout)
+                return true;
+
+            _phase = _stagedDirectory is not null ? UpdatePhase.ReadyToInstall : UpdatePhase.Available;
+            _error = "The installer did not complete. Check Logs/update-*.log, then try again.";
+            _installingSince = null;
+            return false;
+        }
+    }
+
+    internal static readonly TimeSpan InstallerTimeout = TimeSpan.FromMinutes(10);
+
+    private DateTimeOffset? _installingSince;
 
     private (bool, string?) CanInstall()
     {

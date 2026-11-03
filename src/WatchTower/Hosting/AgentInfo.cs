@@ -19,7 +19,7 @@ public sealed class AgentInfo
     public string MachineName { get; } = Environment.MachineName;
     public string OsDescription { get; } = System.Runtime.InteropServices.RuntimeInformation.OSDescription;
     public string RuntimeVersion { get; } = Environment.Version.ToString();
-    public bool IsWindowsService { get; } = Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService();
+    public bool IsWindowsService { get; init; } = Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService();
     public int ProcessId { get; } = Environment.ProcessId;
     public DateTimeOffset StartedAtUtc { get; }
     public WatchTowerPaths Paths { get; }

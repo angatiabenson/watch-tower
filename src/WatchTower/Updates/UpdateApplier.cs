@@ -45,6 +45,30 @@ public sealed class UpdateApplier
     public async Task<UpdateResult> RunAsync()
     {
         var r = _request;
+
+        // Only one installer may ever touch the service and install folder at a time.
+        Directory.CreateDirectory(r.Paths.UpdatesDirectory);
+        FileStream installLock;
+        try
+        {
+            installLock = new FileStream(Path.Combine(r.Paths.UpdatesDirectory, "install.lock"), FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None, bufferSize: 1, FileOptions.DeleteOnClose);
+        }
+        catch (IOException)
+        {
+            Log($"Another installation is already running; not installing {r.ToVersion} again.");
+            // Do not write last-result.json: the running installer owns the outcome.
+            return new UpdateResult(r.FromVersion, r.ToVersion, false, "Another installation is already running.",
+                DateTimeOffset.UtcNow);
+        }
+
+        using (installLock)
+            return await RunLockedAsync();
+    }
+
+    private async Task<UpdateResult> RunLockedAsync()
+    {
+        var r = _request;
         Log($"Updating WatchTower {r.FromVersion} -> {r.ToVersion} (service '{r.ServiceName}', target '{r.TargetDirectory}')");
 
         if (string.Equals(Path.GetFullPath(r.SourceDirectory).TrimEnd('\\'), Path.GetFullPath(r.TargetDirectory).TrimEnd('\\'),
@@ -168,9 +192,30 @@ public sealed class UpdateApplier
         {
             Log($"Stopping the failed version: {ex.Message}");
         }
-        CopyDirectory(BackupDirectory, _request.TargetDirectory, retries: 10);
+        // Restore the exact previous file set: files the failed release ADDED (e.g. a new
+        // appsettings.Production.json) would otherwise survive and break the restored version.
+        MirrorDirectory(BackupDirectory, _request.TargetDirectory, retries: 10);
         await StartServiceAsync();
         Log("Rollback complete");
+    }
+
+    /// <summary>Makes <paramref name="target"/> identical to <paramref name="source"/> (copy + delete extras).</summary>
+    internal static void MirrorDirectory(string source, string target, int retries)
+    {
+        CopyDirectory(source, target, retries);
+
+        foreach (var file in Directory.GetFiles(target, "*", SearchOption.AllDirectories))
+        {
+            if (!File.Exists(Path.Combine(source, Path.GetRelativePath(target, file))))
+                File.Delete(file);
+        }
+        foreach (var dir in Directory.GetDirectories(target, "*", SearchOption.AllDirectories)
+                     .OrderByDescending(d => d.Length))
+        {
+            if (!Directory.Exists(Path.Combine(source, Path.GetRelativePath(target, dir))) &&
+                !Directory.EnumerateFileSystemEntries(dir).Any())
+                Directory.Delete(dir);
+        }
     }
 
     private async Task<bool> WaitForHealthAsync()
