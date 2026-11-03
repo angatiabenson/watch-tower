@@ -120,6 +120,10 @@ default `Info`) the alert meets. Channels are sent in parallel with a short time
 | Slack | `Notifications:Slack:Url` — an incoming-webhook URL | Block Kit |
 | Webhook | `Notifications:Webhook:Url` (+ optional `Secret`) | JSON (`schema: "watchtower.alert.v1"`) |
 
+Text that comes from the monitored server (service and process names, HTTP reason phrases,
+descriptions) is never rendered as markup: Teams cards backslash-escape Markdown, and Slack
+messages carry it in `plain_text` blocks with the fallback text sent as `"mrkdwn": false`.
+
 Webhook URLs and secrets are stored DPAPI-encrypted and never returned by the console API.
 With a secret, every webhook request carries
 `X-WatchTower-Signature: sha256=<hex HMAC-SHA256(secret, raw request body)>` and

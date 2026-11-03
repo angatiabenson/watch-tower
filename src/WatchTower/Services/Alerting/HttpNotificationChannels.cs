@@ -173,7 +173,7 @@ public sealed class TeamsNotificationChannel(IHttpClientFactory httpClientFactor
 
         var facts = new JsonArray();
         foreach (var (title, value) in Facts(n))
-            facts.Add(new JsonObject { ["title"] = title, ["value"] = value });
+            facts.Add(new JsonObject { ["title"] = title, ["value"] = EscapeMarkdown(value) });
 
         var card = new JsonObject
         {
@@ -185,10 +185,10 @@ public sealed class TeamsNotificationChannel(IHttpClientFactory httpClientFactor
             {
                 new JsonObject
                 {
-                    ["type"] = "TextBlock", ["text"] = Headline(n), ["weight"] = "Bolder", ["size"] = "Medium",
+                    ["type"] = "TextBlock", ["text"] = EscapeMarkdown(Headline(n)), ["weight"] = "Bolder", ["size"] = "Medium",
                     ["color"] = color, ["wrap"] = true,
                 },
-                new JsonObject { ["type"] = "TextBlock", ["text"] = n.Description, ["wrap"] = true },
+                new JsonObject { ["type"] = "TextBlock", ["text"] = EscapeMarkdown(n.Description), ["wrap"] = true },
                 new JsonObject { ["type"] = "FactSet", ["facts"] = facts },
             },
         };
@@ -207,9 +207,56 @@ public sealed class TeamsNotificationChannel(IHttpClientFactory httpClientFactor
             },
         }.ToJsonString();
     }
+
+    /// <summary>Characters with a Markdown meaning anywhere in a line.</summary>
+    private const string MarkdownSpecials = "\\`*_~[](){}<>#|!";
+
+    /// <summary>
+    /// Backslash-escapes Markdown so text from a monitored server (service names, HTTP reason
+    /// phrases, process names) renders literally in an Adaptive Card TextBlock or Fact: no links,
+    /// emphasis, headings or lists. Escapes the punctuation in <see cref="MarkdownSpecials"/>
+    /// everywhere, and list markers (<c>-</c>, <c>+</c>, <c>1.</c>) at the start of a line.
+    /// </summary>
+    public static string EscapeMarkdown(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        var escaped = new StringBuilder(value.Length + 16);
+        var lineStart = true; // only whitespace so far on this line
+        var lineDigits = false; // only whitespace, then digits so far ("1." starts a numbered list)
+        foreach (var c in value)
+        {
+            if (MarkdownSpecials.Contains(c) || (lineStart && c is '-' or '+' or '=') || (lineDigits && c == '.'))
+                escaped.Append('\\');
+            escaped.Append(c);
+
+            if (c is '\n' or '\r')
+            {
+                lineStart = true;
+                lineDigits = false;
+            }
+            else if (char.IsAsciiDigit(c) && (lineStart || lineDigits))
+            {
+                lineStart = false;
+                lineDigits = true;
+            }
+            else if (!char.IsWhiteSpace(c) || lineDigits)
+            {
+                lineStart = false;
+                lineDigits = false;
+            }
+        }
+        return escaped.ToString();
+    }
 }
 
-/// <summary>Slack incoming webhook with Block Kit blocks (text escaped for mrkdwn).</summary>
+/// <summary>
+/// Slack incoming webhook with Block Kit blocks. Text that comes from the monitored server is
+/// never parsed as mrkdwn: the blocks carry it in <c>plain_text</c> objects (no links, mentions or
+/// emphasis), and the notification fallback <c>text</c> is sent with <c>"mrkdwn": false</c> and
+/// &amp;, &lt; and &gt; escaped (Slack's control characters, which also form links and mentions).
+/// </summary>
 public sealed class SlackNotificationChannel(IHttpClientFactory httpClientFactory) : HttpNotificationChannel(httpClientFactory)
 {
     public override NotificationChannelType Type => NotificationChannelType.Slack;
@@ -231,33 +278,30 @@ public sealed class SlackNotificationChannel(IHttpClientFactory httpClientFactor
 
         var fields = new JsonArray();
         foreach (var (title, value) in Facts(n).Take(10)) // Slack allows at most 10 fields per section
-            fields.Add(new JsonObject { ["type"] = "mrkdwn", ["text"] = $"*{Escape(title)}*\n{Escape(value)}" });
+            fields.Add(PlainText($"{title}\n{Truncate(value, 1900)}", emoji: false));
 
         return new JsonObject
         {
             ["text"] = $"{marker} {Escape(headline)} ({Escape(n.Server)})",
+            ["mrkdwn"] = false,
             ["blocks"] = new JsonArray
             {
-                new JsonObject
-                {
-                    ["type"] = "header",
-                    ["text"] = new JsonObject { ["type"] = "plain_text", ["text"] = Truncate(headline, 150), ["emoji"] = true },
-                },
-                new JsonObject
-                {
-                    ["type"] = "section",
-                    ["text"] = new JsonObject { ["type"] = "mrkdwn", ["text"] = $"{marker} {Escape(Truncate(n.Description, 2900))}" },
-                },
+                new JsonObject { ["type"] = "header", ["text"] = PlainText(Truncate(headline, 150), emoji: false) },
+                new JsonObject { ["type"] = "section", ["text"] = PlainText($"{marker} {Truncate(n.Description, 2900)}", emoji: true) },
                 new JsonObject { ["type"] = "section", ["fields"] = fields },
             },
         }.ToJsonString();
     }
 
-    /// <summary>Slack mrkdwn control characters: &amp;, &lt; and &gt; must be escaped.</summary>
+    /// <summary>Slack control characters: &amp;, &lt; and &gt; must be escaped in message text.</summary>
     public static string Escape(string value) =>
         value.Replace("&", "&amp;", StringComparison.Ordinal)
             .Replace("<", "&lt;", StringComparison.Ordinal)
             .Replace(">", "&gt;", StringComparison.Ordinal);
+
+    /// <summary>A text object Slack shows verbatim (no mrkdwn, links or mentions).</summary>
+    private static JsonObject PlainText(string text, bool emoji) =>
+        new() { ["type"] = "plain_text", ["text"] = text, ["emoji"] = emoji };
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..(max - 1)] + "…";
 }

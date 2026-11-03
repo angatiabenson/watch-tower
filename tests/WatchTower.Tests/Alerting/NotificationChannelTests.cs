@@ -263,10 +263,70 @@ public class NotificationChannelTests
         var payload = JsonNode.Parse(new SlackNotificationChannel(Mock.Of<IHttpClientFactory>()).BuildPayload(notification))!;
 
         payload["text"]!.GetValue<string>().Should().Contain("SRV&lt;1&gt;");
+        payload["mrkdwn"]!.GetValue<bool>().Should().BeFalse();
         var blocks = payload["blocks"]!.AsArray();
         blocks[0]!["type"]!.GetValue<string>().Should().Be("header");
-        blocks[1]!["text"]!["text"]!.GetValue<string>().Should().Contain("pool &lt;b&gt;&amp;&lt;/b&gt; down");
+        // plain_text is shown verbatim by Slack, so it is not entity-escaped.
+        blocks[1]!["text"]!["type"]!.GetValue<string>().Should().Be("plain_text");
+        blocks[1]!["text"]!["text"]!.GetValue<string>().Should().Contain("pool <b>&</b> down");
         blocks[2]!["fields"]!.AsArray().Count.Should().BeInRange(1, 10);
+    }
+
+    /// <summary>Text a monitored server controls: an HTTP reason phrase, a service or process name.</summary>
+    private static AlertNotification Malicious() => Notification() with
+    {
+        Title = "Endpoint Down: *urgent* [click](https://attacker.example)",
+        Description = "Unexpected HTTP 503 [instructions](https://attacker.example) _now_ ~gone~ `code`\n- item\n1. step\n# Heading",
+        Server = "SRV-[01](https://attacker.example)",
+        Incident = new Incident(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc), IncidentType.EndpointDown, "x",
+            [new ProcessInfo("[evil](https://attacker.example)", 1, 1, 1, 1)]),
+    };
+
+    [Fact]
+    public void Teams_EscapesMarkdownInEveryDynamicString()
+    {
+        var payload = JsonNode.Parse(new TeamsNotificationChannel(Mock.Of<IHttpClientFactory>()).BuildPayload(Malicious()))!;
+        var body = payload["attachments"]![0]!["content"]!["body"]!.AsArray();
+
+        var headline = body[0]!["text"]!.GetValue<string>();
+        var description = body[1]!["text"]!.GetValue<string>();
+        var facts = body[2]!["facts"]!.AsArray().Select(f => f!["value"]!.GetValue<string>()).ToList();
+
+        headline.Should().Be(@"Endpoint Down: \*urgent\* \[click\]\(https://attacker.example\)");
+        description.Should().Be(
+            @"Unexpected HTTP 503 \[instructions\]\(https://attacker.example\) \_now\_ \~gone\~ \`code\`" + "\n" +
+            @"\- item" + "\n" + @"1\. step" + "\n" + @"\# Heading");
+        facts.Should().Contain(@"SRV-\[01\]\(https://attacker.example\)");
+        facts.Should().Contain(v => v.StartsWith(@"\[evil\]\(https://attacker.example\) \(PID 1"));
+        foreach (var text in facts.Append(headline).Append(description))
+            text.Should().NotContain("](", "no Markdown link may survive");
+    }
+
+    [Theory]
+    [InlineData("plain text 99.5% 2026-01-01", "plain text 99.5% 2026-01-01")]
+    [InlineData(@"disk:C:\", @"disk:C:\\")]
+    [InlineData("  - indented", @"  \- indented")]
+    [InlineData("12. not a list?", @"12\. not a list?")]
+    [InlineData("a 1. b", "a 1. b")]
+    [InlineData("<b>x</b>!", @"\<b\>x\</b\>\!")]
+    [InlineData("", "")]
+    public void Teams_EscapeMarkdown(string input, string expected) =>
+        TeamsNotificationChannel.EscapeMarkdown(input).Should().Be(expected);
+
+    [Fact]
+    public void Slack_NeverSendsServerTextAsMrkdwn()
+    {
+        var payload = JsonNode.Parse(new SlackNotificationChannel(Mock.Of<IHttpClientFactory>()).BuildPayload(Malicious()))!;
+
+        payload["mrkdwn"]!.GetValue<bool>().Should().BeFalse("the fallback text must not be formatted");
+        payload["text"]!.GetValue<string>().Should().NotContain("<").And.NotContain(">");
+        var textObjects = payload["blocks"]!.AsArray()
+            .SelectMany(b => b!["fields"]?.AsArray().Select(f => f!) ?? [b!["text"]!])
+            .ToList();
+        textObjects.Should().HaveCountGreaterThan(4);
+        textObjects.Should().OnlyContain(t => t["type"]!.GetValue<string>() == "plain_text");
+        textObjects.Select(t => t["text"]!.GetValue<string>()).Should().Contain(t => t.Contains("[instructions](https://attacker.example)"),
+            "plain_text keeps the text verbatim");
     }
 
     // ── Secrets ────────────────────────────────────────────────────────────
