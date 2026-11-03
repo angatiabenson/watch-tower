@@ -1,10 +1,19 @@
 // Configuration: rendered entirely from GET /api/config. Unsaved edits ("drafts") are
 // kept across section switches and sent as one PUT /api/config with only changed keys.
-import { h, icon, nextId, plural } from '../dom.js';
-import { api } from '../api.js';
+import { h, icon, nextId, plural, statusTag } from '../dom.js';
+import { api, serverOffset } from '../api.js';
 import { notice, toast, busy } from '../ui.js';
 import { createEditor } from './fields.js';
 import { enrollPanel, ENROLL_KEYS } from './enroll.js';
+import { startMaintenance, endMaintenance, parseUntil, fmtUntil } from './maintenance.js';
+
+/** Fixed channels of the Notification channels section, and the saved setting that enables each. */
+const CHANNELS = [
+  { name: 'email', label: 'Email', enabled: (v) => v('Notifications:Email:Enabled').value === true },
+  { name: 'teams', label: 'Teams', enabled: (v) => !!v('Notifications:Teams:Url').hasValue },
+  { name: 'slack', label: 'Slack', enabled: (v) => !!v('Notifications:Slack:Url').hasValue },
+  { name: 'webhook', label: 'Webhook', enabled: (v) => !!v('Notifications:Webhook:Url').hasValue },
+];
 
 const SOURCE_BADGE = {
   portal: 'Managed by portal',
@@ -23,6 +32,7 @@ export function mount(root, params, ctx) {
     lastWarnings: [],
     rows: new Map(),       // key → row controller (current section only)
     enroll: {},            // enrollment box state, kept across re-renders and section switches
+    notifyTest: null,      // last test-notification outcome, kept across re-renders
     destroyed: false,
   };
 
@@ -117,11 +127,13 @@ export function mount(root, params, ctx) {
         s.description ? h('p', { class: 'section-desc' }, s.description)
           : null),
       s.id === 'portal' ? enrollBlock(s) : '',
+      s.id === 'maintenance' ? maintenanceBlock(s) : '',
       h('div', { class: 'fields' }, basic.map(fieldRow)),
       adv.length ? h('details', { class: 'advanced', open: advDirty },
         h('summary', null, `Advanced (${adv.length})`),
         h('div', { class: 'fields' }, adv.map(fieldRow))) : '',
-      s.id === 'email' ? testEmailBlock(s) : '');
+      s.id === 'email' ? testEmailBlock(s) : '',
+      s.id === 'notifications' ? testNotifyBlock(s) : '');
   }
 
   function fieldRow(f) {
@@ -230,6 +242,104 @@ export function mount(root, params, ctx) {
       result);
   }
 
+  // ------------------------------------------------------------ notification test
+  function testNotifyBlock(s) {
+    const dirty = sectionDirty(s);
+    const enabled = CHANNELS.filter((c) => c.enabled(valueOf));
+    const result = h('div', { class: 'test-result notify-results', 'aria-live': 'polite' });
+    const allBtn = h('button', { class: 'btn', type: 'button', disabled: dirty }, icon('bell'), 'Send test notification');
+    const buttons = [allBtn];
+
+    const run = (btn, channel) => busy(btn, 'Sending…', async () => {
+      for (const b of buttons) b.disabled = true;
+      result.replaceChildren(h('p', { class: 'muted small' }, channel ? `Sending a test to ${channel}…` : 'Sending a test to every enabled channel…'));
+      try {
+        const r = await api.testNotification(channel);
+        state.notifyTest = { channel, ok: !!r?.ok, message: r?.message || '', results: Array.isArray(r?.results) ? r.results : [] };
+      } catch (e) {
+        if (e.status === 401) return;
+        state.notifyTest = { channel, ok: false, message: e.message, results: [], error: true };
+      } finally {
+        for (const b of buttons) b.disabled = sectionDirty(s);
+      }
+      renderNotifyResult(result, rerun);
+    });
+    const rerun = (channel, btn) => run(btn, channel);
+    allBtn.addEventListener('click', () => run(allBtn, null));
+
+    const perChannel = enabled.map((c) => {
+      const b = h('button', { class: 'btn btn-sm', type: 'button', disabled: dirty, 'aria-label': `Send a test to ${c.label} only` }, c.label);
+      b.addEventListener('click', () => run(b, c.name));
+      buttons.push(b);
+      return b;
+    });
+
+    renderNotifyResult(result, rerun);
+    return h('section', { class: 'test-email test-notify', 'aria-labelledby': 'test-notify-h' },
+      h('h3', { id: 'test-notify-h', class: 'subhead' }, 'Check the notification channels'),
+      h('p', { class: 'muted' }, 'Sends a test message using the saved settings. Minimum-severity filters do not apply to tests.'),
+      dirty ? h('p', { class: 'hint-warn' }, icon('warning'), 'Save your changes first. The test uses the saved settings, not the ones on screen.') : null,
+      h('div', { class: 'btn-row' }, allBtn,
+        perChannel.length ? [h('span', { class: 'btn-row-label' }, 'or only'), perChannel] : null),
+      result);
+  }
+
+  function renderNotifyResult(el, rerun) {
+    const t = state.notifyTest;
+    if (!t) { el.replaceChildren(); return; }
+    const out = [];
+    if (t.error) {
+      out.push(h('p', { class: 'result-bad' }, icon('critical'), t.message));
+    } else if (!t.results.length) {
+      out.push(h('p', { class: 'result-bad' }, icon('critical'), t.message || 'No notification channel is enabled.'),
+        h('p', { class: 'muted small' }, 'Turn on email alerts or add a webhook URL above, save, then send the test again.'));
+    } else {
+      out.push(h('p', { class: t.ok ? 'result-ok' : 'result-bad' }, icon(t.ok ? 'ok' : 'critical'),
+        t.message || (t.ok ? 'Test notification sent.' : 'Some channels failed.')));
+      out.push(h('ul', { class: 'channel-results', 'aria-label': 'Results per channel' }, t.results.map((r) => {
+        const again = h('button', { class: 'link-btn', type: 'button', 'aria-label': `Send the test to ${r.channel} again` }, 'Send again');
+        again.addEventListener('click', () => rerun(r.channel, again));
+        return h('li', { class: r.ok ? 'is-ok' : 'is-bad' },
+          statusTag(r.ok ? 'ok' : 'critical', r.ok ? 'Delivered' : 'Failed'),
+          h('p', { class: 'channel-name' }, h('span', { class: 'strong' }, r.channel || '–'),
+            r.type && String(r.type).toLowerCase() !== String(r.channel).toLowerCase() ? h('span', { class: 'muted' }, ` ${r.type}`) : null),
+          h('p', { class: 'channel-msg' }, r.message || ''),
+          r.ok ? null : again);
+      })));
+    }
+    el.replaceChildren(...out);
+  }
+
+  // ------------------------------------------------------------ maintenance window
+  function maintenanceBlock(s) {
+    const dirty = sectionDirty(s);
+    const untilV = valueOf('Maintenance:Until');
+    const reason = valueOf('Maintenance:Reason').value;
+    const until = parseUntil(untilV.value);
+    const active = Number.isFinite(until) && until > Date.now() + serverOffset();
+    const managed = !!untilV.overridden;
+
+    const done = async () => { await load(); body.querySelector('.maint-block button')?.focus(); };
+    const startBtn = h('button', { class: active ? 'btn btn-sm' : 'btn btn-primary btn-sm', type: 'button', disabled: dirty || managed },
+      icon('pause'), active ? 'Change…' : 'Start maintenance');
+    startBtn.addEventListener('click', async () => {
+      if (await startMaintenance({ current: active ? { active, until: untilV.value, reason } : null })) await done();
+    });
+    const endBtn = active ? h('button', { class: 'btn btn-sm btn-maint', type: 'button', disabled: dirty || managed }, 'End maintenance') : null;
+    endBtn?.addEventListener('click', async () => { if (await endMaintenance(endBtn)) await done(); });
+
+    return h('section', { class: `maint-block${active ? ' is-active' : ''}`, 'aria-labelledby': 'maint-block-h' },
+      h('p', { class: 'section-tag' }, '/ Now'),
+      h('h3', { id: 'maint-block-h', class: 'maint-block-title' },
+        active ? [statusTag('warning', 'Active'), ` Maintenance until ${fmtUntil(until)}`] : [statusTag('stopped', 'Off'), ' No maintenance window is active']),
+      h('p', { class: 'enroll-help' }, active
+        ? (reason ? ['Notifications and automatic restarts are paused: ', h('span', { class: 'strong' }, reason)] : 'Notifications and automatic restarts are paused.')
+        : 'Start a window before planned work so restarts and alerts do not page anyone. It ends on its own.'),
+      managed ? h('p', { class: 'hint-warn' }, icon('lock'), 'The portal controls the maintenance window for this server. Change it in the Visibility Portal.')
+        : dirty ? h('p', { class: 'hint-warn' }, icon('warning'), 'Save or discard your changes to this section first.') : null,
+      h('div', { class: 'btn-row' }, startBtn, endBtn));
+  }
+
   function enrollBlock(s) {
     return enrollPanel(state.enroll, {
       isDirty: () => sectionDirty(s),
@@ -280,13 +390,17 @@ export function mount(root, params, ctx) {
     state.rows.get(f.key)?.sync();
     renderNav();
     renderSaveBar();
-    if (findSection(state.sectionId)?.id === 'email') refreshTestBlock();
+    refreshActionBlocks();
   }
 
-  function refreshTestBlock() {
-    const s = findSection('email');
-    const old = body.querySelector('.test-email');
-    if (s && old) old.replaceWith(testEmailBlock(s));
+  /** Action boxes depend on whether their section has unsaved edits. */
+  function refreshActionBlocks() {
+    const s = findSection(state.sectionId);
+    if (!s) return;
+    const swap = (sel, build) => { const old = body.querySelector(sel); if (old) old.replaceWith(build(s)); };
+    if (s.id === 'email') swap('.test-email', testEmailBlock);
+    if (s.id === 'notifications') swap('.test-notify', testNotifyBlock);
+    if (s.id === 'maintenance') swap('.maint-block', maintenanceBlock);
   }
 
   function undoField(f) {
