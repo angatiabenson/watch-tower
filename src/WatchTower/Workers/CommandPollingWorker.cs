@@ -47,14 +47,7 @@ public class CommandPollingWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
-
-                if (opts.Enabled && opts.CommandPoll.PollIntervalSeconds > 0)
-                {
-                    await PollAndExecuteCommandsAsync(opts, stoppingToken);
-                    await ExecuteDueScheduledCommandsAsync(opts, stoppingToken);
-                    await RetryUnsentResultsAsync(stoppingToken);
-                }
+                await RunCycleAsync(stoppingToken);
 
                 var pollInterval = Math.Max(1, _options.CurrentValue.CommandPoll.PollIntervalSeconds);
                 await Task.Delay(TimeSpan.FromSeconds(pollInterval), stoppingToken);
@@ -71,6 +64,18 @@ public class CommandPollingWorker : BackgroundService
         }
 
         _logger.LogInformation("Command Polling Worker stopped");
+    }
+
+    /// <summary>One poll / execute-due / retry-results cycle. Exposed for deterministic testing.</summary>
+    internal async Task RunCycleAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+        if (!opts.Enabled || opts.CommandPoll.PollIntervalSeconds <= 0)
+            return;
+
+        await PollAndExecuteCommandsAsync(opts, ct);
+        await ExecuteDueScheduledCommandsAsync(opts, ct);
+        await RetryUnsentResultsAsync(ct);
     }
 
     private async Task PollAndExecuteCommandsAsync(PortalOptions opts, CancellationToken ct)
@@ -208,17 +213,9 @@ public class CommandPollingWorker : BackgroundService
             await _commandStore.MarkFailedAsync(command.CommandId, actionResult.Message);
         }
 
-        // Send result to portal; store for retry if it fails
-        try
-        {
-            await _portalClient.ReportCommandResultAsync(result, ct);
-            await _commandStore.MarkResultSentAsync(command.CommandId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to send result for command {CommandId}, will retry", command.CommandId);
-        }
+        // Send the result; it stays stored (result_json) and is retried by RetryUnsentResultsAsync
+        // until the portal confirms receipt.
+        await ReportResultAsync(result, ct);
     }
 
     private async Task ExecuteDueScheduledCommandsAsync(PortalOptions opts, CancellationToken ct)
@@ -331,15 +328,34 @@ public class CommandPollingWorker : BackgroundService
     {
         await _commandStore.MarkFailedAsync(command.CommandId, message);
         var result = new CommandResultDto(command.CommandId, false, message, DateTime.UtcNow.ToString("O"));
+        await ReportResultAsync(result, ct);
+    }
+
+    /// <summary>
+    /// Reports a command result and marks it sent only when the portal confirms receipt.
+    /// <see cref="IPortalClient.ReportCommandResultAsync"/> signals failure by returning
+    /// <c>false</c> (it does not throw), so the result must stay pending in that case and be
+    /// picked up by <see cref="RetryUnsentResultsAsync"/>.
+    /// </summary>
+    private async Task<bool> ReportResultAsync(CommandResultDto result, CancellationToken ct)
+    {
         try
         {
-            await _portalClient.ReportCommandResultAsync(result, ct);
-            await _commandStore.MarkResultSentAsync(command.CommandId);
+            if (await _portalClient.ReportCommandResultAsync(result, ct))
+            {
+                await _commandStore.MarkResultSentAsync(result.CommandId);
+                return true;
+            }
+
+            _logger.LogWarning(
+                "Portal did not accept the result for command {CommandId}; will retry", result.CommandId);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            _logger.LogDebug(ex, "Failed to report rejection of command {CommandId}", command.CommandId);
+            _logger.LogWarning(ex,
+                "Failed to send result for command {CommandId}, will retry", result.CommandId);
         }
+        return false;
     }
 
     private async Task RetryUnsentResultsAsync(CancellationToken ct)
