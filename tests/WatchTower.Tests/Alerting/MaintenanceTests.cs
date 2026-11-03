@@ -102,6 +102,101 @@ public class MaintenanceTests
         _metrics.Verify(m => m.AddIncident(It.Is<Incident>(i => i.Type == IncidentType.ServerRestarted)), Times.Once);
     }
 
+    [Fact]
+    public async Task WindowEnd_DeliversHeldNoticesForKnownAlertsAndSummarisesTheRest()
+    {
+        var alerts = Alerts();
+        var pool = AlertKey.AppPool("Pool");
+        var service = AlertKey.Service("Svc");
+        // Notified before the window: operators must hear that it cleared.
+        await alerts.RaiseAsync(Key, AlertSeverity.Critical, "Disk Critical", Disk(), Ct);
+        _maintenance.Active = true;
+        _time.Advance(TimeSpan.FromMinutes(10));
+
+        await alerts.ResolveAsync(Key, ct: Ct);
+        // Opened and cleared inside the window, plus the patch reboot: summarised.
+        await alerts.RaiseAsync(pool, AlertSeverity.Critical, "IIS App Pool Down: Pool",
+            new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ApplicationPoolStartFailed, "failed"), Ct);
+        _time.Advance(TimeSpan.FromMinutes(3));
+        await alerts.ResolveAsync(pool, ct: Ct);
+        await alerts.NotifyEventAsync(AlertKey.Reboot, AlertSeverity.Warning, "Server restarted",
+            new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ServerRestarted, "Server restarted at 00:13 UTC"), Ct);
+        // Still open when the window ends: notified once, on its own.
+        await alerts.RaiseAsync(service, AlertSeverity.Critical, "Service Down: Svc",
+            new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ServiceRestartFailed, "failed to restart"), Ct);
+
+        await alerts.ProcessPendingAsync(Ct);
+        _dispatcher.Sent.Should().ContainSingle("nothing is sent while the window is active");
+
+        _maintenance.Active = false;
+        _time.Advance(TimeSpan.FromMinutes(1));
+        await alerts.ProcessPendingAsync(Ct);
+        await alerts.ProcessPendingAsync(Ct);
+        await alerts.RaiseAsync(service, AlertSeverity.Critical, "Service Down: Svc",
+            new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ServiceRestartFailed, "failed to restart"), Ct);
+
+        var sent = _dispatcher.Delivered.Select(d => d.Notification).Skip(1).ToList();
+        sent.Select(n => (n.Kind, n.AlertKey)).Should().BeEquivalentTo([
+            (AlertNotificationKind.Resolved, "disk:C:\\"),
+            (AlertNotificationKind.Opened, "svc:Svc"),
+            (AlertNotificationKind.Event, "maintenance"),
+        ]);
+        var summary = sent.Single(n => n.AlertKey == "maintenance");
+        summary.Title.Should().Be("Maintenance ended: 2 held notifications");
+        summary.Severity.Should().Be(AlertSeverity.Critical);
+        summary.Description.Should().Contain("IIS App Pool Down: Pool: opened and cleared after 3 min")
+            .And.Contain("Server restarted: Server restarted at 00:13 UTC")
+            .And.NotContain("Disk Critical").And.NotContain("Service Down");
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+        alerts.GetOpenAlerts().Single().NotifyCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task HeldNotifications_SurviveARestart_AndAreSentWhenTheWindowHasEnded()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        _maintenance.Active = true;
+        var before = TestAlerts.Create(_metrics.Object, _time, _dispatcher, portal: _portal.Object,
+            state: new SqliteAlertStateStore(dir.Paths.DatabasePath), maintenance: _maintenance);
+        await before.RaiseAsync(Key, AlertSeverity.Critical, "Disk Critical", Disk(), Ct);
+        await before.NotifyEventAsync(AlertKey.Reboot, AlertSeverity.Warning, "Server restarted",
+            new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ServerRestarted, "rebooted"), Ct);
+
+        // The agent restarts after the window ended.
+        _maintenance.Active = false;
+        var after = TestAlerts.Create(_metrics.Object, _time, _dispatcher, portal: _portal.Object,
+            state: new SqliteAlertStateStore(dir.Paths.DatabasePath), maintenance: _maintenance);
+        await after.ProcessPendingAsync(Ct);
+        await after.ProcessPendingAsync(Ct);
+
+        _dispatcher.Delivered.Select(d => (d.Notification.Kind, d.Notification.AlertKey)).Should().BeEquivalentTo([
+            (AlertNotificationKind.Opened, "disk:C:\\"),
+            (AlertNotificationKind.Event, "maintenance"),
+        ]);
+        new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task WindowEnd_SummaryListsAtMostTwentyItems()
+    {
+        var alerts = Alerts();
+        _maintenance.Active = true;
+        for (var i = 0; i < 25; i++)
+        {
+            await alerts.NotifyEventAsync(AlertKey.Reboot, AlertSeverity.Info, $"Event {i}",
+                new Incident(_time.GetUtcNow().UtcDateTime, IncidentType.ServerRestarted, "x"), Ct);
+        }
+
+        _maintenance.Active = false;
+        await alerts.ProcessPendingAsync(Ct);
+
+        var summary = _dispatcher.Delivered.Should().ContainSingle().Subject.Notification;
+        summary.Title.Should().Be("Maintenance ended: 25 held notifications");
+        summary.Description.Split('\n').Should().HaveCount(1 + AlertManager.MaxSummaryLines + 1);
+        summary.Description.Should().EndWith("… and 5 more (see the incident log)");
+    }
+
     [Theory]
     [InlineData("", false)]
     [InlineData("garbage", false)]

@@ -67,8 +67,11 @@ public interface IAlertManager
     IReadOnlyList<PendingDelivery> GetPendingDeliveries();
 
     /// <summary>
-    /// Outside a maintenance window: sends held notifications and retries the deliveries whose
-    /// backoff has elapsed. Called periodically by <c>NotificationDeliveryWorker</c>.
+    /// Outside a maintenance window: sends what the last window held back and retries the
+    /// deliveries whose backoff has elapsed. Held notices for alerts that are still open, and
+    /// resolutions of alerts notified before the window, are sent one by one; alerts that opened
+    /// and cleared inside the window and held one-shot events are sent as one summary.
+    /// Called periodically by <c>NotificationDeliveryWorker</c>.
     /// </summary>
     Task ProcessPendingAsync(CancellationToken ct = default);
 }

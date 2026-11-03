@@ -169,7 +169,12 @@ This sets `Maintenance:Until` (UTC) / `Maintenance:Reason` in the operator setti
 console can do the same, and the portal can push `maintenance: { untilUtc, reason }`, at
 most 7 days ahead, which takes precedence). During the window incidents are still recorded
 and sent to the portal, but **notifications are held** and **services / application pools
-are not restarted automatically**. Alerts still open when the window ends notify once.
+are not restarted automatically** (checked again right before each automatic start, so a
+window that opens during the restart delay still prevents it). When the window ends (also
+after an agent restart), what was held is delivered: alerts still open notify once, alerts
+that had notified before the window send their resolved notice, and everything else —
+alerts that opened and cleared inside the window, the patch reboot — arrives as one
+"Maintenance ended: N held notifications" summary (alert key `maintenance`).
 
 ### Endpoint checks
 

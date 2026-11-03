@@ -21,6 +21,9 @@ public readonly record struct AlertKey
     /// <summary>One-shot "server restarted" notification.</summary>
     public static AlertKey Reboot { get; } = new("reboot");
 
+    /// <summary>One-shot summary of what a maintenance window held back, sent when it ends.</summary>
+    public static AlertKey Maintenance { get; } = new("maintenance");
+
     public static AlertKey Disk(string drive) => new($"disk:{drive}");
     public static AlertKey DiskQueue(string instance) => new($"diskqueue:{instance}");
     public static AlertKey Network(string interfaceName) => new($"net:{interfaceName}");

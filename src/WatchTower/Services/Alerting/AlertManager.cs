@@ -186,21 +186,29 @@ public sealed class AlertManager : IAlertManager
         _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
 
         var options = _options.CurrentValue;
+        var inMaintenance = _maintenance.Current.Active;
+        var notification = new AlertNotification(
+            AlertNotificationKind.Resolved,
+            key.Value,
+            existing.Severity,
+            existing.Title,
+            description,
+            _server,
+            now,
+            OpenedAtUtc: existing.OpenedAt,
+            Duration: duration,
+            Incident: recoveryIncident,
+            NotifyCount: existing.NotifyCount);
+
         if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
         {
-            var notification = new AlertNotification(
-                AlertNotificationKind.Resolved,
-                key.Value,
-                existing.Severity,
-                existing.Title,
-                description,
-                _server,
-                now,
-                OpenedAtUtc: existing.OpenedAt,
-                Duration: duration,
-                Incident: recoveryIncident,
-                NotifyCount: existing.NotifyCount);
-            await DeliverAsync(notification, now, _maintenance.Current.Active, ct);
+            // Operators know about the alert: tell them it cleared (once the window ends, if held).
+            await DeliverAsync(notification, now, inMaintenance, ct);
+        }
+        else if (options.SendRecovery && (inMaintenance || pending is { Held: true }))
+        {
+            // Opened and cleared while notifications were held: kept for the end-of-window summary.
+            await DeliverAsync(notification, now, held: true, ct);
         }
         else
         {
@@ -216,12 +224,11 @@ public sealed class AlertManager : IAlertManager
         _metricsStore.AddIncident(incident);
         await _portal.PublishAlertEventAsync(incident, key.Value, resolved: null, ct);
         _logger.LogInformation("Event {Key}: {Description}", key.Value, incident.Description);
-        if (_maintenance.Current.Active)
-            return; // recorded and published, not notified
 
+        // During maintenance: recorded and published now, listed in the end-of-window summary.
         await DeliverAsync(new AlertNotification(
             AlertNotificationKind.Event, key.Value, severity, title, incident.Description, _server,
-            incident.Timestamp, Incident: incident), UtcNow, held: false, ct);
+            incident.Timestamp, Incident: incident), UtcNow, held: _maintenance.Current.Active, ct);
     }
 
     public async Task ProcessPendingAsync(CancellationToken ct = default)
@@ -237,6 +244,7 @@ public sealed class AlertManager : IAlertManager
             List<string> due;
             lock (_gate)
             {
+                SummariseHeldLocked(now);
                 due = Deliveries().Values
                     .Where(d => d.Held || d.NextAttemptAt <= now)
                     .OrderBy(d => d.CreatedAt)
@@ -318,6 +326,65 @@ public sealed class AlertManager : IAlertManager
         }
 
         await AttemptClaimedAsync(delivery, ct);
+    }
+
+    /// <summary>Most held items listed one by one in the end-of-window summary.</summary>
+    internal const int MaxSummaryLines = 20;
+
+    /// <summary>
+    /// A maintenance window ended. Held notices operators should get one by one stay as they are
+    /// (alerts still open, and resolutions of alerts that were notified before the window); they
+    /// are released by <see cref="ContinueAsync"/>. Everything else that was held — alerts that
+    /// opened and cleared inside the window, one-shot events such as the patch reboot — is
+    /// replaced by a single summary notification.
+    /// </summary>
+    private void SummariseHeldLocked(DateTime now)
+    {
+        var deliveries = Deliveries();
+        var held = deliveries.Values
+            .Where(d => d.Held && (d.Notification.Kind == AlertNotificationKind.Event ||
+                                   d.Notification is { Kind: AlertNotificationKind.Resolved, NotifyCount: 0 }))
+            .OrderBy(d => d.Notification.OccurredAtUtc)
+            .ToList();
+        if (held.Count == 0)
+            return;
+
+        // Same held rows, same id: a crash before they were removed cannot produce a second summary.
+        var id = "maintenance-" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(string.Join(",", held.Select(d => d.Id).Order(StringComparer.Ordinal)))))[..32];
+        if (!deliveries.ContainsKey(id))
+        {
+            var lines = held.Take(MaxSummaryLines).Select(d => SummaryLine(d.Notification)).ToList();
+            if (held.Count > MaxSummaryLines)
+                lines.Add($"… and {held.Count - MaxSummaryLines} more (see the incident log)");
+            var summary = new AlertNotification(
+                AlertNotificationKind.Event,
+                AlertKey.Maintenance.Value,
+                held.Max(d => d.Notification.Severity),
+                $"Maintenance ended: {held.Count} held notification{(held.Count == 1 ? "" : "s")}",
+                "Held back during the maintenance window:\n" + string.Join("\n", lines),
+                _server,
+                now);
+            var delivery = PendingDelivery.Create(summary, now, held: false) with { Id = id };
+            _store.UpsertDelivery(delivery);
+            deliveries[id] = delivery;
+        }
+
+        foreach (var d in held)
+        {
+            _store.DeleteDelivery(d.Id);
+            deliveries.Remove(d.Id);
+        }
+        _logger.LogInformation("Maintenance window ended: {Count} held notifications summarised", held.Count);
+    }
+
+    private static string SummaryLine(AlertNotification n)
+    {
+        var at = DateTime.SpecifyKind(n.OccurredAtUtc, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+        var label = AlertText.Label(n.Severity);
+        return n.Kind == AlertNotificationKind.Resolved
+            ? $"• {at} [{label}] {n.Title}: opened and cleared after {AlertText.FormatDuration(n.Duration ?? TimeSpan.Zero)}"
+            : $"• {at} [{label}] {n.Title}: {n.Description}";
     }
 
     /// <summary>
