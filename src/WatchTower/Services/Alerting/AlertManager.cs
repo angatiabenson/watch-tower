@@ -22,12 +22,29 @@ public sealed class AlertManager : IAlertManager
     private readonly IMaintenanceState _maintenance;
     private readonly string _server;
 
+    /// <summary>
+    /// Guards the in-memory alert states, pending deliveries and in-flight claims. Never held
+    /// across an await: every decision that depends on more than one of them (closing an alert
+    /// while its notice is being sent, claiming a delivery, recording a channel) is made in one
+    /// section, so the delivery worker and the monitor workers always see a consistent picture.
+    /// </summary>
     private readonly Lock _gate = new();
     private Dictionary<string, AlertState>? _states;
     private Dictionary<string, PendingDelivery>? _deliveries;
 
-    /// <summary>Deliveries being attempted right now (by id), so no two callers send one at once.</summary>
-    private readonly ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Deliveries being sent right now (by id), so no two callers send one at once. Guarded by
+    /// <see cref="_gate"/>: a claim is taken in the same section that reads the delivery, and
+    /// released only after its outcome (including <see cref="MarkNotified"/>) is recorded.
+    /// </summary>
+    private readonly HashSet<string> _inFlight = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Serialises raising and closing per alert key, so the open/resolved lifecycle of one key is
+    /// never interleaved (e.g. a retirement and a raise of the same key). Deliveries never take it,
+    /// and no code path takes two, so it cannot deadlock with the delivery worker.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Keeps <see cref="ProcessPendingAsync"/> runs from overlapping.</summary>
     private readonly SemaphoreSlim _processGate = new(1, 1);
@@ -79,6 +96,8 @@ public sealed class AlertManager : IAlertManager
         Func<CancellationToken, Task<Incident>> incidentFactory,
         CancellationToken ct = default)
     {
+        using var keyLock = await LockKeyAsync(key, ct);
+
         var now = UtcNow;
         var options = _options.CurrentValue;
         var existing = TryGet(key);
@@ -108,24 +127,29 @@ public sealed class AlertManager : IAlertManager
         var isNew = !open || escalated;
 
         AlertState state;
-        if (!open)
+        lock (_gate)
         {
-            state = new AlertState(key.Value, severity, incident.Type, title, now,
-                LastNotifiedAt: null, NotifyCount: 0, ResolvedAt: null, incident.Description);
-        }
-        else
-        {
-            state = existing! with
+            // Re-read: a delivery may have counted a notification while the incident was built.
+            var current = States().GetValueOrDefault(key.Value);
+            if (!open || current is not { IsOpen: true })
             {
-                Severity = escalated ? severity : existing.Severity,
-                IncidentType = escalated ? incident.Type : existing.IncidentType,
-                Title = title,
-                LastDescription = incident.Description,
-            };
-        }
+                state = new AlertState(key.Value, severity, incident.Type, title, now,
+                    LastNotifiedAt: null, NotifyCount: 0, ResolvedAt: null, incident.Description);
+            }
+            else
+            {
+                state = current with
+                {
+                    Severity = escalated ? severity : current.Severity,
+                    IncidentType = escalated ? incident.Type : current.IncidentType,
+                    Title = title,
+                    LastDescription = incident.Description,
+                };
+            }
 
-        // Persist before notifying: a crash mid-send must not re-open (and re-send) the alert.
-        Save(state);
+            // Persist before notifying: a crash mid-send must not re-open (and re-send) the alert.
+            Save(state);
+        }
 
         if (isNew)
         {
@@ -186,40 +210,93 @@ public sealed class AlertManager : IAlertManager
     /// </summary>
     private async Task<bool> CloseAsync(AlertKey key, Incident? recoveryIncident, string? retiredReason, CancellationToken ct)
     {
-        var existing = TryGet(key);
-        if (existing is not { IsOpen: true })
-            return false;
+        using var keyLock = await LockKeyAsync(key, ct);
 
         var now = UtcNow;
-        var duration = now - existing.OpenedAt;
-        Save(existing with { ResolvedAt = now, RetiredReason = retiredReason });
+        var options = _options.CurrentValue;
+        var inMaintenance = _maintenance.Current.Active;
 
-        // An opened notice that failed on every channel so far still tells its story as a
-        // resolved notice; one that was never attempted on any channel is dropped silently.
-        var pending = PendingNotice(key.Value);
-        var attempted = pending is { IsAboutOpenAlert: true, FailedAttempts: > 0 };
-
+        AlertState existing;
+        TimeSpan duration;
         string description;
-        if (retiredReason is not null)
+        PendingDelivery? recovery = null;
+
+        // One section from reading the alert to replacing its notice: a delivery cannot claim the
+        // opened notice, or count it as notified, in between.
+        lock (_gate)
         {
-            description = $"No longer monitored ({retiredReason}); closed after {AlertText.FormatDuration(duration)}. " +
-                          $"Last state: {existing.LastDescription}";
-            await _portal.PublishAlertEventAsync(
-                new Incident(now, existing.IncidentType, description), key.Value, resolved: true, ct);
+            if (States().GetValueOrDefault(key.Value) is not { IsOpen: true } open)
+                return false;
+
+            existing = open;
+            duration = now - existing.OpenedAt;
+            description = retiredReason is not null
+                ? $"No longer monitored ({retiredReason}); closed after {AlertText.FormatDuration(duration)}. " +
+                  $"Last state: {existing.LastDescription}"
+                : recoveryIncident?.Description
+                  // No dedicated recovery incident type (CPU, disks, queues).
+                  ?? $"Resolved after {AlertText.FormatDuration(duration)}: {existing.LastDescription}";
+
+            Save(existing with { ResolvedAt = now, RetiredReason = retiredReason });
+
+            // An opened notice that failed on every channel so far still tells its story as a
+            // resolved notice, and so does one being sent right now (it may reach operators any
+            // moment; it is superseded below, so it cannot count as notified afterwards). One that
+            // was never attempted on any channel is dropped silently.
+            var pending = PendingNoticeLocked(key.Value);
+            var attempted = pending is { IsAboutOpenAlert: true } &&
+                            (pending.FailedAttempts > 0 || _inFlight.Contains(pending.Id));
+
+            var notification = new AlertNotification(
+                AlertNotificationKind.Resolved,
+                key.Value,
+                existing.Severity,
+                existing.Title,
+                description,
+                _server,
+                now,
+                OpenedAtUtc: existing.OpenedAt,
+                Duration: duration,
+                Incident: recoveryIncident,
+                NotifyCount: existing.NotifyCount,
+                RetiredReason: retiredReason);
+
+            if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
+            {
+                // Operators know about the alert: tell them it cleared (once the window ends, if held).
+                recovery = EnqueueLocked(notification, now, held: inMaintenance);
+            }
+            else if (options.SendRecovery && (inMaintenance || pending is { Held: true }))
+            {
+                // Opened and cleared while notifications were held: kept for the end-of-window summary.
+                recovery = EnqueueLocked(notification, now, held: true);
+            }
+            else
+            {
+                RemoveNoticesLocked(key.Value);
+            }
         }
-        else if (recoveryIncident is not null)
+
+        try
         {
-            description = recoveryIncident.Description;
-            _metricsStore.AddIncident(recoveryIncident);
-            await _portal.PublishAlertEventAsync(recoveryIncident, key.Value, resolved: true, ct);
+            if (retiredReason is not null || recoveryIncident is null)
+            {
+                // Retired, or no dedicated recovery incident: tell the portal the alert of this type
+                // cleared. Not recorded locally, where it would read as a new breach.
+                await _portal.PublishAlertEventAsync(
+                    new Incident(now, existing.IncidentType, description), key.Value, resolved: true, ct);
+            }
+            else
+            {
+                _metricsStore.AddIncident(recoveryIncident);
+                await _portal.PublishAlertEventAsync(recoveryIncident, key.Value, resolved: true, ct);
+            }
         }
-        else
+        catch
         {
-            // No dedicated recovery incident type (CPU, disks, queues): tell the portal the alert
-            // of this type cleared. Not recorded locally, where it would read as a new breach.
-            description = $"Resolved after {AlertText.FormatDuration(duration)}: {existing.LastDescription}";
-            await _portal.PublishAlertEventAsync(
-                new Incident(now, existing.IncidentType, description), key.Value, resolved: true, ct);
+            if (recovery is { Held: false })
+                Unclaim(recovery.Id); // still pending: the delivery worker sends it
+            throw;
         }
 
         if (retiredReason is not null)
@@ -227,37 +304,8 @@ public sealed class AlertManager : IAlertManager
         else
             _logger.LogInformation("Alert {Key} resolved after {Duration}", key.Value, AlertText.FormatDuration(duration));
 
-        var options = _options.CurrentValue;
-        var inMaintenance = _maintenance.Current.Active;
-        var notification = new AlertNotification(
-            AlertNotificationKind.Resolved,
-            key.Value,
-            existing.Severity,
-            existing.Title,
-            description,
-            _server,
-            now,
-            OpenedAtUtc: existing.OpenedAt,
-            Duration: duration,
-            Incident: recoveryIncident,
-            NotifyCount: existing.NotifyCount,
-            RetiredReason: retiredReason);
-
-        if (options.SendRecovery && (existing.NotifyCount > 0 || attempted))
-        {
-            // Operators know about the alert: tell them it cleared (once the window ends, if held).
-            await DeliverAsync(notification, now, inMaintenance, ct);
-        }
-        else if (options.SendRecovery && (inMaintenance || pending is { Held: true }))
-        {
-            // Opened and cleared while notifications were held: kept for the end-of-window summary.
-            await DeliverAsync(notification, now, held: true, ct);
-        }
-        else
-        {
-            RemoveNotices(key.Value);
-        }
-
+        if (recovery is not null)
+            await SendOrLogHeldAsync(recovery, ct);
         return true;
     }
 
@@ -323,26 +371,39 @@ public sealed class AlertManager : IAlertManager
     /// </summary>
     private async Task DeliverAsync(AlertNotification notification, DateTime now, bool held, CancellationToken ct)
     {
-        var delivery = PendingDelivery.Create(notification, now, held);
-        if (!held)
-            _inFlight.TryAdd(delivery.Id, 0); // claimed before it becomes visible to ProcessPendingAsync
-
+        PendingDelivery delivery;
         lock (_gate)
-        {
-            if (delivery.IsAlertNotice)
-                RemoveNoticesLocked(notification.AlertKey);
-            _store.UpsertDelivery(delivery);
-            Deliveries()[delivery.Id] = delivery;
-        }
+            delivery = EnqueueLocked(notification, now, held);
+        await SendOrLogHeldAsync(delivery, ct);
+    }
 
-        if (held)
+    /// <summary>
+    /// Persists a new delivery (replacing the alert's previous notice) and, unless held, claims it
+    /// in the same section, before <see cref="ProcessPendingAsync"/> or a close can see it unclaimed.
+    /// </summary>
+    private PendingDelivery EnqueueLocked(AlertNotification notification, DateTime now, bool held)
+    {
+        var delivery = PendingDelivery.Create(notification, now, held);
+        if (delivery.IsAlertNotice)
+            RemoveNoticesLocked(notification.AlertKey);
+        _store.UpsertDelivery(delivery);
+        Deliveries()[delivery.Id] = delivery;
+        if (!held)
+            _inFlight.Add(delivery.Id);
+        return delivery;
+    }
+
+    /// <summary>Sends a delivery claimed by <see cref="EnqueueLocked"/>, or logs that it is held.</summary>
+    private async Task SendOrLogHeldAsync(PendingDelivery delivery, CancellationToken ct)
+    {
+        if (!delivery.Held)
         {
-            _logger.LogInformation("{Kind} notification for alert {Key} held: maintenance window active until {Until:O}",
-                notification.Kind, notification.AlertKey, _maintenance.Current.Until);
+            await AttemptClaimedAsync(delivery, ct);
             return;
         }
 
-        await AttemptClaimedAsync(delivery, ct);
+        _logger.LogInformation("{Kind} notification for alert {Key} held: maintenance window active until {Until:O}",
+            delivery.Notification.Kind, delivery.AlertKey, _maintenance.Current.Until);
     }
 
     /// <summary>
@@ -350,25 +411,29 @@ public sealed class AlertManager : IAlertManager
     /// </summary>
     private async Task ContinueAsync(string id, DateTime now, CancellationToken ct)
     {
-        if (!_inFlight.TryAdd(id, 0))
-            return;
-
         PendingDelivery? delivery;
         lock (_gate)
         {
-            // Re-read under the claim: the snapshot the caller saw may be out of date.
+            // Read and claim in one section: a close in between would otherwise miss this send.
             delivery = Deliveries().GetValueOrDefault(id);
-            if (delivery is not null && delivery.Held)
+            if (delivery is null || !_inFlight.Add(id))
+                return;
+            if (delivery.Held)
                 delivery = ReleaseLocked(delivery, now);
-        }
-
-        if (delivery is null || delivery.NextAttemptAt > now)
-        {
-            _inFlight.TryRemove(id, out _);
-            return;
+            if (delivery is null || delivery.NextAttemptAt > now)
+            {
+                _inFlight.Remove(id);
+                return;
+            }
         }
 
         await AttemptClaimedAsync(delivery, ct);
+    }
+
+    private void Unclaim(string id)
+    {
+        lock (_gate)
+            _inFlight.Remove(id);
     }
 
     /// <summary>Most held items listed one by one in the end-of-window summary.</summary>
@@ -565,7 +630,8 @@ public sealed class AlertManager : IAlertManager
         }
         finally
         {
-            _inFlight.TryRemove(delivery.Id, out _);
+            // Only now: until its outcome is recorded, a close must treat it as being sent.
+            Unclaim(delivery.Id);
         }
     }
 
@@ -585,16 +651,30 @@ public sealed class AlertManager : IAlertManager
     private PendingDelivery? PendingNotice(string key)
     {
         lock (_gate)
-        {
-            return Deliveries().Values.FirstOrDefault(d =>
-                d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase));
-        }
+            return PendingNoticeLocked(key);
     }
 
-    private void RemoveNotices(string key)
+    private PendingDelivery? PendingNoticeLocked(string key) =>
+        Deliveries().Values.FirstOrDefault(d =>
+            d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Takes the per-key lifecycle lock (see <see cref="_keyLocks"/>).</summary>
+    private async Task<KeyLock> LockKeyAsync(AlertKey key, CancellationToken ct)
     {
-        lock (_gate)
-            RemoveNoticesLocked(key);
+        var semaphore = _keyLocks.GetOrAdd(key.Value, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync(ct);
+        return new KeyLock(semaphore);
+    }
+
+    private sealed class KeyLock(SemaphoreSlim semaphore) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+                semaphore.Release();
+        }
     }
 
     private void RemoveNoticesLocked(string key)

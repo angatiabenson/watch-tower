@@ -130,6 +130,72 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
     }
 }
 
+/// <summary>
+/// Holds every dispatch in flight until the test completes it, so a test can interleave other
+/// calls with a send deterministically. Calls are handed out in order by <see cref="NextAsync"/>.
+/// </summary>
+internal sealed class GatedDispatcher : INotificationDispatcher
+{
+    private readonly System.Threading.Channels.Channel<GatedCall> _calls =
+        System.Threading.Channels.Channel.CreateUnbounded<GatedCall>();
+
+    private readonly List<AlertNotification> _sent = [];
+
+    /// <summary>Every dispatch call, in order.</summary>
+    public IReadOnlyList<AlertNotification> Sent
+    {
+        get
+        {
+            lock (_sent)
+                return _sent.ToList();
+        }
+    }
+
+    public Task<DispatchResult> DispatchAsync(AlertNotification notification, IReadOnlySet<string>? skipChannels, CancellationToken ct)
+    {
+        var call = new GatedCall(notification, skipChannels);
+        lock (_sent)
+            _sent.Add(notification);
+        ct.Register(() => call.Result.TrySetCanceled(ct));
+        _calls.Writer.TryWrite(call);
+        return call.Result.Task;
+    }
+
+    /// <summary>The next dispatch call (fails the test rather than hanging when none comes).</summary>
+    public async Task<GatedCall> NextAsync(CancellationToken ct) =>
+        await _calls.Reader.ReadAsync(ct).AsTask().WaitAsync(BoundedWait.Limit, ct);
+
+    /// <summary>Whether a dispatch call is waiting to be taken by <see cref="NextAsync"/>.</summary>
+    public bool HasWaitingCall => _calls.Reader.Count > 0;
+}
+
+internal static class BoundedWait
+{
+    /// <summary>Generous bound for a step that should complete promptly: fails a test instead of hanging it.</summary>
+    public static readonly TimeSpan Limit = TimeSpan.FromSeconds(10);
+
+    public static Task Bounded(this Task task) => task.WaitAsync(Limit, TestContext.Current.CancellationToken);
+
+    public static Task<T> Bounded<T>(this Task<T> task) => task.WaitAsync(Limit, TestContext.Current.CancellationToken);
+}
+
+/// <summary>One dispatch held by <see cref="GatedDispatcher"/>.</summary>
+internal sealed class GatedCall(AlertNotification notification, IReadOnlySet<string>? skipChannels)
+{
+    public AlertNotification Notification { get; } = notification;
+    public IReadOnlySet<string>? SkipChannels { get; } = skipChannels;
+
+    public TaskCompletionSource<DispatchResult> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes the send: every named channel delivered it.</summary>
+    public void Deliver(params string[] channels) =>
+        Result.SetResult(new DispatchResult(channels.Select(c => new ChannelDelivery(c, true, "Delivered")).ToList()));
+
+    /// <summary>Completes the send: every named channel failed.</summary>
+    public void Fail(params string[] channels) =>
+        Result.SetResult(new DispatchResult(channels.Select(c => new ChannelDelivery(c, false, "Rejected with HTTP 503")).ToList()));
+}
+
 internal static class TestAlerts
 {
     public static AlertManager Create(
