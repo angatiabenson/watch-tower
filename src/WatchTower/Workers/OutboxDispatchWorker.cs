@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 
 using WatchTower.Configuration;
+using WatchTower.Portal.Actions;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Storage;
@@ -16,7 +17,9 @@ public class OutboxDispatchWorker : BackgroundService
     private readonly IOutboxStore _outboxStore;
     private readonly IPortalSyncState _syncState;
     private readonly IMetricsStore _metricsStore;
+    private readonly IMetricSnapshotTrigger _snapshotTrigger;
     private readonly IOptionsMonitor<PortalOptions> _options;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<OutboxDispatchWorker> _logger;
 
     private int _flushCycleCount;
@@ -32,16 +35,22 @@ public class OutboxDispatchWorker : BackgroundService
         IOutboxStore outboxStore,
         IPortalSyncState syncState,
         IMetricsStore metricsStore,
+        IMetricSnapshotTrigger snapshotTrigger,
         IOptionsMonitor<PortalOptions> options,
+        TimeProvider timeProvider,
         ILogger<OutboxDispatchWorker> logger)
     {
         _portalClient = portalClient;
         _outboxStore = outboxStore;
         _syncState = syncState;
         _metricsStore = metricsStore;
+        _snapshotTrigger = snapshotTrigger;
         _options = options;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -51,21 +60,13 @@ public class OutboxDispatchWorker : BackgroundService
         {
             try
             {
-                var opts = _options.CurrentValue;
+                await RunCycleAsync(stoppingToken);
 
-                if (opts.Enabled)
-                {
-                    await CollectAndEnqueueMetricsAsync(opts, stoppingToken);
-                    await FlushOutboxAsync(opts, stoppingToken);
-
-                    _flushCycleCount++;
-                    if (_flushCycleCount % 100 == 0)
-                        await _outboxStore.PurgeDeliveredAsync(
-                            TimeSpan.FromHours(opts.Outbox.PurgeDeliveredAfterHours));
-                }
-
+                // Sleep for the flush interval, but wake immediately when the portal sends
+                // ForceMetricSnapshot so the requested snapshot is collected and pushed now.
                 var flushInterval = Math.Max(1, _options.CurrentValue.Outbox.FlushIntervalSeconds);
-                await Task.Delay(TimeSpan.FromSeconds(flushInterval), stoppingToken);
+                if (await _snapshotTrigger.WaitAsync(TimeSpan.FromSeconds(flushInterval), _timeProvider, stoppingToken))
+                    _logger.LogInformation("Metric snapshot requested by the portal; collecting now");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -74,11 +75,26 @@ public class OutboxDispatchWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Outbox Dispatch Worker");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(10), _timeProvider, stoppingToken);
             }
         }
 
         _logger.LogInformation("Outbox Dispatch Worker stopped");
+    }
+
+    /// <summary>One collect + flush (+ periodic purge) cycle. Exposed for deterministic testing.</summary>
+    internal async Task RunCycleAsync(CancellationToken ct)
+    {
+        var opts = _options.CurrentValue;
+        if (!opts.Enabled)
+            return;
+
+        await CollectAndEnqueueMetricsAsync(opts, ct);
+        await FlushOutboxAsync(opts, ct);
+
+        _flushCycleCount++;
+        if (_flushCycleCount % 100 == 0)
+            await _outboxStore.PurgeDeliveredAsync(TimeSpan.FromHours(opts.Outbox.PurgeDeliveredAfterHours));
     }
 
     private async Task CollectAndEnqueueMetricsAsync(PortalOptions opts, CancellationToken ct)
@@ -87,7 +103,7 @@ public class OutboxDispatchWorker : BackgroundService
         {
             var maxBatch = opts.Outbox.MaxBatchSize;
             var agentId = opts.AgentId;
-            var batchedAt = DateTime.UtcNow.ToString("O");
+            var batchedAt = UtcNow.ToString("O");
             var batchId = Guid.NewGuid().ToString();
 
             // Cursor-based append tables
@@ -183,7 +199,7 @@ public class OutboxDispatchWorker : BackgroundService
                 bool terminal = nextAttempt >= opts.Outbox.MaxRetryAttempts;
                 DateTime? nextRetry = terminal
                     ? null
-                    : DateTime.UtcNow.AddSeconds(opts.Outbox.RetryBackoffSeconds * nextAttempt);
+                    : UtcNow.AddSeconds(opts.Outbox.RetryBackoffSeconds * nextAttempt);
 
                 await _outboxStore.MarkFailedAsync(msg.Id, "Send failed", nextRetry, opts.Outbox.MaxRetryAttempts);
 

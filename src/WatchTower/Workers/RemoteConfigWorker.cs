@@ -16,6 +16,7 @@ public class RemoteConfigWorker : BackgroundService
     private readonly WatchTowerPaths _paths;
     private readonly IConfigSyncTrigger _syncTrigger;
     private readonly IOptionsMonitor<PortalOptions> _options;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<RemoteConfigWorker> _logger;
 
     public RemoteConfigWorker(
@@ -24,6 +25,7 @@ public class RemoteConfigWorker : BackgroundService
         WatchTowerPaths paths,
         IConfigSyncTrigger syncTrigger,
         IOptionsMonitor<PortalOptions> options,
+        TimeProvider timeProvider,
         ILogger<RemoteConfigWorker> logger)
     {
         _portalClient = portalClient;
@@ -31,6 +33,7 @@ public class RemoteConfigWorker : BackgroundService
         _paths = paths;
         _syncTrigger = syncTrigger;
         _options = options;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -52,10 +55,10 @@ public class RemoteConfigWorker : BackgroundService
 
                 var intervalSeconds = Math.Max(1, _options.CurrentValue.RemoteConfig.PollIntervalSeconds);
 
-                // Check sync trigger (triggered by ForceConfigSync action)
-                var triggered = _syncTrigger.TryConsume();
-                if (!triggered)
-                    await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken);
+                // Sleep for the poll interval, but wake immediately on ForceConfigSync. The
+                // trigger used to be checked only after a full interval had already elapsed.
+                if (await _syncTrigger.WaitAsync(TimeSpan.FromSeconds(intervalSeconds), _timeProvider, stoppingToken))
+                    _logger.LogInformation("Configuration sync requested by the portal; fetching now");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -64,7 +67,7 @@ public class RemoteConfigWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Remote Config Worker");
-                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(30), _timeProvider, stoppingToken);
             }
         }
 
