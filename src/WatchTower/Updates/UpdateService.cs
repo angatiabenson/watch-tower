@@ -120,10 +120,16 @@ public sealed class UpdateService
     /// <summary>Asks the feed for the newest release.</summary>
     public async Task<UpdateStatus> CheckAsync(CancellationToken ct)
     {
-        if (IsInstalling())
-            return GetStatus(); // never let a check rewrite the phase while the installer runs
         if (!await _operation.WaitAsync(0, ct))
-            return GetStatus(); // a check/download is already running
+            return GetStatus(); // a check/download/install launch is already running
+
+        // Checked UNDER the operation lock, so an installer launched in between cannot have its
+        // Installing phase overwritten by this check.
+        if (IsInstalling())
+        {
+            _operation.Release();
+            return GetStatus();
+        }
 
         try
         {
@@ -180,37 +186,49 @@ public sealed class UpdateService
     /// </summary>
     public bool TryStartDownload(bool countdown, out string message)
     {
-        UpdateManifest? manifest;
-        if (IsInstalling())
-        {
-            message = "An installation is already in progress.";
-            return false;
-        }
-        lock (_lock)
-        {
-            manifest = _available;
-            if (manifest is null)
-            {
-                message = "No update is available. Check for updates first.";
-                return false;
-            }
-            if (_blockedReason is not null)
-            {
-                message = _blockedReason;
-                return false;
-            }
-            if (_phase == UpdatePhase.ReadyToInstall)
-            {
-                if (countdown) StartCountdownLocked();
-                message = "The update is already downloaded.";
-                return true;
-            }
-        }
-
+        // Take the operation lock FIRST, then inspect state and pick the manifest under it: a
+        // concurrent check can no longer swap the offered release between selection and staging
+        // (which would stage release A while advertising — and health-checking — release B).
         if (!_operation.Wait(0))
         {
             message = "A check or download is already in progress.";
             return false;
+        }
+
+        UpdateManifest? manifest;
+        var handedOff = false;
+        try
+        {
+            if (IsInstalling())
+            {
+                message = "An installation is already in progress.";
+                return false;
+            }
+            lock (_lock)
+            {
+                manifest = _available;
+                if (manifest is null)
+                {
+                    message = "No update is available. Check for updates first.";
+                    return false;
+                }
+                if (_blockedReason is not null)
+                {
+                    message = _blockedReason;
+                    return false;
+                }
+                if (_phase == UpdatePhase.ReadyToInstall)
+                {
+                    if (countdown) StartCountdownLocked();
+                    message = "The update is already downloaded.";
+                    return true;
+                }
+            }
+            handedOff = true;
+        }
+        finally
+        {
+            if (!handedOff) _operation.Release();
         }
 
         _ = Task.Run(async () =>
