@@ -44,6 +44,7 @@ Options (command-line `--Name value`, or environment variables):
 | --- | --- | --- |
 | `--urls` | `http://localhost:5080` | Where to listen (standard ASP.NET Core setting). Use `http://0.0.0.0:5080` to accept agents from other machines. |
 | `--PublicUrl` | the first `--urls` value | The URL agents use to reach the portal; it goes into enrollment codes. Set it when listening on `0.0.0.0` or behind a proxy, e.g. `--PublicUrl http://devbox.lan:5080`. |
+| `--PathBase` | none | Serve everything below a path prefix, e.g. `/watchtower`; the public URL then ends with it. |
 | `--AgentId` | `agent-01` | ID of the agent created at start-up. |
 | `--AdminKey` | random | Key for the `/admin` API. |
 

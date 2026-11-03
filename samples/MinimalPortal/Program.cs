@@ -60,9 +60,13 @@ public static class MinimalPortalApp
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
 
+        // Optional path prefix, e.g. /watchtower: agents then use BaseUrl https://host/watchtower and
+        // call https://host/watchtower/api/v1/agent/... (the agent appends the API path to BaseUrl).
+        var pathBase = builder.Configuration["PathBase"]?.TrimEnd('/');
+
         var options = new PortalOptions();
         var urls = builder.Configuration["urls"] ?? "http://localhost:5080";
-        options.PublicUrl = builder.Configuration["PublicUrl"] ?? urls.Split(';')[0];
+        options.PublicUrl = builder.Configuration["PublicUrl"] ?? urls.Split(';')[0].TrimEnd('/') + pathBase;
         if (builder.Configuration["AdminKey"] is { Length: > 0 } adminKey)
             options.AdminKey = adminKey;
 
@@ -73,6 +77,11 @@ public static class MinimalPortalApp
         configure?.Invoke(builder);
 
         var app = builder.Build();
+        if (!string.IsNullOrEmpty(pathBase))
+        {
+            app.UsePathBase(pathBase);
+            app.UseRouting(); // after UsePathBase, so routes match below the prefix
+        }
         app.MapGet("/", () => Results.Text(
             "WatchTower MinimalPortal. Agent API under /api/v1/agent/, admin API under /admin/ (see README.md)."));
         app.MapAgentApi();
