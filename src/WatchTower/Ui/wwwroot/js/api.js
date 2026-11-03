@@ -114,6 +114,10 @@ export const api = {
   timeZones: () => request('/system/timezones'),
 
   testEmail: () => post('/actions/test-email'),
+  /** channel: a channel name (email, teams, …) or omitted for every enabled channel. */
+  testNotification: (channel) => post('/actions/test-notification', channel ? { channel } : {}),
+  startMaintenance: (minutes, reason) => post('/actions/maintenance', { minutes, reason }),
+  stopMaintenance: () => post('/actions/maintenance/stop'),
   enroll: (code) => post('/actions/enroll', { code }),
   restart: () => post('/actions/restart'),
 

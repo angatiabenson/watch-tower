@@ -70,6 +70,8 @@ const ICONS = {
   chevron: 'M6 15l6-6 6 6',
   copy: 'M9 9h11v11H9zM5 15H4V4h11v1',
   download: 'M12 4v11M7 10.5l5 5 5-5M5 20h14',
+  pause: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM10 8.5v7M14 8.5v7',
+  bell: 'M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15zM10 20.5h4',
 };
 
 export function icon(name, cls = '') {

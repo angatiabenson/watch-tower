@@ -7,6 +7,7 @@ import { api, msUntilServer } from '../api.js';
 import { notice, restartButton, copyButton, busy, toast } from '../ui.js';
 import { stripChart, usageBar } from '../chart.js';
 import { watchInstall, secondsLeft, countdownRunning } from './updates.js';
+import { maintenanceBanner, startMaintenance } from './maintenance.js';
 
 const REFRESH_MS = 10_000;
 // One-time notice after an install: dismissal is remembered per completedAt.
@@ -25,31 +26,51 @@ export function mount(root, _params, ctx) {
 
   const updated = h('span', { class: 'muted small' }, 'Loading…');
   const refreshBtn = h('button', { class: 'btn btn-sm', type: 'button', onclick: () => refresh() }, icon('refresh'), 'Refresh');
+  // Hidden while a window is active: the banner then offers "Change…" and "End maintenance".
+  const maintBtn = h('button', { class: 'btn btn-sm', type: 'button', hidden: true }, icon('pause'), 'Start maintenance');
+  maintBtn.addEventListener('click', async () => {
+    if (await startMaintenance()) await afterMaintenanceChange();
+  });
+  // The button that was used disappears with the re-render: move focus to its counterpart.
+  async function afterMaintenanceChange() {
+    await refresh();
+    const target = maintBtn.hidden ? slots.maint.querySelector('button') : maintBtn;
+    target?.focus();
+  }
   const errorSlot = h('div');
   const slots = {
+    maint: h('div', { class: 'dash-maint' }),
     update: h('div', { class: 'dash-update' }),
     health: h('div', { class: 'dash-health' }),
     strip: h('section', { class: 'stats-strip', 'aria-label': 'Summary' }),
+    alerts: h('section', { class: 'panel dash-alerts', 'aria-labelledby': 'h-alerts' }),
     readouts: h('section', { class: 'readouts', 'aria-label': 'Processor and memory' }),
     agent: h('section', { class: 'panel dash-agent', 'aria-labelledby': 'h-agent' }),
     disks: h('section', { class: 'panel dash-disks', 'aria-labelledby': 'h-disks' }),
+    endpoints: h('section', { class: 'panel dash-endpoints', 'aria-labelledby': 'h-endpoints', hidden: true }),
     services: h('section', { class: 'panel dash-services', 'aria-labelledby': 'h-services' }),
     pools: h('section', { class: 'panel dash-pools', 'aria-labelledby': 'h-pools' }),
     io: h('section', { class: 'panel dash-io', 'aria-labelledby': 'h-io' }),
     incidents: h('section', { class: 'panel dash-incidents', 'aria-labelledby': 'h-incidents' }),
   };
 
-  ctx.setActions(updated, refreshBtn);
+  ctx.setActions(updated, maintBtn, refreshBtn);
   // Announces a scheduled restart once (the ticking countdown title itself is not live).
   const live = h('p', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
   root.append(
     live,
     errorSlot,
+    slots.maint,
     slots.update,
     slots.health,
     slots.strip,
+    slots.alerts,
     h('div', { class: 'dash-grid' },
-      slots.readouts, slots.agent, slots.disks, slots.incidents, slots.services, slots.pools, slots.io));
+      slots.readouts, slots.agent,
+      // Disks and the (optional) endpoint checks share one grid area, so a server without
+      // endpoint checks gets no empty row.
+      h('div', { class: 'dash-stack' }, slots.disks, slots.endpoints),
+      slots.incidents, slots.services, slots.pools, slots.io));
 
   // Rebuild a slot only when its data changed: keeps focus stable and stops screen
   // readers from re-announcing unchanged banners every 10 seconds.
@@ -111,13 +132,33 @@ export function mount(root, _params, ctx) {
   function render(s) {
     const m = s.metrics || {};
     lastStatus = s;
+    const maint = s.maintenance && s.maintenance.active ? s.maintenance : null;
+    // Older agents send no maintenance block: offer nothing rather than a failing action.
+    maintBtn.hidden = !s.maintenance || !!maint;
+    patch('maint', maint, (d) => (d ? maintenanceBanner(d, { onChanged: afterMaintenanceChange }) : null));
     renderUpdateSlot();
-    patch('health', { health: s.health, restart: s.restartPending }, renderHealth);
+    const workers = Array.isArray(s.workers) ? s.workers : [];
+    // Only stalled workers go into the key: healthy ones change lastSuccessAt every few seconds.
+    const stale = workers.filter((w) => w.stale).map((w) => ({ name: w.name, at: w.lastSuccessAt, every: w.intervalSeconds }));
+    patch('health', { health: s.health, restart: s.restartPending, stale }, renderHealth);
     patch('strip', { svc: m.services, pools: m.appPools, disks: m.disks, inc: s.incidents }, renderStrip);
+    // Minute bucket: the "open for" durations advance without rebuilding on every refresh.
+    if (Array.isArray(s.alerts)) {
+      patch('alerts', { alerts: s.alerts, held: !!maint, minute: s.alerts.length ? Math.floor(Date.now() / 60000) : 0 }, renderAlerts);
+    } else {
+      slots.alerts.hidden = true; // older agent without the alerts list
+    }
     patch('readouts', { cpu: m.cpu, ram: m.ram }, renderReadouts);
     // Uptime in whole minutes so the panel is not rebuilt on every tick.
-    patch('agent', { agent: { ...s.agent, uptimeSeconds: undefined, uptimeMinutes: Math.floor((s.agent?.uptimeSeconds ?? 0) / 60) }, portal: s.portal, email: s.email }, renderAgent);
+    patch('agent', {
+      agent: { ...s.agent, uptimeSeconds: undefined, uptimeMinutes: Math.floor((s.agent?.uptimeSeconds ?? 0) / 60) },
+      portal: s.portal, email: s.email,
+      workers: Array.isArray(s.workers) ? { total: workers.length, stale: stale.length } : null,
+    }, renderAgent);
     patch('disks', m.disks, renderDisks);
+    const endpoints = Array.isArray(m.endpoints) ? m.endpoints : [];
+    slots.endpoints.hidden = !endpoints.length;
+    patch('endpoints', endpoints, renderEndpoints);
     patch('services', m.services, renderServices);
     patch('pools', m.appPools, renderPools);
     patch('io', { q: m.diskQueues, n: m.network }, renderIo);
@@ -254,12 +295,35 @@ function emptyState(text, link) {
   return h('p', { class: 'empty' }, text, link ? [' ', h('a', { href: link.href }, link.label)] : null);
 }
 
-function renderHealth({ health, restart }) {
+const shortDtf = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+/** "10:42" today, otherwise a short date and time. */
+function whenText(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return null;
+  const now = new Date();
+  const today = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return today ? fmtTime(iso) : shortDtf.format(d);
+}
+
+function staleWorkerLine(w) {
+  const at = whenText(w.at);
+  const every = isNum(w.every) && w.every > 0 ? `, expected every ${fmtDuration(w.every)}` : '';
+  return at ? `${w.name}: last successful check at ${at}${every}` : `${w.name}: no successful check since WatchTower started${every}`;
+}
+
+function renderHealth({ health, restart, stale }) {
   const errors = health?.errors || [];
   const warnings = health?.warnings || [];
   const out = [];
   if (restart) out.push(notice('warning', 'Restart needed', 'Some saved settings take effect only after WatchTower restarts.', restartButton()));
   if (errors.length) out.push(notice('critical', errors.length === 1 ? 'WatchTower has a problem' : `WatchTower has ${errors.length} problems`, errors, null, { live: true }));
+  if (stale?.length) {
+    out.push(notice('critical',
+      stale.length === 1 ? 'A monitoring worker has stalled' : `${stale.length} monitoring workers have stalled`,
+      [...stale.map(staleWorkerLine), 'Those checks are not running, and the heartbeat reports a failure until they recover.'],
+      h('a', { class: 'btn btn-sm', href: '#/logs' }, 'Open logs')));
+  }
   if (warnings.length) out.push(notice('warning', warnings.length === 1 ? '1 warning' : `${warnings.length} warnings`, warnings,
     h('a', { class: 'btn btn-sm', href: '#/config' }, 'Open configuration')));
   if (!out.length) out.push(h('p', { class: 'all-clear' }, h('span', { class: 'tag-glyph', 'aria-hidden': 'true' }, '■'), 'All checks are passing'));
@@ -334,7 +398,7 @@ function renderReadouts({ cpu, ram }) {
   return [readout('cpu', 'Processor', cpu, 'Last 60 minutes'), readout('ram', 'Memory', ram, ramLine)];
 }
 
-function renderAgent({ agent: a = {}, portal, email }) {
+function renderAgent({ agent: a = {}, portal, email, workers }) {
   const row = (k, v, cls) => h('div', null, h('dt', null, k), h('dd', { class: cls }, v ?? '–'));
   const portalText = portal?.enabled
     ? [statusTag('ok', 'Connected'), ' ', h('span', { class: 'break' }, portal.baseUrl || ''), portal.protocol ? ` (${portal.protocol})` : '']
@@ -352,6 +416,11 @@ function renderAgent({ agent: a = {}, portal, email }) {
       row('WatchTower', a.version ? `Version ${a.version}` : null),
       row('Runs as', a.isWindowsService ? `Windows service “${a.serviceName}”` : 'Console process (not a service)'),
       row('Uptime', isNum(a.uptimeMinutes) ? fmtDuration(a.uptimeMinutes * 60) : null),
+      workers ? row('Monitoring', !workers.total
+        ? h('span', { class: 'muted' }, 'Starting…')
+        : workers.stale
+          ? statusTag('critical', `${workers.stale} of ${workers.total} stalled`)
+          : statusTag('ok', `All ${workers.total} workers running`)) : null,
       row('Started', a.startedAt ? fmtDateTime(a.startedAt) : null),
       row('Process ID', isNum(a.processId) ? String(a.processId) : null),
       row('Email alerts', emailText),
@@ -448,4 +517,94 @@ function renderIncidents(incidents) {
         h('p', { class: 'strong' }, humanize(i.type)),
         i.description ? h('p', { class: 'incident-desc' }, i.description) : null));
   }))];
+}
+
+// ------------------------------------------------------------------ alerting
+
+const SEV_RANK = { critical: 0, warning: 1, info: 2 };
+
+/** Open alerts: most severe first, then the longest-running. */
+function renderAlerts({ alerts, held }) {
+  const list = [...(Array.isArray(alerts) ? alerts : [])].sort((a, b) =>
+    (SEV_RANK[a.severity] ?? 3) - (SEV_RANK[b.severity] ?? 3) || String(a.openedAt).localeCompare(String(b.openedAt)));
+  const crit = list.filter((a) => a.severity === 'critical').length;
+  const head = panelHead('h-alerts', 'Open alerts',
+    list.length ? h('span', { class: 'panel-meta' }, [
+      crit ? `${list.length} open, ${crit} critical` : `${list.length} open`,
+      held ? ' · notifications held' : '',
+    ].join('')) : null);
+  if (!list.length) {
+    return [head, h('p', { class: 'empty empty-good' }, h('span', { class: 'tag-glyph', 'aria-hidden': 'true' }, '■'),
+      'No open alerts. Everything WatchTower watches is within its limits.')];
+  }
+  return [head, h('ol', { class: 'alerts' }, list.map((a) => {
+    const [kind, label] = SEVERITY[a.severity] || SEVERITY.info;
+    const ageMs = -msUntilServer(a.openedAt);
+    const notified = isNum(a.notifyCount) && a.notifyCount > 0;
+    return h('li', { class: `alert sev-${kind}` },
+      h('time', { class: 'alert-when', datetime: a.openedAt, title: `Opened ${fmtDateTime(a.openedAt)}` },
+        h('span', { class: 'alert-time' }, whenText(a.openedAt) || '–'),
+        h('span', { class: 'muted' }, Number.isFinite(ageMs) ? `open ${fmtDuration(Math.max(0, ageMs / 1000))}` : '')),
+      statusTag(kind, label),
+      h('div', { class: 'alert-body' },
+        h('p', { class: 'strong' }, a.title || humanize(a.key)),
+        a.description && a.description !== a.title ? h('p', { class: 'alert-desc' }, a.description) : null,
+        a.key ? h('p', { class: 'alert-key' }, a.key) : null),
+      h('div', { class: 'alert-notify' },
+        notified
+          ? [h('span', { class: 'alert-count' }, `Notified ${a.notifyCount}×`),
+            a.lastNotifiedAt ? h('span', { class: 'muted' }, `last ${whenText(a.lastNotifiedAt)}`) : null]
+          : [h('span', { class: 'alert-count is-held' }, 'Not sent'),
+            h('span', { class: 'muted' }, held ? 'Held for maintenance' : 'Held: no channel took it')]));
+  }))];
+}
+
+const ENDPOINT_STATUS = {
+  up: ['ok', 'Up', 2],
+  expiring: ['warning', 'Expiring', 1],
+  down: ['critical', 'Down', 0],
+};
+const ENDPOINT_TYPE = { http: 'HTTP', tcp: 'TCP', certificate: 'TLS cert' };
+
+function endpointState(e) {
+  const known = ENDPOINT_STATUS[String(e.status || '').toLowerCase()];
+  if (known) return known;
+  return e.isUp === false ? ENDPOINT_STATUS.down : ['info', e.status || 'Unknown', 1];
+}
+
+function certText(days) {
+  if (!isNum(days)) return '–';
+  if (days < 0) return 'Expired';
+  return days < 1 ? '< 1 day' : `${fmt0(Math.floor(days))} d`;
+}
+
+/** Monitoring:Endpoints results (read-only; configured with `WatchTower config import`). */
+function renderEndpoints(endpoints) {
+  const list = [...endpoints].sort((a, b) => endpointState(a)[2] - endpointState(b)[2] || String(a.name).localeCompare(String(b.name)));
+  const down = list.filter((e) => endpointState(e)[0] === 'critical').length;
+  const expiring = list.filter((e) => endpointState(e)[0] === 'warning').length;
+  const meta = [down ? `${down} down` : '', expiring ? `${expiring} expiring` : ''].filter(Boolean).join(', ') || `${list.length} checked`;
+  return [
+    panelHead('h-endpoints', 'Endpoints', h('span', { class: 'panel-meta' }, meta)),
+    h('div', { class: 'table-scroll flush' }, h('table', { class: 'table endpoints' },
+      h('thead', null, h('tr', null,
+        h('th', { scope: 'col' }, 'Endpoint'),
+        h('th', { scope: 'col' }, 'Status'),
+        h('th', { scope: 'col', class: 'num' }, 'Response'),
+        h('th', { scope: 'col', class: 'num' }, 'Certificate'))),
+      h('tbody', null, list.map((e) => {
+        const [kind, label] = endpointState(e);
+        const certKind = isNum(e.certificateDaysLeft) && kind !== 'ok' && e.certificateDaysLeft < 30 ? kind : null;
+        return h('tr', { class: `ep sev-${kind}`, title: e.checkedAt ? `Checked ${fmtDateTime(e.checkedAt)}` : null },
+          h('td', { class: 'ep-main' },
+            h('p', { class: 'ep-name' },
+              h('span', { class: 'strong' }, e.name || '–'),
+              e.type ? h('span', { class: 'badge ep-type' }, ENDPOINT_TYPE[String(e.type).toLowerCase()] || e.type) : null),
+            e.target ? h('p', { class: 'ep-target' }, e.target) : null,
+            e.detail ? h('p', { class: `ep-detail${kind === 'ok' ? '' : ` is-${kind}`}` }, e.detail) : null),
+          h('td', { class: 'ep-status' }, statusTag(kind, label)),
+          h('td', { class: 'num' }, isNum(e.responseTimeMs) ? `${fmt0(e.responseTimeMs)} ms` : '–'),
+          h('td', { class: `num${certKind ? ` is-${certKind}` : ''}` }, certText(e.certificateDaysLeft)));
+      })))),
+  ];
 }
