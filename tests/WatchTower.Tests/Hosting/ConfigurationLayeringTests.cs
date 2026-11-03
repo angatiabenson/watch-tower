@@ -2,6 +2,7 @@ using AwesomeAssertions;
 
 using Microsoft.Extensions.Configuration;
 
+using WatchTower.Configuration.Layered;
 using WatchTower.Configuration.Secrets;
 using WatchTower.Hosting;
 
@@ -53,7 +54,7 @@ public class ConfigurationLayeringTests
         var config = Build(dir.Paths);
 
         config["Email:Password"].Should().BeEmpty();
-        ProtectedJsonConfigurationProvider.FindUndecryptableKeys(config).Should().Contain("Email:Password");
+        LayeredJsonConfigurationProvider.Find(config)!.UndecryptableKeys.Should().ContainKey("Email:Password");
     }
 
     [Fact]
@@ -67,10 +68,78 @@ public class ConfigurationLayeringTests
         act.Should().NotThrow();
     }
 
+    [Fact]
+    public void HigherLayerList_ReplacesLowerListEntirely()
+    {
+        // Regression: index-wise merging turned ["A","B","C"] + ["X"] into ["X","B","C"].
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        File.WriteAllText(dir.Paths.SettingsFilePath, """
+            { "Monitoring": { "Services": { "WatchedServices": ["A", "B", "C"] } } }
+            """);
+        File.WriteAllText(dir.Paths.RemoteConfigFilePath, """
+            { "Monitoring": { "Services": { "WatchedServices": ["X"] } } }
+            """);
+
+        var config = Build(dir.Paths);
+
+        config.GetSection("Monitoring:Services:WatchedServices").Get<string[]>().Should().Equal("X");
+    }
+
+    [Fact]
+    public void Origins_ReportWhichLayerSuppliedEachKey()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        dir.WriteInstallFile("appsettings.json", """{ "Email": { "SmtpPort": 587, "FromName": "WatchTower" } }""");
+        File.WriteAllText(dir.Paths.SettingsFilePath,
+            """{ "Email": { "SmtpPort": 25 }, "Monitoring": { "Services": { "WatchedServices": ["A"] } } }""");
+        File.WriteAllText(dir.Paths.RemoteConfigFilePath,
+            """{ "Monitoring": { "Services": { "WatchedServices": ["X"] } } }""");
+
+        var layered = LayeredJsonConfigurationProvider.Find(Build(dir.Paths))!;
+
+        layered.GetOrigin("Email:FromName").Should().Be(ConfigLayer.Default);
+        layered.GetOrigin("Email:SmtpPort").Should().Be(ConfigLayer.Operator);
+        layered.GetOrigin("Monitoring:Services:WatchedServices").Should().Be(ConfigLayer.Portal);
+        layered.GetOrigin("Email:Password").Should().BeNull();
+    }
+
+    [Fact]
+    public async Task OperatorFileChange_IsPickedUpByReload()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        File.WriteAllText(dir.Paths.SettingsFilePath, """{ "Display": { "Timezone": "UTC" } }""");
+        var builder = new ConfigurationBuilder();
+        WatchTowerHost.ConfigureSources(builder, dir.Paths, "Production", reloadOnChange: true);
+        var config = builder.Build();
+        var reloaded = new TaskCompletionSource();
+        Microsoft.Extensions.Primitives.ChangeToken.OnChange(config.GetReloadToken, () => reloaded.TrySetResult());
+
+        File.WriteAllText(dir.Paths.SettingsFilePath, """{ "Display": { "Timezone": "Africa/Nairobi" } }""");
+        await reloaded.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        config["Display:Timezone"].Should().Be("Africa/Nairobi");
+        (config as IDisposable)?.Dispose();
+    }
+
+    [Fact]
+    public void MalformedOperatorFile_FailsWithFilePathInMessage()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        File.WriteAllText(dir.Paths.SettingsFilePath, "{ not json");
+
+        var act = () => Build(dir.Paths);
+
+        act.Should().Throw<InvalidDataException>().WithMessage("*watchtower.settings.json*");
+    }
+
     private static IConfigurationRoot Build(WatchTowerPaths paths)
     {
         var builder = new ConfigurationBuilder();
-        WatchTowerHost.ConfigureSources(builder, paths, "Production");
+        WatchTowerHost.ConfigureSources(builder, paths, "Production", reloadOnChange: false);
         return builder.Build();
     }
 }

@@ -96,4 +96,81 @@ internal sealed class ServiceInstaller(string serviceName, TextWriter output)
     }
 
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
+
+    /// <summary>The --data-dir the installed service runs with, or null (not installed / default).</summary>
+    public string? GetConfiguredDataDirectory() => DataDirectoryOf(ReadImagePath(ServiceName));
+
+    /// <summary>Names of installed services whose command line uses <paramref name="dataDirectory"/>.</summary>
+    public static IEnumerable<string> FindServicesUsingDataDirectory(string dataDirectory)
+    {
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+        foreach (var service in ServiceController.GetServices())
+        {
+            using (service)
+            {
+                var imagePath = ReadImagePath(service.ServiceName);
+                if (imagePath is null || !imagePath.Contains("WatchTower", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var dir = DataDirectoryOf(imagePath);
+                if (dir is not null && string.Equals(
+                        Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir)), target, StringComparison.OrdinalIgnoreCase))
+                    yield return service.ServiceName;
+            }
+        }
+    }
+
+    private static string? ReadImagePath(string serviceName)
+    {
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{serviceName}");
+        return key?.GetValue("ImagePath", null, Microsoft.Win32.RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
+    }
+
+    internal static string? DataDirectoryOf(string? commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine))
+            return null;
+        var args = SplitCommandLine(commandLine);
+        var index = args.FindIndex(a => string.Equals(a, "--data-dir", StringComparison.OrdinalIgnoreCase));
+        if (index >= 0 && index + 1 < args.Count)
+            return Environment.ExpandEnvironmentVariables(args[index + 1]);
+        var inline = args.FirstOrDefault(a => a.StartsWith("--data-dir=", StringComparison.OrdinalIgnoreCase));
+        return inline is null ? null : Environment.ExpandEnvironmentVariables(inline["--data-dir=".Length..]);
+    }
+
+    /// <summary>Minimal Windows command-line tokenizer (quotes and backslash-escaped quotes).</summary>
+    internal static List<string> SplitCommandLine(string commandLine)
+    {
+        var result = new List<string>();
+        var current = new System.Text.StringBuilder();
+        var inQuotes = false;
+        var hasToken = false;
+        for (var i = 0; i < commandLine.Length; i++)
+        {
+            var c = commandLine[i];
+            if (c == '\\' && i + 1 < commandLine.Length && commandLine[i + 1] == '"')
+            {
+                current.Append('"');
+                i++;
+                hasToken = true;
+            }
+            else if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                hasToken = true;
+            }
+            else if (char.IsWhiteSpace(c) && !inQuotes)
+            {
+                if (hasToken) result.Add(current.ToString());
+                current.Clear();
+                hasToken = false;
+            }
+            else
+            {
+                current.Append(c);
+                hasToken = true;
+            }
+        }
+        if (hasToken) result.Add(current.ToString());
+        return result;
+    }
 }

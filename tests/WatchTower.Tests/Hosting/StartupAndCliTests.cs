@@ -106,7 +106,7 @@ public class CliTests
         var seed = Path.Combine(dir.Root, "seed.json");
         File.WriteAllText(seed, """
             // comments are allowed in seed files
-            { "VisibilityPortal": { "Enabled": true, "AgentId": "srv-01", "AgentToken": "very-secret" }, }
+            { "VisibilityPortal": { "Enabled": true, "AgentId": "srv-01", "AgentToken": "very-secret", "BaseUrl": "https://portal.example.com" }, }
             """);
 
         WatchTowerCli.ImportSettings(dir.Paths, new FileInfo(seed), TextWriter.Null);

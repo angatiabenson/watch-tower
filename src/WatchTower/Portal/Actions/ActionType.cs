@@ -18,6 +18,12 @@ public enum ActionType
     ForceConfigSync = 302,
     AgentRestart = 303,
 
+    /// <summary>
+    /// Check for, download and install the newest release (parameter <c>Version</c> optionally
+    /// pins the version that must be offered). The agent restarts as part of the install.
+    /// </summary>
+    AgentUpdate = 304,
+
     // Configuration: 401
     ApplyConfiguration = 401,
 }

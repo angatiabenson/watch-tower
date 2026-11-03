@@ -1,15 +1,20 @@
-<Project Sdk="Microsoft.NET.Sdk.Worker">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <AssemblyName>WatchTower</AssemblyName>
     <RootNamespace>WatchTower</RootNamespace>
+    <!-- Console assets are embedded so the single-file exe is fully self-contained. -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+    <!-- Not an IIS/static-web-assets app: no web.config or static asset manifests in the output. -->
+    <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
   </PropertyGroup>
 
   <!-- Distributable build: `dotnet publish -c Release` yields a self-contained, single-file
        WatchTower.exe (no .NET runtime needed on target servers) plus appsettings.json. -->
-  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' And '$(_IsPublishing)' == 'true'">
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -26,9 +31,9 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="MailKit" />
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
-    <PackageReference Include="Microsoft.Extensions.Http" />
     <PackageReference Include="Serilog.Extensions.Hosting" />
     <PackageReference Include="Serilog.Settings.Configuration" />
     <PackageReference Include="Serilog.Sinks.Console" />
@@ -42,6 +47,10 @@
   <ItemGroup>
     <!-- Development overrides never ship. -->
     <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
+    <Content Remove="Ui/wwwroot/**" />
+    <None Remove="Ui/wwwroot/**" />
+    <EmbeddedResource Include="Ui/wwwroot/**" />
+    <None Include="Ui/API.md" />
   </ItemGroup>
 
   <ItemGroup>

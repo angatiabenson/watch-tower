@@ -1,3 +1,8 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+using WatchTower.Configuration.Settings;
+
 namespace WatchTower.Hosting;
 
 /// <summary>
@@ -47,16 +52,33 @@ public static class LegacyStateMigrator
                 Path.Combine(paths.InstallDirectory, WatchTowerPaths.LastReportMarkerFileName),
                 paths.LastReportMarkerPath, copied, skipIfTargetExists: true);
 
-            // An existing deployment's appsettings.json was edited by hand. Carry the whole file
-            // forward as the operator settings layer so upgrades (which replace appsettings.json
-            // with shipped defaults) never silently revert their configuration.
-            if (isLegacyInstall && !File.Exists(paths.SettingsFilePath))
-                CopyIfPresent(paths.DefaultSettingsFilePath, paths.SettingsFilePath, copied);
+            // An existing deployment's appsettings.json was edited by hand. Carry it forward as
+            // the operator settings layer so upgrades (which replace appsettings.json with
+            // shipped defaults) never silently revert the configuration. Anything already in
+            // the operator file (e.g. a seed imported by `install --config`) takes precedence.
+            // Secrets are encrypted on the way in.
+            if (isLegacyInstall && File.Exists(paths.DefaultSettingsFilePath))
+            {
+                var legacy = ParseObject(File.ReadAllText(paths.DefaultSettingsFilePath));
+                new JsonSettingsStore(paths.SettingsFilePath).UpdateAsync(current =>
+                {
+                    var merged = (JsonObject)legacy.DeepClone();
+                    JsonSettingsStore.MergePatch(merged, current);
+                    current.Clear();
+                    foreach (var (name, value) in merged.ToArray())
+                    {
+                        merged.Remove(name);
+                        current[name] = value;
+                    }
+                }).GetAwaiter().GetResult();
+                copied.Add(WatchTowerPaths.SettingsFileName + " (from appsettings.json)");
+            }
 
             WriteMarker(paths);
             return new Result(true, copied, null);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException
+                                       or InvalidDataException)
         {
             // Leave no marker so the import is retried on the next start.
             return new Result(true, copied, ex.Message);
@@ -75,6 +97,11 @@ public static class LegacyStateMigrator
         File.Move(temp, target, overwrite: true);
         copied.Add(Path.GetFileName(source));
     }
+
+    private static JsonObject ParseObject(string json) =>
+        JsonNode.Parse(json, JsonSettingsStore.NodeOptions,
+            new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }) as JsonObject
+        ?? throw new InvalidDataException("Legacy appsettings.json must contain a JSON object.");
 
     private static void WriteMarker(WatchTowerPaths paths)
     {

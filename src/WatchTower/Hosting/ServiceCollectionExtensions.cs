@@ -25,6 +25,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton(paths);
         services.AddSingleton<AgentInfo>();
+        services.AddSingleton<IAgentRestarter, AgentRestarter>();
         services.AddSingleton<ISettingsStore>(_ => new JsonSettingsStore(paths.SettingsFilePath));
 
         AddOptions(services, config);
@@ -44,6 +45,14 @@ public static class ServiceCollectionExtensions
         services.AddTransient<IReportBuilder, ReportBuilder>();
 
         services.AddHttpClient("Heartbeat", client => client.Timeout = TimeSpan.FromSeconds(30));
+
+        // Self-update: feed client, state machine, periodic checker and the readiness beacon
+        // the installer waits for after a restart.
+        services.AddHttpClient(Updates.UpdateFeedClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(60));
+        services.AddSingleton<Updates.IUpdateFeedClient, Updates.UpdateFeedClient>();
+        services.AddSingleton<Updates.UpdateService>();
+        services.AddHostedService<Updates.UpdateWorker>();
+        services.AddHostedService<HealthBeacon>();
 
         if (config.GetValue<bool>($"{PortalOptions.SectionName}:Enabled"))
             AddPortal(services, config, dbPath);
@@ -75,6 +84,8 @@ public static class ServiceCollectionExtensions
         services.Configure<ReportingOptions>(config.GetSection(ReportingOptions.SectionName));
         services.Configure<PortalOptions>(config.GetSection(PortalOptions.SectionName));
         services.Configure<DisplayOptions>(config.GetSection(DisplayOptions.SectionName));
+        services.Configure<Ui.UiOptions>(config.GetSection(Ui.UiOptions.SectionName));
+        services.Configure<Updates.UpdateOptions>(config.GetSection(Updates.UpdateOptions.SectionName));
     }
 
     private static void AddPortal(IServiceCollection services, IConfiguration config, string dbPath)
@@ -111,6 +122,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IActionHandler, ForceMetricSnapshotHandler>();
         services.AddSingleton<IActionHandler, ForceConfigSyncHandler>();
         services.AddSingleton<IActionHandler, AgentRestartHandler>();
+        services.AddSingleton<IActionHandler, AgentUpdateHandler>();
         services.AddSingleton<IActionHandler, ApplyConfigurationHandler>();
         services.AddSingleton<ActionHandlerRegistry>();
 

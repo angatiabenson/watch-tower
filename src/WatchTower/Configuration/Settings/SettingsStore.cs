@@ -61,6 +61,41 @@ public sealed class JsonSettingsStore : ISettingsStore
     public Task ApplyMergePatchAsync(JsonObject patch, CancellationToken ct = default) =>
         UpdateAsync(doc => MergePatch(doc, patch), ct);
 
+    /// <summary>
+    /// Encrypts any plaintext secret in the file (e.g. hand-edited, or carried over from an
+    /// older build) and deletes the backup copy, which would still contain the plaintext.
+    /// Returns true when something was encrypted.
+    /// </summary>
+    public async Task<bool> ProtectPlaintextSecretsAsync(CancellationToken ct = default)
+    {
+        if (!File.Exists(FilePath) || !ContainsPlaintextSecret(Read()))
+            return false;
+
+        await UpdateAsync(_ => { }, ct); // ProtectSecrets runs on every write
+        File.Delete(FilePath + ".bak");
+        return true;
+    }
+
+    internal static bool ContainsPlaintextSecret(JsonObject root)
+    {
+        var found = false;
+        Walk(root, null);
+        return found;
+
+        void Walk(JsonObject obj, string? prefix)
+        {
+            foreach (var (name, value) in obj)
+            {
+                var key = prefix is null ? name : $"{prefix}:{name}";
+                if (value is JsonObject child)
+                    Walk(child, key);
+                else if (value is JsonValue leaf && SecretSettings.IsSecret(key) &&
+                         leaf.TryGetValue<string>(out var s) && s.Length > 0 && !DpapiSecretProtector.IsProtected(s))
+                    found = true;
+            }
+        }
+    }
+
     public async Task UpdateAsync(Action<JsonObject> mutate, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
