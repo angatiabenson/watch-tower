@@ -34,6 +34,7 @@ public class RamMonitorWorkerTests
             TopProcessCount = 5
         });
         _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _metricsProvider.Setup(m => m.GetTopMemoryProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))

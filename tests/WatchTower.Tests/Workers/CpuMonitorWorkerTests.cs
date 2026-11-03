@@ -34,6 +34,7 @@ public class CpuMonitorWorkerTests
             TopProcessCount = 3
         });
         _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _metricsProvider.Setup(m => m.GetTopCpuProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
@@ -111,23 +112,68 @@ public class CpuMonitorWorkerTests
             Times.Once);
     }
 
+    private void UseImmediateEmergency() =>
+        // SustainedSeconds = 0: every breaching poll is an emergency candidate, so only the
+        // cooldown decides whether a new incident is raised.
+        _options.Setup(o => o.CurrentValue).Returns(new CpuMonitorOptions
+        {
+            PollIntervalSeconds = 1,
+            ThresholdPercent = 99,
+            SustainedSeconds = 0,
+            TopProcessCount = 3
+        });
+
     [Fact]
-    public async Task PollOnce_FailedEmergencySend_DoesNotStartCooldown()
+    public async Task PollOnce_FailedEmergencySend_StillStartsCooldown()
     {
+        UseImmediateEmergency();
         _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false); // send keeps failing
+            .ReturnsAsync(false); // SMTP keeps failing
+
+        var worker = CreateWorker();
+        await worker.PollOnceAsync(CancellationToken.None); // emergency #1 (send fails)
+        _time.Advance(TimeSpan.FromSeconds(10));
+        await worker.PollOnceAsync(CancellationToken.None); // within cooldown: nothing new
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i => i.Type == IncidentType.CpuThresholdBreached)), Times.Once);
+        _emailService.Verify(e => e.SendEmailAsync(
+            It.Is<string>(s => s.Contains("CPU Emergency")), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Once);
+        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_EmergencyAfterCooldown_IsRaisedAgain()
+    {
+        UseImmediateEmergency();
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
 
         var worker = CreateWorker();
         await worker.PollOnceAsync(CancellationToken.None);
         _time.Advance(TimeSpan.FromSeconds(301));
-        await worker.PollOnceAsync(CancellationToken.None); // emergency #1 (fails)
-        _time.Advance(TimeSpan.FromSeconds(301));
-        await worker.PollOnceAsync(CancellationToken.None); // emergency #2 (cooldown not started -> retried)
+        await worker.PollOnceAsync(CancellationToken.None);
 
-        _emailService.Verify(e => e.SendEmailAsync(
-            It.Is<string>(s => s.Contains("CPU Emergency")), It.IsAny<string>(), It.IsAny<CancellationToken>()),
-            Times.Exactly(2));
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i => i.Type == IncidentType.CpuThresholdBreached)), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task PollOnce_SmtpNotConfigured_RecordsIncidentWithoutBuildingEmail()
+    {
+        UseImmediateEmergency();
+        _emailService.Setup(e => e.IsConfigured).Returns(false);
+        _metricsProvider.Setup(m => m.GetCpuUsage()).Returns(99.5f);
+
+        var worker = CreateWorker();
+        await worker.PollOnceAsync(CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(10));
+        await worker.PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(i => i.Type == IncidentType.CpuThresholdBreached)), Times.Once);
+        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Never);
+        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

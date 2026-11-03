@@ -182,15 +182,11 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync(
-            $"[WatchTower] IIS App Pool Down: {applicationPoolName}",
-            html,
-            ct
-        );
+        // Per-pool cooldown starts once the incident is recorded, regardless of the email outcome.
+        _lastEmergencyPerPool[applicationPoolName] = UtcNow;
 
-        if (sent)
-            _lastEmergencyPerPool[applicationPoolName] = UtcNow;
+        await EmergencyEmail.TrySendAsync(
+            _emailService, _reportBuilder, incident,
+            $"[WatchTower] IIS App Pool Down: {applicationPoolName}", _logger, ct);
     }
 }

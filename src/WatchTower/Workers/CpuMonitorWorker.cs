@@ -20,7 +20,7 @@ public class CpuMonitorWorker : BackgroundService
     private readonly ILogger<CpuMonitorWorker> _logger;
 
     private DateTime? _firstBreachTime;
-    private DateTime _lastEmergencyEmail = DateTime.MinValue;
+    private DateTime _lastEmergencyIncident = DateTime.MinValue;
     private bool _metricUnavailable;
 
     public CpuMonitorWorker(
@@ -159,7 +159,7 @@ public class CpuMonitorWorker : BackgroundService
         var cooldown = TimeSpan.FromSeconds(
             _reportingOptions.CurrentValue.EmergencyCooldownSeconds
         );
-        if (UtcNow - _lastEmergencyEmail < cooldown)
+        if (UtcNow - _lastEmergencyIncident < cooldown)
             return;
 
         var topProcesses = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, ct)).ToList();
@@ -174,13 +174,12 @@ public class CpuMonitorWorker : BackgroundService
         await _portalEventPublisher.PublishIncidentAsync(incident, ct);
         _logger.LogWarning("CPU EMERGENCY: {Description}", incident.Description);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync($"[WatchTower] CPU Emergency: {cpuUsage:F1}%", html, ct);
+        // The cooldown starts once the incident is recorded, whatever happens to the email:
+        // with SMTP unconfigured or down, restarting it only on delivery made every poll
+        // record a new incident, publish a portal event and rebuild a 24h report.
+        _lastEmergencyIncident = UtcNow;
 
-        // Only start the cooldown if the alert was actually delivered, so a transient
-        // SMTP outage does not silently suppress alerts for the whole cooldown window.
-        if (sent)
-            _lastEmergencyEmail = UtcNow;
+        await EmergencyEmail.TrySendAsync(
+            _emailService, _reportBuilder, incident, $"[WatchTower] CPU Emergency: {cpuUsage:F1}%", _logger, ct);
     }
 }

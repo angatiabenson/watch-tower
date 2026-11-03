@@ -33,6 +33,7 @@ public class ApplicationPoolMonitorWorkerTests
             WatchedApplicationPools = new List<string> { "DefaultAppPool" }
         });
         _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
@@ -92,6 +93,23 @@ public class ApplicationPoolMonitorWorkerTests
 
         _emailService.Verify(e => e.SendEmailAsync(
             It.Is<string>(s => s.Contains("IIS App Pool Down")), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PollOnce_RepeatedFailedStartWithFailingEmail_RecordsOneEmergencyPerCooldown()
+    {
+        _applicationPoolManager.Setup(s => s.GetApplicationPoolStatus("DefaultAppPool")).Returns(Pool("Stopped", false));
+        _applicationPoolManager.Setup(s => s.StartApplicationPool("DefaultAppPool", It.IsAny<TimeSpan>())).Returns(false);
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var worker = CreateWorker();
+        for (var i = 0; i < 6; i++)
+            await worker.PollOnceAsync(CancellationToken.None);
+
+        // Attempts 3..6 are all past MaxStartAttempts, but the cooldown started at attempt 3.
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.ApplicationPoolStartFailed)), Times.Once);
+        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Once);
     }
 
     [Fact]

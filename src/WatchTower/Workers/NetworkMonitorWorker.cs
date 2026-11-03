@@ -127,15 +127,11 @@ public class NetworkMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync(
-            $"[WatchTower] Network Saturated: {metric.InterfaceName}",
-            html,
-            ct
-        );
+        // Per-interface cooldown starts once the incident is recorded, regardless of the email outcome.
+        _lastEmergencyPerInterface[metric.InterfaceName] = UtcNow;
 
-        if (sent)
-            _lastEmergencyPerInterface[metric.InterfaceName] = UtcNow;
+        await EmergencyEmail.TrySendAsync(
+            _emailService, _reportBuilder, incident,
+            $"[WatchTower] Network Saturated: {metric.InterfaceName}", _logger, ct);
     }
 }

@@ -160,16 +160,13 @@ public class DiskMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync(
-            $"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%",
-            html,
-            ct
-        );
+        // Per-drive cooldown starts once the incident is recorded, regardless of the email
+        // outcome, so an SMTP outage cannot turn every poll into a new incident.
+        _lastEmergencyPerDrive[disk.DriveName] = UtcNow;
 
-        if (sent)
-            _lastEmergencyPerDrive[disk.DriveName] = UtcNow;
+        await EmergencyEmail.TrySendAsync(
+            _emailService, _reportBuilder, incident,
+            $"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%", _logger, ct);
     }
 
     private async Task HandleQueueEmergencyAsync(DiskQueueMetric queue, CancellationToken ct)
@@ -189,15 +186,11 @@ public class DiskMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync(
-            $"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}",
-            html,
-            ct
-        );
+        // Per-disk cooldown starts once the incident is recorded, regardless of the email outcome.
+        _lastQueueEmergencyPerDisk[queue.InstanceName] = UtcNow;
 
-        if (sent)
-            _lastQueueEmergencyPerDisk[queue.InstanceName] = UtcNow;
+        await EmergencyEmail.TrySendAsync(
+            _emailService, _reportBuilder, incident,
+            $"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}", _logger, ct);
     }
 }

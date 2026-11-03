@@ -35,6 +35,7 @@ public class ServiceMonitorWorkerTests
             WatchedServices = new List<string> { "TestService" }
         });
         _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());

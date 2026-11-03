@@ -21,6 +21,17 @@ public class EmailService : IEmailService
         _logger = logger;
     }
 
+    public bool IsConfigured
+    {
+        get
+        {
+            var opts = _options.CurrentValue;
+            return !string.IsNullOrWhiteSpace(opts.SmtpHost) &&
+                   !string.IsNullOrWhiteSpace(opts.FromAddress) &&
+                   opts.ToAddresses.Any(a => !string.IsNullOrWhiteSpace(a));
+        }
+    }
+
     public async Task<bool> SendEmailAsync(
         string subject,
         string htmlBody,

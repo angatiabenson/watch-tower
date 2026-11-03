@@ -35,6 +35,7 @@ public class DiskMonitorWorkerTests
         });
         _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
         _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(new List<DiskQueueMetric>());
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
@@ -94,6 +95,67 @@ public class DiskMonitorWorkerTests
 
         await act.Should().NotThrowAsync();
         _metricsStore.Verify(s => s.AddDiskMetric(It.IsAny<DiskMetric>()), Times.Once);
+    }
+
+    private void CriticalDrives(params string[] drives) =>
+        _metricsProvider.Setup(m => m.GetDiskMetrics()).Returns(() => drives
+            .Select(d => new DiskMetric(_time.GetUtcNow().UtcDateTime, d, 500, 50, 90))
+            .ToList());
+
+    [Fact]
+    public async Task PollOnce_CriticalDiskWithFailingEmail_RecordsOneIncidentPerCooldown()
+    {
+        CriticalDrives("C:\\");
+        _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var worker = CreateWorker();
+
+        // Previously each of these polls recorded a new incident, published a portal event and
+        // rebuilt the 24h report because the cooldown only started on a delivered email.
+        for (var i = 0; i < 5; i++)
+        {
+            await worker.PollOnceAsync(CancellationToken.None);
+            _time.Advance(TimeSpan.FromSeconds(60));
+        }
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.DiskCritical)), Times.Once);
+        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Once);
+
+        _time.Advance(TimeSpan.FromSeconds(300));
+        await worker.PollOnceAsync(CancellationToken.None);
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.DiskCritical)), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task PollOnce_CriticalDiskWithSmtpUnconfigured_SkipsEmailButRecordsIncident()
+    {
+        CriticalDrives("C:\\");
+        _emailService.Setup(e => e.IsConfigured).Returns(false);
+        var worker = CreateWorker();
+
+        await worker.PollOnceAsync(CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(60));
+        await worker.PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Type == IncidentType.DiskCritical)), Times.Once);
+        _reportBuilder.Verify(r => r.BuildReport(It.IsAny<TimeSpan>()), Times.Never);
+        _emailService.Verify(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PollOnce_CooldownIsPerDrive()
+    {
+        CriticalDrives("C:\\");
+        var worker = CreateWorker();
+        await worker.PollOnceAsync(CancellationToken.None);
+
+        // A second drive going critical inside C:'s cooldown still raises its own incident.
+        CriticalDrives("C:\\", "D:\\");
+        _time.Advance(TimeSpan.FromSeconds(60));
+        await worker.PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Description.Contains("C:\\"))), Times.Once);
+        _metricsStore.Verify(s => s.AddIncident(It.Is<Incident>(x => x.Description.Contains("D:\\"))), Times.Once);
     }
 
     private DiskMonitorWorker CreateWorker() => new(

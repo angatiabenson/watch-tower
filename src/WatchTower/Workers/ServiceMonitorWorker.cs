@@ -178,11 +178,10 @@ public class ServiceMonitorWorker : BackgroundService
         _metricsStore.AddIncident(incident);
         await _portalEventPublisher.PublishIncidentAsync(incident, ct);
 
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync($"[WatchTower] Service Down: {serviceName}", html, ct);
+        // Per-service cooldown starts once the incident is recorded, regardless of the email outcome.
+        _lastEmergencyPerService[serviceName] = UtcNow;
 
-        if (sent)
-            _lastEmergencyPerService[serviceName] = UtcNow;
+        await EmergencyEmail.TrySendAsync(
+            _emailService, _reportBuilder, incident, $"[WatchTower] Service Down: {serviceName}", _logger, ct);
     }
 }
