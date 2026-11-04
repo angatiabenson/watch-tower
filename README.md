@@ -100,6 +100,19 @@ table `alert_state`, untouched by the daily report purge):
   alerts resolve only after staying clear for `Alerting:ResolveAfterSeconds` (default 300),
   so values hovering around a threshold do not flap.
 - An alert that was open before a restart is **not** re-sent.
+- **Opened again** — each time a resolved alert opens again it is a new *occurrence*
+  (`alert_state.occurrence`; every pending notice in `alert_delivery` records the occurrence it
+  is about). An alert's notices form a queue, ordered by occurrence and then creation, and are
+  sent one at a time: a new occurrence never replaces an earlier one's recovery, so every
+  opening that may have reached operators gets its own resolved notice, before the next
+  occurrence's opening. A notice still being retried is re-sent ahead of the later ones (each
+  channel gets them in order) without holding them back on the channels that work.
+- **Flapping** — at most 5 notices are queued per alert. When an alert keeps opening and
+  clearing faster than its notices can go out (a channel down, a maintenance window), the 3
+  oldest are kept, the new notice is the alert's latest state, and everything in between is
+  folded into one persisted resolved notice, "Flapping: N occurrences between T1 and T2" (merged
+  with the previous one if the alert keeps flapping). In a maintenance window it becomes a line
+  of the end-of-window summary unless one of the folded occurrences may have reached operators.
 - **Retired** — when a service, application pool or endpoint check is removed from the
   configuration (checked at startup and on every poll, so a config change takes effect
   within one poll interval), its open alert is closed with a retirement reason (e.g.

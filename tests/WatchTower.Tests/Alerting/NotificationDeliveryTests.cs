@@ -227,8 +227,11 @@ public class NotificationDeliveryTests
     }
 
     [Fact]
-    public void SqliteStore_UpgradesADeliveryTableWithoutTheExplicitRecoveryColumn()
+    public void SqliteStore_UpgradingADeliveryTableWithoutTheExplicitRecoveryColumn_TreatsItsRecoveriesAsExplicit()
     {
+        // The reviewer's probe: that version could not tell a recovery whose opening was being
+        // sent when the alert closed (NotifyCount 0, yet possibly seen by operators) from one of
+        // an alert that opened and cleared inside a window. Such a row is sent on its own.
         using var dir = new TestDataDirectory();
         dir.Paths.EnsureDirectories();
         var notification = new AlertNotification(AlertNotificationKind.Resolved, "svc:W3SVC", AlertSeverity.Critical, "Service Down",
@@ -254,11 +257,13 @@ public class NotificationDeliveryTests
 
         var store = new SqliteAlertStateStore(dir.Paths.DatabasePath);
         var old = store.LoadDeliveries().Should().ContainSingle().Subject;
-        old.ExplicitRecovery.Should().BeFalse();
-        old.IsSummarisedRecovery.Should().BeTrue("a held resolved notice of a never-notified alert, as before");
+        old.ExplicitRecovery.Should().BeTrue("it was pending when the column was added");
+        old.IsSummarisedRecovery.Should().BeFalse();
+        old.Occurrence.Should().Be(1);
 
-        store.UpsertDelivery(old with { ExplicitRecovery = true });
-        new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Single().ExplicitRecovery.Should().BeTrue();
+        // The new default only applies to rows written from now on, and a second start migrates nothing.
+        store.UpsertDelivery(old with { ExplicitRecovery = false });
+        new SqliteAlertStateStore(dir.Paths.DatabasePath).LoadDeliveries().Single().ExplicitRecovery.Should().BeFalse();
     }
 
     [Theory]

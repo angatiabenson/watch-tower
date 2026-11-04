@@ -60,23 +60,58 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             """;
         cmd.ExecuteNonQuery();
 
-        // Columns added after the first release of alert_state.
-        AddColumnIfMissing(conn, "alert_state", "retired_reason", "TEXT");
-        AddColumnIfMissing(conn, "alert_delivery", "explicit_recovery", "INTEGER NOT NULL DEFAULT 0");
+        // Columns added after the first release, migrated in place. One transaction: a crash half
+        // way leaves the old schema, so the next start migrates (and fixes up the rows) again.
+        // Idempotent: a column that exists is left as it is, and so are its values.
+        using var tx = conn.BeginTransaction();
+        AddColumnIfMissing(conn, tx, "alert_state", "retired_reason", "TEXT");
+
+        // Rows written before this flag existed: a pending recovery may belong to an alert whose
+        // opening was being sent (so may have reached operators) when it closed, which that
+        // version could not tell apart. Treated as explicit, so it is never folded into the
+        // maintenance summary; the default (0) applies only to rows written from now on.
+        if (AddColumnIfMissing(conn, tx, "alert_delivery", "explicit_recovery", "INTEGER NOT NULL DEFAULT 0"))
+            Execute(conn, tx, $"UPDATE alert_delivery SET explicit_recovery = 1 WHERE kind = {(int)AlertNotificationKind.Resolved}");
+
+        // Alert occurrences. Before them a key had at most one pending notice, always about its
+        // latest occurrence, so existing alerts and their notices are occurrence 1 alike.
+        AddColumnIfMissing(conn, tx, "alert_state", "occurrence", "INTEGER NOT NULL DEFAULT 1");
+        if (AddColumnIfMissing(conn, tx, "alert_delivery", "occurrence", "INTEGER NOT NULL DEFAULT 1"))
+        {
+            Execute(conn, tx, "UPDATE alert_delivery SET occurrence = 0 WHERE kind NOT IN (" +
+                $"{(int)AlertNotificationKind.Opened}, {(int)AlertNotificationKind.Reminder}, " +
+                $"{(int)AlertNotificationKind.Resolved})"); // events and summaries have none
+        }
+
+        // Queue order of pending notices; existing rows keep the order they were written in.
+        if (AddColumnIfMissing(conn, tx, "alert_delivery", "seq", "INTEGER NOT NULL DEFAULT 0"))
+            Execute(conn, tx, "UPDATE alert_delivery SET seq = rowid");
+        AddColumnIfMissing(conn, tx, "alert_delivery", "flap_count", "INTEGER NOT NULL DEFAULT 0");
+        tx.Commit();
     }
 
-    private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string definition)
+    /// <summary>Adds <paramref name="column"/> unless it exists; true if it was added.</summary>
+    private static bool AddColumnIfMissing(
+        SqliteConnection conn, SqliteTransaction tx, string table, string column, string definition)
     {
         using (var info = conn.CreateCommand())
         {
+            info.Transaction = tx;
             info.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'";
             if (Convert.ToInt64(info.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
-                return;
+                return false;
         }
 
-        using var alter = conn.CreateCommand();
-        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
-        alter.ExecuteNonQuery();
+        Execute(conn, tx, $"ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        return true;
+    }
+
+    private static void Execute(SqliteConnection conn, SqliteTransaction tx, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
     }
 
     private SqliteConnection Open()
@@ -101,7 +136,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 SELECT key, severity, incident_type, title, opened_at, last_notified_at, notify_count,
-                       resolved_at, last_description, retired_reason
+                       resolved_at, last_description, retired_reason, occurrence
                 FROM alert_state
                 """;
             using var reader = cmd.ExecuteReader();
@@ -117,7 +152,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     reader.GetInt32(6),
                     reader.IsDBNull(7) ? null : ParseUtc(reader.GetString(7)),
                     reader.GetString(8),
-                    reader.IsDBNull(9) ? null : reader.GetString(9)));
+                    reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.GetInt64(10)));
             }
         }
         return results;
@@ -132,8 +168,9 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 INSERT INTO alert_state (key, severity, incident_type, title, opened_at, last_notified_at,
-                                         notify_count, resolved_at, last_description, retired_reason)
-                VALUES (@key, @severity, @type, @title, @opened, @notified, @count, @resolved, @description, @retired)
+                                         notify_count, resolved_at, last_description, retired_reason, occurrence)
+                VALUES (@key, @severity, @type, @title, @opened, @notified, @count, @resolved, @description, @retired,
+                        @occurrence)
                 ON CONFLICT(key) DO UPDATE SET
                     severity = excluded.severity,
                     incident_type = excluded.incident_type,
@@ -143,7 +180,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     notify_count = excluded.notify_count,
                     resolved_at = excluded.resolved_at,
                     last_description = excluded.last_description,
-                    retired_reason = excluded.retired_reason
+                    retired_reason = excluded.retired_reason,
+                    occurrence = excluded.occurrence
                 """;
             cmd.Parameters.AddWithValue("@key", state.Key);
             cmd.Parameters.AddWithValue("@severity", (int)state.Severity);
@@ -155,6 +193,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.Parameters.AddWithValue("@resolved", state.ResolvedAt is { } r ? Format(r) : DBNull.Value);
             cmd.Parameters.AddWithValue("@description", state.LastDescription);
             cmd.Parameters.AddWithValue("@retired", (object?)state.RetiredReason ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@occurrence", state.Occurrence);
             cmd.ExecuteNonQuery();
         }
     }
@@ -169,9 +208,9 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.CommandText =
                 """
                 SELECT id, notification, created_at, delivered_channels, failed_attempts, first_attempt_at,
-                       next_attempt_at, last_error, held, explicit_recovery
+                       next_attempt_at, last_error, held, explicit_recovery, occurrence, seq, flap_count
                 FROM alert_delivery
-                ORDER BY created_at, id
+                ORDER BY seq, id
                 """;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -199,7 +238,10 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     ParseUtc(reader.GetString(6)),
                     reader.IsDBNull(7) ? null : reader.GetString(7),
                     reader.GetInt32(8) != 0,
-                    reader.GetInt32(9) != 0));
+                    reader.GetInt32(9) != 0,
+                    reader.GetInt64(10),
+                    reader.GetInt64(11),
+                    reader.GetInt32(12)));
             }
         }
         return results;
@@ -215,9 +257,9 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                 """
                 INSERT INTO alert_delivery (id, alert_key, kind, notification, created_at, delivered_channels,
                                             failed_attempts, first_attempt_at, next_attempt_at, last_error, held,
-                                            explicit_recovery)
+                                            explicit_recovery, occurrence, seq, flap_count)
                 VALUES (@id, @key, @kind, @notification, @created, @delivered, @failed, @first, @next, @error, @held,
-                        @explicit)
+                        @explicit, @occurrence, @seq, @flaps)
                 ON CONFLICT(id) DO UPDATE SET
                     notification = excluded.notification,
                     delivered_channels = excluded.delivered_channels,
@@ -226,7 +268,10 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     next_attempt_at = excluded.next_attempt_at,
                     last_error = excluded.last_error,
                     held = excluded.held,
-                    explicit_recovery = excluded.explicit_recovery
+                    explicit_recovery = excluded.explicit_recovery,
+                    occurrence = excluded.occurrence,
+                    seq = excluded.seq,
+                    flap_count = excluded.flap_count
                 """;
             cmd.Parameters.AddWithValue("@id", delivery.Id);
             cmd.Parameters.AddWithValue("@key", delivery.AlertKey);
@@ -240,6 +285,9 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.Parameters.AddWithValue("@error", (object?)delivery.LastError ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@held", delivery.Held ? 1 : 0);
             cmd.Parameters.AddWithValue("@explicit", delivery.ExplicitRecovery ? 1 : 0);
+            cmd.Parameters.AddWithValue("@occurrence", delivery.Occurrence);
+            cmd.Parameters.AddWithValue("@seq", delivery.Sequence);
+            cmd.Parameters.AddWithValue("@flaps", delivery.FlappingCount);
             cmd.ExecuteNonQuery();
         }
     }

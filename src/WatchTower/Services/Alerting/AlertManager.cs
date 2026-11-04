@@ -30,6 +30,9 @@ public sealed class AlertManager : IAlertManager
     private Dictionary<string, AlertState>? _states;
     private Dictionary<string, PendingDelivery>? _deliveries;
 
+    /// <summary>Last <see cref="PendingDelivery.Sequence"/> handed out (guarded by <see cref="_gate"/>).</summary>
+    private long _lastSequence;
+
     /// <summary>
     /// Deliveries being sent right now (by id), so no two callers send one at once. Guarded by
     /// <see cref="_gate"/>: a claim is taken in the same section that reads the delivery, and
@@ -39,13 +42,30 @@ public sealed class AlertManager : IAlertManager
 
     /// <summary>
     /// The opened, reminder or resolved notice being sent right now for each alert key (guarded by
-    /// <see cref="_gate"/>). An alert's notices are sent one at a time, in order: a later notice
-    /// for the same alert (its recovery, an escalation) is not claimed while an earlier one is in
-    /// flight, and the sender of the earlier one sends it as soon as that dispatch has finished
-    /// (see <see cref="ClaimSuccessorLocked"/>). Nobody waits for it, so a slow channel never
-    /// blocks a monitor worker, other alerts or a shutdown.
+    /// <see cref="_gate"/>). An alert's notices are sent one at a time, in queue order (see
+    /// <see cref="ClaimHeadLocked"/>): a later notice for the same alert (its recovery, an escalation,
+    /// the next occurrence's opening) is not claimed while an earlier one is in flight, and the
+    /// sender of the earlier one sends it as soon as that dispatch has finished (see
+    /// <see cref="ClaimSuccessorLocked"/>). Nobody waits for it, so a slow channel never blocks a
+    /// monitor worker, other alerts or a shutdown.
     /// </summary>
     private readonly Dictionary<string, PendingDelivery> _sending = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Most notices queued for one alert key. An alert that keeps opening and clearing while its
+    /// notices cannot go out (a channel down, a slow channel, a maintenance window) leaves one
+    /// recovery per occurrence whose opening may have reached operators; without a bound that
+    /// queue grows with every flap. When a new notice would exceed it, the oldest
+    /// <see cref="KeptOldestNotices"/> notices are kept as they are (the earliest occurrences, whose
+    /// recoveries operators are most likely waiting for), the new notice is the alert's latest
+    /// state, and everything in between is folded into one persisted resolved notice titled
+    /// "Flapping: N occurrences between T1 and T2" (merged with an earlier flapping notice of the
+    /// key, if there is one). See <see cref="CoalesceLocked"/>.
+    /// </summary>
+    internal const int MaxQueuedNotices = 5;
+
+    /// <summary>Oldest notices of a key that are never folded into a flapping notice.</summary>
+    internal const int KeptOldestNotices = MaxQueuedNotices - 2;
 
     /// <summary>
     /// Serialises raising and closing per alert key, so the open/resolved lifecycle of one key is
@@ -95,7 +115,7 @@ public sealed class AlertManager : IAlertManager
     public IReadOnlyList<PendingDelivery> GetPendingDeliveries()
     {
         lock (_gate)
-            return Deliveries().Values.OrderBy(d => d.CreatedAt).ToList();
+            return Deliveries().Values.OrderBy(d => d.Sequence).ToList();
     }
 
     /// <summary>Alert keys whose lifecycle lock is held or waited for right now (tests).</summary>
@@ -130,15 +150,16 @@ public sealed class AlertManager : IAlertManager
 
         if (open && !escalated)
         {
-            var pending = PendingNotice(key.Value);
-            var reminderDue = IsReminderDue(existing!, now, options);
+            var pending = PendingNotice(key.Value, existing!.Occurrence);
+            var reminderDue = IsReminderDue(existing, now, options);
             // A notice still on its way (held, or not yet delivered anywhere) is finished rather
             // than replaced. One that reached some channels is replaced by the next reminder, so a
-            // permanently failing channel cannot suppress reminders to the working ones.
+            // permanently failing channel cannot suppress reminders to the working ones. It may be
+            // queued behind an earlier occurrence's recovery: the alert's queue is continued.
             if (pending is not null && (pending.Held || pending.DeliveredChannels.Count == 0 || !reminderDue))
             {
                 if (!inMaintenance)
-                    await ContinueAsync(pending.Id, now, ct);
+                    await ContinueKeyAsync(key.Value, now, ct);
                 return;
             }
             if (!reminderDue)
@@ -155,8 +176,10 @@ public sealed class AlertManager : IAlertManager
             var current = States().GetValueOrDefault(key.Value);
             if (!open || current is not { IsOpen: true })
             {
+                // A new occurrence: the notices of earlier ones (their recoveries) stay queued.
                 state = new AlertState(key.Value, severity, incident.Type, title, now,
-                    LastNotifiedAt: null, NotifyCount: 0, ResolvedAt: null, incident.Description);
+                    LastNotifiedAt: null, NotifyCount: 0, ResolvedAt: null, incident.Description,
+                    Occurrence: (current?.Occurrence ?? 0) + 1);
             }
             else
             {
@@ -195,7 +218,7 @@ public sealed class AlertManager : IAlertManager
             Incident: incident,
             NotifyCount: state.NotifyCount + 1);
 
-        await DeliverAsync(notification, now, inMaintenance, ct);
+        await DeliverAsync(notification, state.Occurrence, now, inMaintenance, ct);
     }
 
     public Task<bool> ResolveAsync(AlertKey key, Incident? recoveryIncident = null, CancellationToken ct = default) =>
@@ -245,10 +268,11 @@ public sealed class AlertManager : IAlertManager
         var inMaintenance = _maintenance.Current.Active;
 
         AlertState existing;
+        long occurrence;
         TimeSpan duration;
         string description;
         PendingDelivery? recovery = null;
-        var recoveryClaimed = false;
+        PendingDelivery? claimed = null; // the recovery, or a notice of the alert queued before it
 
         // One section from reading the alert to replacing its notice: a delivery cannot claim the
         // opened notice, or count it as notified, in between.
@@ -258,6 +282,7 @@ public sealed class AlertManager : IAlertManager
                 return false;
 
             existing = open;
+            occurrence = existing.Occurrence;
             duration = now - existing.OpenedAt;
             description = retiredReason is not null
                 ? $"No longer monitored ({retiredReason}); closed after {AlertText.FormatDuration(duration)}. " +
@@ -268,15 +293,16 @@ public sealed class AlertManager : IAlertManager
 
             Save(existing with { ResolvedAt = now, RetiredReason = retiredReason });
 
-            // An opened notice that failed on every channel so far still tells its story as a
-            // resolved notice, and so does one being sent right now (it may reach operators any
-            // moment; it is superseded below, so it cannot count as notified afterwards). One that
-            // was never attempted on any channel is dropped silently.
-            var pending = PendingNoticeLocked(key.Value);
+            // Only this occurrence's notices are replaced: an earlier occurrence's recovery, still
+            // queued, is never touched. An opened notice that failed on every channel so far still
+            // tells its story as a resolved notice, and so does one being sent right now (it may
+            // reach operators any moment; it is superseded below, so it cannot count as notified
+            // afterwards). One that was never attempted on any channel is dropped silently.
+            var pending = PendingNoticeLocked(key.Value, occurrence);
             var attempted = (pending is { IsAboutOpenAlert: true } &&
                              (pending.FailedAttempts > 0 || pending.DeliveredChannels.Count > 0)) ||
                             (_sending.GetValueOrDefault(key.Value) is { IsAboutOpenAlert: true } sending &&
-                             sending.Notification.OpenedAtUtc == existing.OpenedAt);
+                             sending.Occurrence == occurrence);
 
             var notification = new AlertNotification(
                 AlertNotificationKind.Resolved,
@@ -297,20 +323,21 @@ public sealed class AlertManager : IAlertManager
                 // Operators know about the alert: tell them it cleared (once the window ends, if held).
                 // Explicit: never folded into a maintenance summary, even if no channel has counted
                 // the opening yet (it may still reach operators once its send completes).
-                recovery = EnqueueLocked(notification, now, held: inMaintenance, out recoveryClaimed, explicitRecovery: true);
+                recovery = EnqueueLocked(notification, occurrence, now, held: inMaintenance, out claimed,
+                    explicitRecovery: true);
             }
             else if (options.SendRecovery && (inMaintenance || pending is { Held: true }))
             {
                 // Opened and cleared while notifications were held: kept for the end-of-window summary.
-                recovery = EnqueueLocked(notification, now, held: true, out _);
+                recovery = EnqueueLocked(notification, occurrence, now, held: true, out _);
             }
             else
             {
-                RemoveNoticesLocked(key.Value);
+                RemoveNoticesLocked(key.Value, occurrence);
             }
         }
 
-        // The recovery's claim (if any) is ours until SendOrLogHeldAsync takes it over: whatever
+        // The claim (if any) is ours until SendOrLogHeldAsync takes it over: whatever
         // fails before that (the portal, the metrics store) gives it back, and the recovery stays
         // pending for the delivery worker.
         var handedOver = false;
@@ -336,12 +363,12 @@ public sealed class AlertManager : IAlertManager
 
             handedOver = true;
             if (recovery is not null)
-                await SendOrLogHeldAsync(recovery, recoveryClaimed, ct);
+                await SendOrLogHeldAsync(recovery, claimed, ct);
         }
         finally
         {
-            if (!handedOver && recoveryClaimed)
-                Unclaim(recovery!);
+            if (!handedOver && claimed is not null)
+                Unclaim(claimed);
         }
         return true;
     }
@@ -356,7 +383,7 @@ public sealed class AlertManager : IAlertManager
         // During maintenance: recorded and published now, listed in the end-of-window summary.
         await DeliverAsync(new AlertNotification(
             AlertNotificationKind.Event, key.Value, severity, title, incident.Description, _server,
-            incident.Timestamp, Incident: incident), UtcNow, held: _maintenance.Current.Active, ct);
+            incident.Timestamp, Incident: incident), occurrence: 0, UtcNow, held: _maintenance.Current.Active, ct);
     }
 
     public async Task ProcessPendingAsync(CancellationToken ct = default)
@@ -373,9 +400,11 @@ public sealed class AlertManager : IAlertManager
             lock (_gate)
             {
                 SummariseHeldLocked(now);
+                // Creation order, which is also each alert's queue order; a notice whose turn has
+                // not come yet is sent by the sender of the one before it (or the next pass).
                 due = Deliveries().Values
                     .Where(d => d.Held || d.NextAttemptAt <= now)
-                    .OrderBy(d => d.CreatedAt)
+                    .OrderBy(d => d.Sequence)
                     .Select(d => d.Id)
                     .ToList();
             }
@@ -408,44 +437,149 @@ public sealed class AlertManager : IAlertManager
 
     /// <summary>
     /// Persists <paramref name="notification"/> as a pending delivery (an alert notice replaces the
-    /// alert's previous one) and, unless <paramref name="held"/>, attempts it right away.
+    /// previous notice of the same <paramref name="occurrence"/>) and, unless
+    /// <paramref name="held"/>, attempts it right away.
     /// </summary>
-    private async Task DeliverAsync(AlertNotification notification, DateTime now, bool held, CancellationToken ct)
+    private async Task DeliverAsync(
+        AlertNotification notification, long occurrence, DateTime now, bool held, CancellationToken ct)
     {
         PendingDelivery delivery;
-        bool claimed;
+        PendingDelivery? claimed;
         lock (_gate)
-            delivery = EnqueueLocked(notification, now, held, out claimed);
+            delivery = EnqueueLocked(notification, occurrence, now, held, out claimed);
         await SendOrLogHeldAsync(delivery, claimed, ct);
     }
 
     /// <summary>
-    /// Persists a new delivery (replacing the alert's previous notice) and, unless held, claims it
-    /// in the same section, before <see cref="ProcessPendingAsync"/> or a close can see it unclaimed.
-    /// It is not claimed (<paramref name="claimed"/> false) while an earlier notice of the same
-    /// alert is still being sent: that sender sends it next.
+    /// Persists a new delivery and, unless held, claims it in the same section, before
+    /// <see cref="ProcessPendingAsync"/> or a close can see it unclaimed. An alert notice goes to
+    /// the end of its key's queue: it replaces the pending notice of the same
+    /// <paramref name="occurrence"/> (a reminder, an escalation or the recovery superseding the
+    /// opened notice) but never an earlier occurrence's, and the queue is kept within
+    /// <see cref="MaxQueuedNotices"/>.
+    /// <para>
+    /// For an alert notice the head of its key's queue is claimed (see
+    /// <see cref="ClaimHeadLocked"/>), which may be an earlier notice: its sender sends the new
+    /// one after it. <paramref name="claimed"/> is null when nothing can be sent now (held, or
+    /// behind a notice in flight, whose sender sends it next).
+    /// </para>
     /// </summary>
     private PendingDelivery EnqueueLocked(
-        AlertNotification notification, DateTime now, bool held, out bool claimed, bool explicitRecovery = false)
+        AlertNotification notification, long occurrence, DateTime now, bool held, out PendingDelivery? claimed,
+        bool explicitRecovery = false)
     {
-        var delivery = PendingDelivery.Create(notification, now, held, explicitRecovery);
-        if (delivery.IsAlertNotice)
-            RemoveNoticesLocked(notification.AlertKey);
+        var isNotice = notification.Kind is AlertNotificationKind.Opened or AlertNotificationKind.Reminder
+            or AlertNotificationKind.Resolved;
+        if (isNotice)
+        {
+            RemoveNoticesLocked(notification.AlertKey, occurrence);
+            // Before the new notice takes its sequence number, so the flapping notice sorts
+            // before it in creation order too.
+            CoalesceLocked(notification.AlertKey, now);
+        }
+
+        var delivery = PendingDelivery.Create(notification, now, held, explicitRecovery,
+            isNotice ? occurrence : 0, NextSequenceLocked());
         _store.UpsertDelivery(delivery);
         Deliveries()[delivery.Id] = delivery;
-        claimed = !held && TryClaimLocked(delivery);
+        claimed = held ? null
+            : isNotice ? ClaimHeadLocked(delivery.AlertKey, now, includeHeld: false)
+            : TryClaimLocked(delivery) ? delivery : null;
         return delivery;
     }
 
     /// <summary>
-    /// Sends a delivery claimed by <see cref="EnqueueLocked"/>, or logs why it is not sent now: it
-    /// is held, or queued behind the alert's notice being sent.
+    /// Starts sending <paramref name="key"/>'s queue: claims its head (the earliest notice, see
+    /// <see cref="PendingDelivery.QueueOrder"/>) if any notice of the queue is due, or held and
+    /// <paramref name="includeHeld"/> (to be released). The head is claimed even if it is itself
+    /// still backing off: a notice is never sent before the ones queued ahead of it, which are
+    /// retried early instead (see <see cref="ClaimSuccessorLocked"/>).
     /// </summary>
-    private async Task SendOrLogHeldAsync(PendingDelivery delivery, bool claimed, CancellationToken ct)
+    private PendingDelivery? ClaimHeadLocked(string key, DateTime now, bool includeHeld)
     {
-        if (claimed)
+        var queue = KeyQueueLocked(key);
+        if (queue.Count == 0 || (queue[0].Held && !includeHeld) ||
+            !queue.Any(d => d.Held ? includeHeld : d.NextAttemptAt <= now))
+            return null;
+        return TryClaimLocked(queue[0]) ? queue[0] : null;
+    }
+
+    private long NextSequenceLocked()
+    {
+        Deliveries(); // loading them sets the last sequence used
+        return ++_lastSequence;
+    }
+
+    /// <summary>
+    /// Makes room for one more notice in <paramref name="key"/>'s queue (see
+    /// <see cref="MaxQueuedNotices"/>): keeps its oldest <see cref="KeptOldestNotices"/> notices
+    /// (up to an earlier flapping notice) and folds every later one into a single new flapping
+    /// notice. Only earlier occurrences are folded: the caller has already removed the notice of
+    /// the occurrence it is about to queue, which becomes the newest state behind it.
+    /// <para>
+    /// A folded notice may be in flight, or have reached some channels: its row goes (like a
+    /// superseded one) and the flapping notice, sent to every channel, covers it. The flapping
+    /// notice is explicit (sent on its own) if any folded notice was; one standing only for
+    /// occurrences operators were never told about stays eligible for the maintenance summary.
+    /// </para>
+    /// </summary>
+    private void CoalesceLocked(string key, DateTime now)
+    {
+        var queue = KeyQueueLocked(key);
+        if (queue.Count < MaxQueuedNotices)
+            return;
+
+        var kept = queue.Take(KeptOldestNotices).TakeWhile(d => !d.IsFlapping).Count();
+        var folded = queue.Skip(kept).ToList();
+        var count = folded.Sum(d => Math.Max(1, d.FlappingCount));
+        var from = folded.Min(d => d.Notification.OpenedAtUtc ?? d.Notification.OccurredAtUtc);
+        var to = folded.Max(d => d.Notification.OccurredAtUtc);
+        var alert = folded.Last(d => !d.IsFlapping).Notification;
+        var stamp = (DateTime t) => DateTime.SpecifyKind(t, DateTimeKind.Utc)
+            .ToString("yyyy-MM-dd HH:mm:ss 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+
+        var notification = new AlertNotification(
+            AlertNotificationKind.Resolved,
+            key,
+            folded.Max(d => d.Notification.Severity),
+            $"Flapping: {count} occurrences between {stamp(from)} and {stamp(to)}",
+            $"{alert.Title} opened and cleared {count} times between {stamp(from)} and {stamp(to)}. " +
+            "Their notices were folded into this one; earlier and later occurrences are notified on their own.",
+            _server,
+            to,
+            OpenedAtUtc: from,
+            Duration: to - from,
+            NotifyCount: folded.Max(d => d.Notification.NotifyCount));
+        var flapping = PendingDelivery.Create(
+            notification, now,
+            held: folded.Any(d => d.Held),
+            explicitRecovery: folded.Any(d => !d.IsSummarisedRecovery),
+            occurrence: folded.Max(d => d.Occurrence),
+            sequence: NextSequenceLocked()) with
+        { FlappingCount = count };
+
+        // Written before the folded rows go: a crash in between repeats a notice, never loses one.
+        _store.UpsertDelivery(flapping);
+        Deliveries()[flapping.Id] = flapping;
+        foreach (var old in folded)
         {
-            await AttemptClaimedAsync(delivery, ct);
+            _store.DeleteDelivery(old.Id);
+            Deliveries().Remove(old.Id);
+        }
+        _logger.LogWarning("Alert {Key} is flapping: {Count} occurrences between {From:O} and {To:O} folded into one notice",
+            key, count, from, to);
+    }
+
+    /// <summary>
+    /// Sends what <see cref="EnqueueLocked"/> claimed for <paramref name="delivery"/> (itself, or a
+    /// notice queued before it, followed by the rest of the alert's queue), or logs why it is not
+    /// sent now: it is held, or queued behind the alert's earlier notices.
+    /// </summary>
+    private async Task SendOrLogHeldAsync(PendingDelivery delivery, PendingDelivery? claimed, CancellationToken ct)
+    {
+        if (claimed is not null)
+        {
+            await AttemptClaimedAsync(claimed, ct);
             return;
         }
 
@@ -456,13 +590,15 @@ public sealed class AlertManager : IAlertManager
             return;
         }
 
-        _logger.LogDebug("{Kind} notification for alert {Key} queued behind the alert's notice being sent",
+        _logger.LogDebug("{Kind} notification for alert {Key} queued behind the alert's earlier notices",
             delivery.Notification.Kind, delivery.AlertKey);
     }
 
     /// <summary>
     /// Claims <paramref name="delivery"/> for sending, unless it is already claimed or (alert
-    /// notices) another notice of the same alert is being sent (see <see cref="_sending"/>).
+    /// notices) another notice of the same alert is being sent (see <see cref="_sending"/>). Which
+    /// notice of an alert's queue may be claimed is decided by the callers
+    /// (<see cref="ClaimHeadLocked"/>, <see cref="ClaimSuccessorLocked"/>).
     /// </summary>
     private bool TryClaimLocked(PendingDelivery delivery)
     {
@@ -482,22 +618,37 @@ public sealed class AlertManager : IAlertManager
     }
 
     /// <summary>
-    /// After <paramref name="finished"/> (an alert notice) was sent: claims the alert's notice that
-    /// was queued behind it (its recovery, an escalation), if one is due, for the same sender to
-    /// send next. Held notices and retries still backing off are left to the delivery worker.
+    /// After <paramref name="finished"/> (an alert notice) was sent: claims the next notice of the
+    /// alert's queue (its recovery, an escalation, the next occurrence's opening) for the same
+    /// sender to send next, if it or a notice after it is due. <paramref name="attempted"/> holds
+    /// the notices this sender already attempted: one that failed again stays queued for its
+    /// retry and no longer holds back the ones behind it.
+    /// <para>
+    /// So an alert's queue is always sent from its head, in order, one notice at a time: a notice
+    /// is never attempted before every notice queued ahead of it was attempted in the same pass
+    /// (retried early if it was still backing off). Each channel gets an alert's notices in order
+    /// (the first occurrence's recovery before the next one's opening), and a channel that keeps
+    /// failing cannot hold back a new alert on the channels that work. A held successor is taken
+    /// too once no window is active (it is released when it is prepared, see
+    /// <see cref="PrepareLocked"/>).
+    /// </para>
     /// </summary>
-    private PendingDelivery? ClaimSuccessorLocked(PendingDelivery finished)
+    private PendingDelivery? ClaimSuccessorLocked(PendingDelivery finished, IReadOnlySet<string> attempted)
     {
-        if (!finished.IsAlertNotice ||
-            PendingNoticeLocked(finished.AlertKey) is not { } next ||
-            next.Id == finished.Id || next.Held || next.NextAttemptAt > UtcNow)
+        if (!finished.IsAlertNotice)
             return null;
-        return TryClaimLocked(next) ? next : null;
+        var now = UtcNow;
+        var includeHeld = !_maintenance.Current.Active;
+        var rest = KeyQueueLocked(finished.AlertKey).Where(d => !attempted.Contains(d.Id)).ToList();
+        if (rest.Count == 0 || !rest.Any(d => d.Held ? includeHeld : d.NextAttemptAt <= now))
+            return null;
+        return TryClaimLocked(rest[0]) ? rest[0] : null;
     }
 
     /// <summary>
     /// Releases a held delivery or retries a due one, unless another caller is already sending it
     /// or a maintenance window is active (it then stays pending, and held, until the window ends).
+    /// An alert notice is sent with its key's queue, from the head (see <see cref="ClaimHeadLocked"/>).
     /// </summary>
     private async Task ContinueAsync(string id, DateTime now, CancellationToken ct)
     {
@@ -513,11 +664,27 @@ public sealed class AlertManager : IAlertManager
             // delivery (a store write) is done by AttemptClaimedAsync, which always gives the
             // claim back.
             delivery = Deliveries().GetValueOrDefault(id);
-            if (delivery is null || (!delivery.Held && delivery.NextAttemptAt > now) || !TryClaimLocked(delivery))
+            if (delivery is { IsAlertNotice: true })
+                delivery = ClaimHeadLocked(delivery.AlertKey, now, includeHeld: true);
+            else if (delivery is null || (!delivery.Held && delivery.NextAttemptAt > now) || !TryClaimLocked(delivery))
                 return;
         }
 
-        await AttemptClaimedAsync(delivery, ct);
+        if (delivery is not null)
+            await AttemptClaimedAsync(delivery, ct);
+    }
+
+    /// <summary>Sends <paramref name="key"/>'s queue if any of its notices is held or due.</summary>
+    private async Task ContinueKeyAsync(string key, DateTime now, CancellationToken ct)
+    {
+        if (_maintenance.Current.Active)
+            return;
+
+        PendingDelivery? claimed;
+        lock (_gate)
+            claimed = ClaimHeadLocked(key, now, includeHeld: true);
+        if (claimed is not null)
+            await AttemptClaimedAsync(claimed, ct);
     }
 
     /// <summary>Gives back a claim whose send never started.</summary>
@@ -552,7 +719,7 @@ public sealed class AlertManager : IAlertManager
             System.Text.Encoding.UTF8.GetBytes(string.Join(",", held.Select(d => d.Id).Order(StringComparer.Ordinal)))))[..32];
         if (!deliveries.ContainsKey(id))
         {
-            var lines = held.Take(MaxSummaryLines).Select(d => SummaryLine(d.Notification)).ToList();
+            var lines = held.Take(MaxSummaryLines).Select(SummaryLine).ToList();
             if (held.Count > MaxSummaryLines)
                 lines.Add($"… and {held.Count - MaxSummaryLines} more (see the incident log)");
             var summary = new AlertNotification(
@@ -563,7 +730,7 @@ public sealed class AlertManager : IAlertManager
                 "Held back during the maintenance window:\n" + string.Join("\n", lines),
                 _server,
                 now);
-            var delivery = PendingDelivery.Create(summary, now, held: false) with { Id = id };
+            var delivery = PendingDelivery.Create(summary, now, held: false, sequence: NextSequenceLocked()) with { Id = id };
             _store.UpsertDelivery(delivery);
             deliveries[id] = delivery;
         }
@@ -576,10 +743,13 @@ public sealed class AlertManager : IAlertManager
         _logger.LogInformation("Maintenance window ended: {Count} held notifications summarised", held.Count);
     }
 
-    private static string SummaryLine(AlertNotification n)
+    private static string SummaryLine(PendingDelivery d)
     {
+        var n = d.Notification;
         var at = DateTime.SpecifyKind(n.OccurredAtUtc, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
         var label = AlertText.Label(n.Severity);
+        if (d.IsFlapping)
+            return $"• {at} [{label}] {n.Title}: {n.Description}";
         return n switch
         {
             { Kind: AlertNotificationKind.Resolved, RetiredReason: { } reason } =>
@@ -592,7 +762,7 @@ public sealed class AlertManager : IAlertManager
 
     /// <summary>
     /// A maintenance window ended: an opened/reminder notice is brought up to date (still open
-    /// for how long, latest description) and sent; one whose alert is no longer open is dropped.
+    /// for how long, latest description) and sent; one whose occurrence is over is dropped.
     /// </summary>
     private PendingDelivery? ReleaseLocked(PendingDelivery delivery, DateTime now)
     {
@@ -600,7 +770,7 @@ public sealed class AlertManager : IAlertManager
         if (delivery.IsAboutOpenAlert)
         {
             var state = States().GetValueOrDefault(delivery.AlertKey);
-            if (state is not { IsOpen: true } || state.OpenedAt != delivery.Notification.OpenedAtUtc)
+            if (state is not { IsOpen: true } || state.Occurrence != delivery.Occurrence)
             {
                 _store.DeleteDelivery(delivery.Id);
                 Deliveries().Remove(delivery.Id);
@@ -634,17 +804,20 @@ public sealed class AlertManager : IAlertManager
     /// released here on every path, including a failure while the send is prepared (releasing a
     /// held delivery) or its outcome is persisted.
     /// <para>
-    /// Then sends the alert's notice queued behind it, if any (see <see cref="_sending"/>), and so
-    /// on. Only after a dispatch that finished: one cut short by <paramref name="ct"/> (a shutdown)
-    /// leaves the queued notice pending for the delivery worker or the next start.
+    /// Then sends the alert's notices queued behind it, if any (see <see cref="_sending"/> and
+    /// <see cref="ClaimSuccessorLocked"/>), each at most once. Only after a dispatch that finished:
+    /// one cut short by <paramref name="ct"/> (a shutdown) leaves the queued notices pending for
+    /// the delivery worker or the next start.
     /// </para>
     /// </summary>
     private async Task AttemptClaimedAsync(PendingDelivery claimed, CancellationToken ct)
     {
+        var attempted = new HashSet<string>(StringComparer.Ordinal);
         for (PendingDelivery? next = claimed; next is not null;)
         {
             var current = next;
             next = null;
+            attempted.Add(current.Id);
             var finished = false;
             try
             {
@@ -659,7 +832,7 @@ public sealed class AlertManager : IAlertManager
                 {
                     ReleaseClaimLocked(current);
                     if (finished && !ct.IsCancellationRequested)
-                        next = ClaimSuccessorLocked(current);
+                        next = ClaimSuccessorLocked(current, attempted);
                 }
             }
         }
@@ -723,7 +896,8 @@ public sealed class AlertManager : IAlertManager
             foreach (var channel in result.Delivered)
                 RecordDeliveredLocked(delivery, channel, ref reached);
 
-            // Superseded while it was being sent: the newer notice or the close owns the row.
+            // Superseded while it was being sent: the newer notice of its occurrence, the close or
+            // the flapping notice it was folded into owns the row.
             if (Deliveries().GetValueOrDefault(delivery.Id) is not { } current)
                 return;
             var next = NextAttempt(current, result, error, firstAttempt, now);
@@ -781,7 +955,7 @@ public sealed class AlertManager : IAlertManager
     {
         // Counted as notified once it actually reached a channel, not when it was attempted.
         if (!reached && delivery.IsAboutOpenAlert)
-            MarkNotified(delivery.Notification, UtcNow);
+            MarkNotified(delivery, UtcNow);
         reached = true;
 
         if (Deliveries().GetValueOrDefault(delivery.Id) is not { } current ||
@@ -833,37 +1007,52 @@ public sealed class AlertManager : IAlertManager
     }
 
     /// <summary>The open alert's notice reached its first channel: it now counts as notified.</summary>
-    private void MarkNotified(AlertNotification notification, DateTime now)
+    private void MarkNotified(PendingDelivery delivery, DateTime now)
     {
         lock (_gate)
         {
-            if (States().GetValueOrDefault(notification.AlertKey) is not { IsOpen: true } state ||
-                state.OpenedAt != notification.OpenedAtUtc)
+            if (States().GetValueOrDefault(delivery.AlertKey) is not { IsOpen: true } state ||
+                state.Occurrence != delivery.Occurrence)
                 return; // the occurrence it was about is over
             Save(state with { LastNotifiedAt = now, NotifyCount = state.NotifyCount + 1 });
         }
     }
 
-    /// <summary>The opened, reminder or resolved notice still being delivered for an alert.</summary>
-    private PendingDelivery? PendingNotice(string key)
+    /// <summary>
+    /// The opened, reminder or resolved notice still being delivered for one occurrence of an
+    /// alert (at most one per occurrence: a newer one of the same occurrence replaces it).
+    /// </summary>
+    private PendingDelivery? PendingNotice(string key, long occurrence)
     {
         lock (_gate)
-            return PendingNoticeLocked(key);
+            return PendingNoticeLocked(key, occurrence);
     }
 
-    private PendingDelivery? PendingNoticeLocked(string key) =>
-        Deliveries().Values.FirstOrDefault(d =>
-            d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase));
+    private PendingDelivery? PendingNoticeLocked(string key, long occurrence) =>
+        Deliveries().Values.FirstOrDefault(d => IsNoticeOf(d, key, occurrence));
+
+    private static bool IsNoticeOf(PendingDelivery d, string key, long occurrence) =>
+        d.IsAlertNotice && !d.IsFlapping && d.Occurrence == occurrence &&
+        string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The alert notices queued for <paramref name="key"/>, in the order they are sent.</summary>
+    private List<PendingDelivery> KeyQueueLocked(string key) =>
+        Deliveries().Values
+            .Where(d => d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(d => d.QueueOrder)
+            .ToList();
 
     /// <summary>Takes the per-key lifecycle lock (see <see cref="_keyLocks"/>).</summary>
     private Task<IDisposable> LockKeyAsync(AlertKey key, CancellationToken ct) => _keyLocks.LockAsync(key.Value, ct);
 
-    private void RemoveNoticesLocked(string key)
+    /// <summary>
+    /// Removes the pending notice of one occurrence of an alert (superseded by a newer notice of
+    /// that occurrence, or dropped). Other occurrences' notices are never touched here.
+    /// </summary>
+    private void RemoveNoticesLocked(string key, long occurrence)
     {
         var deliveries = Deliveries();
-        foreach (var old in deliveries.Values
-                     .Where(d => d.IsAlertNotice && string.Equals(d.AlertKey, key, StringComparison.OrdinalIgnoreCase))
-                     .ToList())
+        foreach (var old in deliveries.Values.Where(d => IsNoticeOf(d, key, occurrence)).ToList())
         {
             _store.DeleteDelivery(old.Id);
             deliveries.Remove(old.Id);
@@ -915,7 +1104,10 @@ public sealed class AlertManager : IAlertManager
         try
         {
             foreach (var delivery in _store.LoadDeliveries())
+            {
                 deliveries[delivery.Id] = delivery;
+                _lastSequence = Math.Max(_lastSequence, delivery.Sequence);
+            }
         }
         catch (Exception ex)
         {

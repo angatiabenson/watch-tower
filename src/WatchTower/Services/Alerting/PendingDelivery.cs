@@ -4,8 +4,14 @@ namespace WatchTower.Services.Alerting;
 /// A notification that has not yet reached every eligible channel (<c>alert_delivery</c> row):
 /// held during a maintenance window, or waiting to retry the channels that failed. Channels that
 /// already received it are listed in <paramref name="DeliveredChannels"/> and never sent it again.
-/// The row is deleted once every eligible channel has it, when it is superseded (a newer
-/// notification for the same alert, or the alert resolved) or when retries are given up.
+/// The row is deleted once every eligible channel has it, when it is superseded (a newer notice
+/// of the same alert occurrence, e.g. its recovery, or a flapping notice it was folded into) or
+/// when retries are given up.
+/// <para>
+/// An alert's notices (opened, reminder, resolved) form an ordered queue per alert key, sorted by
+/// <paramref name="Occurrence"/> then <paramref name="Sequence"/>: a new occurrence of the alert
+/// never replaces an earlier occurrence's recovery, it queues behind it.
+/// </para>
 /// </summary>
 /// <param name="Id">Unique id of this notification.</param>
 /// <param name="Notification">The message, exactly as it is (re)sent.</param>
@@ -22,6 +28,12 @@ namespace WatchTower.Services.Alerting;
 /// operators (it was notified, or its opened notice was being sent or had been attempted when the
 /// alert closed), so this recovery is always sent on its own, never folded into the
 /// end-of-maintenance summary.</param>
+/// <param name="Occurrence">Alert notices only: the alert occurrence it is about
+/// (<see cref="AlertState.Occurrence"/>); 0 for events and summaries.</param>
+/// <param name="Sequence">Creation order of pending deliveries (increasing, persisted), which
+/// orders an alert's notices within the same occurrence and the delivery worker's batches.</param>
+/// <param name="FlappingCount">A flapping notice: how many occurrences of the alert were folded
+/// into it (see <see cref="AlertManager.MaxQueuedNotices"/>); 0 for every other notice.</param>
 public sealed record PendingDelivery(
     string Id,
     AlertNotification Notification,
@@ -32,15 +44,24 @@ public sealed record PendingDelivery(
     DateTime NextAttemptAt,
     string? LastError,
     bool Held = false,
-    bool ExplicitRecovery = false)
+    bool ExplicitRecovery = false,
+    long Occurrence = 0,
+    long Sequence = 0,
+    int FlappingCount = 0)
 {
     public string AlertKey => Notification.AlertKey;
 
     /// <summary>An opened or reminder notification: about an alert that is (still) open.</summary>
     public bool IsAboutOpenAlert => Notification.Kind is AlertNotificationKind.Opened or AlertNotificationKind.Reminder;
 
-    /// <summary>An opened, reminder or resolved notification (one per alert key at a time).</summary>
+    /// <summary>
+    /// An opened, reminder or resolved notification (a flapping notice is a resolved one): queued
+    /// per alert key and sent one at a time, in <see cref="QueueOrder"/>.
+    /// </summary>
     public bool IsAlertNotice => IsAboutOpenAlert || Notification.Kind == AlertNotificationKind.Resolved;
+
+    /// <summary>A notice standing for several occurrences of a flapping alert.</summary>
+    public bool IsFlapping => FlappingCount > 0;
 
     /// <summary>
     /// A resolved notice of an alert that operators were never told about (opened and cleared
@@ -49,8 +70,14 @@ public sealed record PendingDelivery(
     public bool IsSummarisedRecovery =>
         Notification is { Kind: AlertNotificationKind.Resolved, NotifyCount: 0 } && !ExplicitRecovery;
 
-    public static PendingDelivery Create(AlertNotification notification, DateTime now, bool held, bool explicitRecovery = false) =>
-        new(Guid.NewGuid().ToString("N"), notification, now, [], 0, null, now, null, held, explicitRecovery);
+    /// <summary>Position in its alert key's queue: occurrence first, then creation order.</summary>
+    public (long Occurrence, long Sequence) QueueOrder => (Occurrence, Sequence);
+
+    public static PendingDelivery Create(
+        AlertNotification notification, DateTime now, bool held, bool explicitRecovery = false,
+        long occurrence = 0, long sequence = 0) =>
+        new(Guid.NewGuid().ToString("N"), notification, now, [], 0, null, now, null, held, explicitRecovery,
+            occurrence, sequence);
 }
 
 /// <summary>When failed notification deliveries are retried.</summary>

@@ -4,7 +4,7 @@ namespace WatchTower.Services.Alerting;
 
 /// <summary>
 /// Persisted state of one alert key (<c>alert_state</c> row). A key has at most one row: raising
-/// a resolved key re-opens it with fresh counters.
+/// a resolved key re-opens it with fresh counters, as the next <paramref name="Occurrence"/>.
 /// </summary>
 /// <param name="Key">The <see cref="AlertKey"/> value.</param>
 /// <param name="Severity">Severity of the open (or last) alert.</param>
@@ -17,6 +17,9 @@ namespace WatchTower.Services.Alerting;
 /// <param name="LastDescription">Latest description reported for the condition.</param>
 /// <param name="RetiredReason">Set when the alert was closed because what it watched is no longer
 /// monitored (e.g. the service was removed from the configuration) rather than because it recovered.</param>
+/// <param name="Occurrence">Which occurrence of the alert this is: 1 the first time the key opens,
+/// one more every time it re-opens after resolving. Every pending notice records the occurrence it
+/// is about, so a re-opened alert never mistakes an earlier occurrence's notices for its own.</param>
 public sealed record AlertState(
     string Key,
     AlertSeverity Severity,
@@ -27,7 +30,8 @@ public sealed record AlertState(
     int NotifyCount,
     DateTime? ResolvedAt,
     string LastDescription,
-    string? RetiredReason = null)
+    string? RetiredReason = null,
+    long Occurrence = 1)
 {
     public bool IsOpen => ResolvedAt is null;
 }
