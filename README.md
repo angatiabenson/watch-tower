@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/ci.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/release.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-  <img src="https://img.shields.io/badge/tests-1072%20passing-brightgreen" alt="Tests: 1072 passing">
+  <img src="https://img.shields.io/badge/tests-1074%20passing-brightgreen" alt="Tests: 1074 passing">
   <img src="https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet" alt=".NET 10">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license"></a>
@@ -163,7 +163,8 @@ prompt.
   from the server itself or with `set-password`. Sign-in is rate-limited (10 attempts per 5
   minutes per IP) and sessions end after 30 idle minutes (`Ui:SessionTimeoutMinutes`).
 - **CSRF**: the session cookie is `HttpOnly` and `SameSite=Strict`, and every state-changing API
-  call must carry the `X-WatchTower-Request` header (and a matching `Origin`).
+  call must carry `X-WatchTower-Request: 1`; an `Origin` header, when present, must match the request's
+  scheme, host and port.
 - **Host guard** against DNS rebinding: connections from the server must address it as
   `127.0.0.1`, `localhost` or `[::1]`; remote connections can be limited to `Ui:AllowedHosts`.
 - Content Security Policy `default-src 'self'`.
@@ -202,7 +203,7 @@ updater picks it up:
    its **signature**; a package that fails either check is rejected.
 3. **Countdown**: after a download started from the console or the portal, a restart countdown
    (`Updates:RestartCountdownSeconds`, 30) runs in the service and can be cancelled from any
-   console session or the portal; *Install now* skips it. A background download waits for a
+   console session; *Install now* skips it. A background download waits for a
    click.
 4. **Install**: a helper started from the new exe stops the service, backs up the install
    folder, copies the new files, starts the service and waits up to
@@ -223,8 +224,10 @@ install only when WatchTower runs as a Windows service.
 WatchTower runs standalone until you connect it (`VisibilityPortal:Enabled`, default `false`).
 Connected, it streams metrics and alert events to the portal, polls for commands, and accepts
 remote configuration (thresholds, intervals, watch lists, portal timings and a maintenance
-window) unless *Allow the portal to manage settings* is turned off. Endpoint checks and
-notification channels stay local.
+window) unless *Allow the portal to manage settings* is turned off. Turning it off stops both
+configuration polling and the *Apply configuration* command (401); settings the portal applied
+earlier stay in effect until the portal file is removed. Endpoint checks and notification channels
+stay local.
 
 The simplest way is an **enrollment code** from the portal's *Add server* dialog: `WT1.`
 followed by base64url JSON `{v, url, agentId, token, requireTls}`. Use it in any of these:
@@ -250,8 +253,10 @@ always use HTTPS/JSON).
 Portal commands: start, stop and restart services and pools (only those watched in the
 agent's own settings, unless `VisibilityPortal:CommandPoll:AllowPortalManagedTargets` is on;
 never WatchTower itself), recycle a pool, force a metrics snapshot or a configuration sync,
-restart or update the agent, apply a configuration, and send a test notification. Commands are
-checked for freshness (`issuedAt`) and never run twice.
+restart or update the agent, apply a configuration, and send a test notification. Commands
+with `issuedAt` are checked for freshness; set `VisibilityPortal:RequireCommandIssuedAt=true` to
+reject commands without it. A command ID is never run twice while it is remembered (365 days and
+at most 200,000 IDs by default), so portals must never reuse IDs.
 
 ### Build your own portal
 
@@ -697,7 +702,8 @@ Build the release zip locally (self-contained single-file exe, `install.ps1`, `I
 
 ### Releasing
 
-- **CI** ([ci.yml](.github/workflows/ci.yml)): every push and pull request runs restore, a format
+- **CI** ([ci.yml](.github/workflows/ci.yml)): every pull request, and every push except those that change only
+  Markdown, branding or `logo.png`, runs restore, a format
   check, a Release build, the tests and a packaging smoke test on GitHub-hosted runners.
 - **Release** ([release.yml](.github/workflows/release.yml)): every push to `main` that changes
   the product (`src/`, `build/`, `global.json`, `Directory.*.props`, the solution or the
@@ -777,12 +783,12 @@ The log level is set in the console (*Logging*) or with `Serilog:MinimumLevel:De
 
 ## Testing
 
-1,072 tests (xUnit v3 on Microsoft.Testing.Platform) cover the monitor workers, the alert
+1,074 tests (xUnit v3 on Microsoft.Testing.Platform) cover the monitor workers, the alert
 lifecycle and notification delivery, endpoint checks, hosting, the CLI, the legacy import,
 configuration layering and secrets, the console API, the updater and the portal client, outbox
 and command handling. The portal contract tests validate the agent's payloads and every JSON
 example in the guide against the OpenAPI spec. Workers are driven one iteration at a time with
-a `FakeTimeProvider`, so there are no real-time sleeps or scheduling races.
+a `FakeTimeProvider`; some updater tests use short real-time asynchronous waits.
 
 ```powershell
 dotnet test --project tests/WatchTower.Tests/WatchTower.Tests.csproj
