@@ -158,7 +158,7 @@ public class EndpointMonitorWorkerTests
     }
 
     [Fact]
-    public void SqliteStore_KeepsLatestEndpointStatus_AndPurgeClearsIt()
+    public void SqliteStore_KeepsLatestEndpointStatus_EvenThroughTheDailyPurge()
     {
         using var dir = new TestDataDirectory();
         dir.Paths.EnsureDirectories();
@@ -171,8 +171,10 @@ public class EndpointMonitorWorkerTests
         store.GetLatestEndpointStatuses().Should().ContainSingle().Which.Should().Be(
             new EndpointStatus(t.AddMinutes(1), "tls", "Certificate", "example.com:443", "Expiring", true, null, 20, null));
 
-        store.PurgeReportedData(0, 0, t);
-        store.GetLatestEndpointStatuses().Should().BeEmpty();
+        // Current state, not history: a check run once a day must not vanish until its next run.
+        store.PurgeReportedData(long.MaxValue, long.MaxValue, t.AddDays(1));
+        store.Purge(TimeSpan.Zero);
+        store.GetLatestEndpointStatuses().Should().ContainSingle().Which.Status.Should().Be("Expiring");
     }
 
     [Fact]

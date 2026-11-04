@@ -560,11 +560,14 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
 
             // Delete cpu/ram rows only up to the confirmed-delivered rowid. Rows the
             // portal has not yet acknowledged (rowid > forwarded cursor) are preserved
-            // so a later send failure can never cause silent data loss. Snapshot tables
-            // (latest-state) are cleared in full. Incidents (already queued to the portal as
-            // events) are deleted only up to the report's snapshot time: anything recorded
-            // after the report was built was not in it and must survive for the next one.
-            // All in one transaction for atomicity.
+            // so a later send failure can never cause silent data loss. Incidents (already
+            // queued to the portal as events) are deleted only up to the report's snapshot time:
+            // anything recorded after the report was built was not in it and must survive for
+            // the next one. All in one transaction for atomicity.
+            // The snapshot tables are current state, not history, and are left alone: clearing
+            // them dropped every resource from the metrics batches until its next reading (up to
+            // a day for an endpoint checked daily). Their rows are only removed when the resource
+            // is gone (RemoveSnapshots / RemoveSnapshotsExcept).
             using (var cmd = conn.CreateCommand())
             {
                 cmd.Transaction = tx;
@@ -572,12 +575,6 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                     @"
                     DELETE FROM cpu_metrics WHERE rowid <= @cpuRow;
                     DELETE FROM ram_metrics WHERE rowid <= @ramRow;
-                    DELETE FROM disk_metrics;
-                    DELETE FROM disk_queue_metrics;
-                    DELETE FROM network_metrics;
-                    DELETE FROM service_statuses;
-                    DELETE FROM application_pool_statuses;
-                    DELETE FROM endpoint_status;
                     DELETE FROM incidents WHERE timestamp <= @incidentCutoff;
                 ";
                 cmd.Parameters.AddWithValue("@cpuRow", cpuForwardedRowId);

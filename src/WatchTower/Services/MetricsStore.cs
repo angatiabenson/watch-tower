@@ -90,16 +90,11 @@ public class MetricsStore : IMetricsStore
 
     public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc)
     {
-        // In-memory cursors are running indices; clear everything that has been
-        // collected. Snapshots are always cleared; incidents only up to the report cutoff.
+        // In-memory cursors are running indices; clear the cpu/ram history collected so far and
+        // incidents up to the report cutoff. Snapshots are current state and are kept, as in
+        // SqliteMetricsStore.
         _cpuMetrics.Clear();
         _ramMetrics.Clear();
-        _diskMetrics.Clear();
-        _diskQueueMetrics.Clear();
-        _networkMetrics.Clear();
-        _serviceStatuses.Clear();
-        _applicationPoolStatuses.Clear();
-        _endpointStatuses.Clear();
 
         var newer = new List<Incident>();
         while (_incidents.TryDequeue(out var incident))

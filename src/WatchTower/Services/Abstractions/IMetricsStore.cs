@@ -29,12 +29,12 @@ public interface IMetricsStore
 
     /// <summary>
     /// Post-report purge. Deletes cpu/ram rows only up to the rowids that have been
-    /// confirmed delivered to the portal (so un-acked rows are never lost), clears all
-    /// snapshot tables, and deletes incidents with a timestamp at or before
-    /// <paramref name="incidentsUpToUtc"/> (the report's snapshot time) so incidents raised
-    /// while the report was being built and sent survive for the next report. Returns which
-    /// append tables became empty so the caller can reset the forwarding cursors (SQLite
-    /// reuses rowids from 1 once a table is emptied).
+    /// confirmed delivered to the portal (so un-acked rows are never lost) and deletes
+    /// incidents with a timestamp at or before <paramref name="incidentsUpToUtc"/> (the
+    /// report's snapshot time) so incidents raised while the report was being built and sent
+    /// survive for the next report. Returns which append tables became empty so the caller can
+    /// reset the forwarding cursors (SQLite reuses rowids from 1 once a table is emptied).
+    /// History only: the latest-state snapshot tables are kept (see <see cref="SnapshotKind"/>).
     /// </summary>
     PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc);
 
@@ -62,7 +62,14 @@ public interface IMetricsStore
     IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep);
 }
 
-/// <summary>The latest-state ("snapshot") tables repeated in every metrics batch.</summary>
+/// <summary>
+/// The latest-state ("snapshot") tables repeated in every metrics batch. Current state, not
+/// history: neither purge touches them. A row only goes when its resource is gone, through
+/// <see cref="IMetricsStore.RemoveSnapshots"/> (discovered resources missing for a grace period)
+/// or <see cref="IMetricsStore.RemoveSnapshotsExcept"/> (configured resources removed from the
+/// configuration). A resource that is still there keeps its last row, with that reading's
+/// timestamp, until it is read again.
+/// </summary>
 public enum SnapshotKind
 {
     Disk,
