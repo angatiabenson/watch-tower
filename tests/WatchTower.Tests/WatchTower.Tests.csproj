@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <PackageReference Include="AwesomeAssertions" />
+    <PackageReference Include="Corvus.Text.Json.Validator" />
+    <PackageReference Include="Corvus.Text.Json.Yaml" />
     <PackageReference Include="Microsoft.AspNetCore.TestHost" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
@@ -25,5 +27,15 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\WatchTower\WatchTower.csproj" />
   </ItemGroup>
+
+  <!--
+    Corvus.Text.Json ships a Roslyn analyzer (CTJ*) that suggests its own APIs in place of System.Text.Json.
+    The tests only use the validator, so keep the analyzer out (it also runs under dotnet format).
+  -->
+  <Target Name="RemoveCorvusTextJsonAnalyzers" AfterTargets="ResolveLockFileAnalyzers">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="'%(Filename)' == 'Corvus.Text.Json.Analyzers'" />
+    </ItemGroup>
+  </Target>
 
 </Project>
