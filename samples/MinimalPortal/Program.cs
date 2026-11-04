@@ -79,6 +79,17 @@ public static class MinimalPortalApp
         var app = builder.Build();
         if (!string.IsNullOrEmpty(pathBase))
         {
+            // UsePathBase alone also serves every route without the prefix. Refuse those, so an
+            // agent whose BaseUrl lacks the prefix fails here as it would behind a real proxy.
+            app.Use(async (context, next) =>
+            {
+                if (!context.Request.Path.StartsWithSegments(pathBase))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
+                await next(context);
+            });
             app.UsePathBase(pathBase);
             app.UseRouting(); // after UsePathBase, so routes match below the prefix
         }

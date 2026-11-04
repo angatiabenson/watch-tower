@@ -103,8 +103,14 @@ public sealed class OpenAlert
 {
     public required string AlertKey { get; init; }
     public required int IncidentType { get; set; }
-    public required DateTimeOffset OpenedAt { get; init; }
+    public required DateTimeOffset OpenedAt { get; set; }
     public required string Description { get; set; }
+
+    /// <summary>
+    /// Timestamp of the opening or escalation that set <see cref="IncidentType"/> and
+    /// <see cref="Description"/>. An older event never overwrites them.
+    /// </summary>
+    public required DateTimeOffset LastTransitionAt { get; set; }
 }
 
 public sealed class AgentRecord
@@ -328,36 +334,57 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             // Alert lifecycle: resolved=false opens or escalates the alert, resolved=true closes
             // it, and no "resolved" at all is a one-shot event (alertKey "reboot") or an incident
             // outside any alert (no alertKey). Events can arrive out of order (one in retry
-            // backoff is overtaken by the next), so decide by timestamp, not by arrival: an open
-            // older than the last close is history, and a close older than the open is ignored.
+            // backoff is overtaken by the next), so decide by timestamp, not by arrival.
+            //
+            //  * An opening or escalation older than the current state (the last close, or the
+            //    last transition of the open alert) is kept as history only.
+            //  * A close only ends the alert when it is newer than the alert's last transition.
+            //  * A close and an opening with the SAME timestamp mean "closed, then opened again"
+            //    in whichever order they arrive: the agent emits both at one instant when a
+            //    resource changes from one problem to another (an endpoint going from Down to
+            //    Expiring sends EndpointRecovered and CertificateExpiring together).
+            //
+            // Timestamps cannot settle every reordering (two changes in the same instant, or a
+            // transition lost because the agent dropped it): reconcile the open alerts against
+            // the snapshots in the metrics batches (endpointStatuses, serviceStatuses, ...).
             if (evt.AlertKey is { Length: > 0 } key && evt.Resolved is { } resolved)
             {
                 var at = evt.Timestamp!.Value;
                 if (!resolved)
                 {
-                    if (agent.LastClosedAt.TryGetValue(key, out var closedAt) && closedAt >= at)
-                        return true; // already closed later than this open: keep it as history only
-
                     if (agent.OpenAlerts.TryGetValue(key, out var open))
                     {
+                        if (at < open.LastTransitionAt)
+                            return true; // older than the current state: history only
+
                         open.IncidentType = evt.IncidentType!.Value; // escalation keeps the alert open
                         open.Description = evt.Description!;
+                        open.LastTransitionAt = at;
                     }
                     else
                     {
+                        if (agent.LastClosedAt.TryGetValue(key, out var closedAt) && closedAt > at)
+                            return true; // already closed later than this open: keep it as history only
+
                         agent.OpenAlerts[key] = new OpenAlert
                         {
                             AlertKey = key,
                             IncidentType = evt.IncidentType!.Value,
                             OpenedAt = at,
                             Description = evt.Description!,
+                            LastTransitionAt = at,
                         };
                     }
                 }
                 else
                 {
-                    if (agent.OpenAlerts.TryGetValue(key, out var open) && open.OpenedAt <= at)
-                        agent.OpenAlerts.Remove(key);
+                    if (agent.OpenAlerts.TryGetValue(key, out var open))
+                    {
+                        if (open.LastTransitionAt < at)
+                            agent.OpenAlerts.Remove(key);
+                        else if (open.OpenedAt <= at)
+                            open.OpenedAt = open.LastTransitionAt; // reopened at or after this close
+                    }
                     if (!agent.LastClosedAt.TryGetValue(key, out var previous) || previous < at)
                         agent.LastClosedAt[key] = at;
                 }
@@ -425,8 +452,9 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
 
     /// <summary>
     /// Records a result. The agent retries results until it gets a 2xx, so duplicates are
-    /// normal: the first result wins. A result may also arrive without a prior acknowledgement
-    /// (the agent does not retry acknowledgements).
+    /// normal: the first result wins. A result may also arrive without any acknowledgement: the
+    /// agent does not retry acknowledgements, and it never acknowledges a command it rejects for
+    /// its issuedAt (that result says "Rejected: ..."). AcknowledgedAt stays as received.
     /// </summary>
     public void RecordResult(AgentRecord agent, string commandId, bool success, string message, DateTimeOffset executedAt)
     {
@@ -438,7 +466,6 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             record.ResultMessage = message;
             record.ExecutedAt = executedAt;
             record.ResultReceivedAt = Now;
-            record.AcknowledgedAt ??= executedAt;
         }
     }
 

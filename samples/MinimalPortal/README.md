@@ -44,7 +44,7 @@ Options (command-line `--Name value`, or environment variables):
 | --- | --- | --- |
 | `--urls` | `http://localhost:5080` | Where to listen (standard ASP.NET Core setting). Use `http://0.0.0.0:5080` to accept agents from other machines. |
 | `--PublicUrl` | the first `--urls` value | The URL agents use to reach the portal; it goes into enrollment codes. Set it when listening on `0.0.0.0` or behind a proxy, e.g. `--PublicUrl http://devbox.lan:5080`. |
-| `--PathBase` | none | Serve everything below a path prefix, e.g. `/watchtower`; the public URL then ends with it. |
+| `--PathBase` | none | Serve everything below a path prefix, e.g. `/watchtower`; the public URL then ends with it. Requests outside the prefix get 404, as they would behind a reverse proxy. |
 | `--AgentId` | `agent-01` | ID of the agent created at start-up. |
 | `--AdminKey` | random | Key for the `/admin` API. |
 
@@ -109,7 +109,13 @@ curl -s -X PUT -H "X-Admin-Key: $KEY" -H "Content-Type: application/json" \
   retrying.
 - CPU and RAM samples stored by timestamp (also deduplicates batches from older agents without
   `batchId`); snapshots keep the newest reading even when an old batch arrives late.
-- The alert lifecycle from `alertKey` and `resolved`, tolerant of out-of-order delivery.
+- The alert lifecycle from `alertKey` and `resolved`, decided by event timestamps rather than
+  arrival order: an opening or escalation older than the alert's current state is kept as
+  history only (it never overwrites a newer severity or description), a close only ends the
+  alert when it is newer than the alert's last transition, and a close and an opening with the
+  same timestamp mean "closed, then opened again" in either arrival order (an endpoint going
+  from Down to Expiring sends both at one instant). Timestamps cannot settle every reordering,
+  so a real portal also reconciles open alerts against the snapshots in each metrics batch.
 - Commands re-delivered until acknowledged, expired before the agent would reject them as stale,
   results accepted without a prior acknowledgement and first result wins.
 - Remote configuration versions, 204 when the agent is current, acknowledgement tracking and
