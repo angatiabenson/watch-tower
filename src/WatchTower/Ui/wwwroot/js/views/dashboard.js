@@ -377,21 +377,35 @@ function stat(label, value, sub, kind) {
     h('p', { class: 'stat-sub' }, sub || ' '));
 }
 
+/** ", 2 stale" to append to a summary, or "" when nothing is stale. */
+const staleSuffix = (n) => (n ? `, ${n} stale` : '');
+
+/**
+ * Up/total for services or pools. Stale entries (no recent reading) are neither up nor down:
+ * their last reading is not current, so they never raise or clear the alarm here. They are
+ * counted separately.
+ */
 function upDown(list, noneText) {
   const a = Array.isArray(list) ? list : [];
-  const down = a.filter((x) => !x.isRunning).length;
-  const stale = a.filter((x) => x.isStale).length;
   if (!a.length) return ['–', h('span', { class: 'muted' }, noneText), null];
-  return [`${a.length - down}/${a.length}`,
-    down ? statusTag('critical', `${down} down`) : stale ? statusTag('stale', `${stale} stale`) : statusTag('ok', 'All running'),
+  const fresh = a.filter((x) => !x.isStale);
+  const stale = a.length - fresh.length;
+  const down = fresh.filter((x) => !x.isRunning).length;
+  const up = fresh.length - down;
+  return [`${up}/${a.length}`,
+    down ? statusTag('critical', `${down} down${staleSuffix(stale)}`)
+      : stale ? statusTag('stale', `${stale} stale`) : statusTag('ok', 'All running'),
     down ? 'critical' : null];
 }
 
 /** Stats strip: one large numeral per watched area, split by 1 px rules. */
 function renderStrip({ svc, pools, disks, inc }) {
   const d = Array.isArray(disks) ? disks : [];
-  const crit = d.filter((x) => isNum(x.criticalPercent) && x.usagePercent >= x.criticalPercent).length;
-  const warn = d.filter((x) => isNum(x.warningPercent) && x.usagePercent >= x.warningPercent).length - crit;
+  // A stale drive's last usage is not current: it never counts as at risk (or as healthy).
+  const fresh = d.filter((x) => !x.isStale);
+  const staleDisks = d.length - fresh.length;
+  const crit = fresh.filter((x) => isNum(x.criticalPercent) && x.usagePercent >= x.criticalPercent).length;
+  const warn = fresh.filter((x) => isNum(x.warningPercent) && x.usagePercent >= x.warningPercent).length - crit;
   const list = Array.isArray(inc) ? inc : [];
   const ic = list.filter((x) => x.severity === 'critical').length;
   return [
@@ -399,7 +413,9 @@ function renderStrip({ svc, pools, disks, inc }) {
     stat('App pools up', ...upDown(pools, 'None watched')),
     d.length
       ? stat('Disks at risk', String(crit + warn),
-        crit ? statusTag('critical', `${crit} critical`) : warn ? statusTag('warning', `${warn} low on space`) : statusTag('ok', 'All healthy'),
+        crit ? statusTag('critical', `${crit} critical${staleSuffix(staleDisks)}`)
+          : warn ? statusTag('warning', `${warn} low on space${staleSuffix(staleDisks)}`)
+            : staleDisks ? statusTag('stale', `${staleDisks} stale`) : statusTag('ok', 'All healthy'),
         crit ? 'critical' : warn ? 'warning' : null)
       : stat('Disks at risk', '–', h('span', { class: 'muted' }, 'No drives sampled')),
     stat('Incidents, 24 h', String(list.length),
@@ -458,7 +474,8 @@ function renderDisks(disks) {
       h('div', { class: 'disk-head' },
         h('span', { class: 'disk-drive' }, d.drive),
         d.isStale ? staleTag(d.readAt) : null,
-        level !== 'ok' ? statusTag(level, level === 'critical' ? 'Critical' : 'Low space') : null,
+        // A stale drive's last usage is not current, so it raises no alarm of its own.
+        level !== 'ok' && !d.isStale ? statusTag(level, level === 'critical' ? 'Critical' : 'Low space') : null,
         h('span', { class: 'disk-pct' }, fmtPct(d.usagePercent), h('span', { class: 'muted' }, ' used'))),
       bar,
       h('p', { class: 'disk-meta' }, `${fmtGb(d.freeGb)} free of ${fmtGb(d.totalGb)}`,
@@ -466,10 +483,13 @@ function renderDisks(disks) {
   }))];
 }
 
+/** Down means a current reading says so; a stale entry is neither up nor down. */
+const isDown = (it) => !it.isStale && !it.isRunning;
+
 function statusList(items, nameOf, subOf) {
-  const sorted = [...items].sort((a, b) => Number(a.isRunning) - Number(b.isRunning) || nameOf(a).localeCompare(nameOf(b)));
+  const sorted = [...items].sort((a, b) => Number(isDown(b)) - Number(isDown(a)) || nameOf(a).localeCompare(nameOf(b)));
   return h('ul', { class: 'status-list' }, sorted.map((it) => h('li', {
-    class: [it.isRunning ? '' : 'down', it.isStale ? 'is-stale' : ''].filter(Boolean).join(' '),
+    class: [isDown(it) ? 'down' : '', it.isStale ? 'is-stale' : ''].filter(Boolean).join(' '),
     title: it.isStale ? staleTitle(it.readAt) : null,
   },
   h('div', { class: 'status-name' },
@@ -482,7 +502,7 @@ function statusList(items, nameOf, subOf) {
 }
 
 function countLine(items) {
-  const down = items.filter((i) => !i.isRunning).length;
+  const down = items.filter(isDown).length;
   const stale = items.filter((i) => i.isStale).length;
   const text = down ? `${down} of ${items.length} down` : `${items.length} watched`;
   return h('span', { class: 'panel-meta' }, stale ? `${text}, ${stale} stale` : text);
@@ -597,10 +617,18 @@ const ENDPOINT_STATUS = {
 };
 const ENDPOINT_TYPE = { http: 'HTTP', tcp: 'TCP', certificate: 'TLS cert' };
 
-function endpointState(e) {
+function currentEndpointState(e) {
   const known = ENDPOINT_STATUS[String(e.status || '').toLowerCase()];
   if (known) return known;
   return e.isUp === false ? ENDPOINT_STATUS.down : ['info', e.status || 'Unknown', 1];
+}
+
+/**
+ * A stale result keeps its last status label but is shown grey and sorted after current
+ * problems: its last reading is not current, so it raises no alarm and isn't counted as one.
+ */
+function endpointState(e) {
+  return e.isStale ? ['stale', currentEndpointState(e)[1], 1] : currentEndpointState(e);
 }
 
 function certText(days) {
