@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Portal.Actions;
 using WatchTower.Portal.Actions.Handlers;
 using WatchTower.Portal.Clients;
@@ -11,21 +13,27 @@ public class RemoteConfigWorker : BackgroundService
 {
     private readonly IPortalClient _portalClient;
     private readonly IRemoteConfigStore _configStore;
+    private readonly WatchTowerPaths _paths;
     private readonly IConfigSyncTrigger _syncTrigger;
     private readonly IOptionsMonitor<PortalOptions> _options;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<RemoteConfigWorker> _logger;
 
     public RemoteConfigWorker(
         IPortalClient portalClient,
         IRemoteConfigStore configStore,
+        WatchTowerPaths paths,
         IConfigSyncTrigger syncTrigger,
         IOptionsMonitor<PortalOptions> options,
+        TimeProvider timeProvider,
         ILogger<RemoteConfigWorker> logger)
     {
         _portalClient = portalClient;
         _configStore = configStore;
+        _paths = paths;
         _syncTrigger = syncTrigger;
         _options = options;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -47,10 +55,10 @@ public class RemoteConfigWorker : BackgroundService
 
                 var intervalSeconds = Math.Max(1, _options.CurrentValue.RemoteConfig.PollIntervalSeconds);
 
-                // Check sync trigger (triggered by ForceConfigSync action)
-                var triggered = _syncTrigger.TryConsume();
-                if (!triggered)
-                    await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken);
+                // Sleep for the poll interval, but wake immediately on ForceConfigSync. The
+                // trigger used to be checked only after a full interval had already elapsed.
+                if (await _syncTrigger.WaitAsync(TimeSpan.FromSeconds(intervalSeconds), _timeProvider, stoppingToken))
+                    _logger.LogInformation("Configuration sync requested by the portal; fetching now");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -59,7 +67,7 @@ public class RemoteConfigWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Remote Config Worker");
-                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(30), _timeProvider, stoppingToken);
             }
         }
 
@@ -85,7 +93,18 @@ public class RemoteConfigWorker : BackgroundService
                 return;
             }
 
-            await ApplyConfigurationHandler.WriteRemoteConfigFileAsync(config, ct);
+            // The operator may have turned off portal-managed settings (or the portal) while the
+            // fetch was in flight: re-read the live options right before writing the overlay.
+            var live = _options.CurrentValue;
+            if (!live.Enabled || !live.RemoteConfig.Enabled)
+            {
+                _logger.LogInformation(
+                    "Remote config version {Version} was not applied: portal-managed settings were turned off during the fetch",
+                    version);
+                return;
+            }
+
+            await ApplyConfigurationHandler.WriteRemoteConfigFileAsync(_paths.RemoteConfigFilePath, config, ct);
             await _configStore.SaveConfigAsync(config, version);
 
             _logger.LogInformation("Remote configuration updated to version {Version}", version);
@@ -112,30 +131,5 @@ public class RemoteConfigWorker : BackgroundService
         {
             _logger.LogDebug(ex, "AcknowledgePending encountered an error");
         }
-    }
-
-    private static bool ValidateConfig(
-        Portal.Contracts.RemoteAgentConfigDto config, out string error)
-    {
-        error = string.Empty;
-
-        if (config.Cpu?.PollIntervalSeconds < 1)
-            return Fail(out error, "Cpu.PollIntervalSeconds must be >= 1");
-        if (config.Cpu?.ThresholdPercent is < 1 or > 100)
-            return Fail(out error, "Cpu.ThresholdPercent must be 1–100");
-        if (config.Ram?.PollIntervalSeconds < 1)
-            return Fail(out error, "Ram.PollIntervalSeconds must be >= 1");
-        if (config.Ram?.ThresholdPercent is < 1 or > 100)
-            return Fail(out error, "Ram.ThresholdPercent must be 1–100");
-        if (config.Disk?.CriticalThresholdPercent is < 1 or > 100)
-            return Fail(out error, "Disk.CriticalThresholdPercent must be 1–100");
-
-        return true;
-    }
-
-    private static bool Fail(out string error, string message)
-    {
-        error = message;
-        return false;
     }
 }

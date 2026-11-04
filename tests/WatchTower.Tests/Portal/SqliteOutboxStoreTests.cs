@@ -1,4 +1,5 @@
-using FluentAssertions;
+using AwesomeAssertions;
+
 using WatchTower.Portal.Storage;
 
 namespace WatchTower.Tests.Portal;
@@ -59,6 +60,30 @@ public class SqliteOutboxStoreTests : IDisposable
         // Second failure reaches maxAttempts -> terminal 'Failed', no longer pending.
         await _store.MarkFailedAsync(id, "err", nextRetryAt: null, maxAttempts: 2);
         (await _store.GetPendingMessagesAsync(10)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task MarkDropped_IsTerminal()
+    {
+        await _store.AddMessageAsync("AgentEvent", "{}");
+        var id = (await _store.GetPendingMessagesAsync(10))[0].Id;
+
+        await _store.MarkDroppedAsync(id, "expired");
+
+        (await _store.GetPendingMessagesAsync(10)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PendingMessages_ExposeCreatedAt()
+    {
+        var before = DateTime.UtcNow.AddSeconds(-1);
+        await _store.AddMessageAsync("AgentEvent", "{}");
+
+        var msg = (await _store.GetPendingMessagesAsync(10))[0];
+
+        msg.CreatedAt.Should().NotBeNull();
+        msg.CreatedAt!.Value.Kind.Should().Be(DateTimeKind.Utc);
+        msg.CreatedAt.Value.Should().BeOnOrAfter(before).And.BeOnOrBefore(DateTime.UtcNow.AddSeconds(1));
     }
 
     [Fact]

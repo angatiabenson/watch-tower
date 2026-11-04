@@ -11,6 +11,7 @@ public interface IMetricsStore
     void AddNetworkMetric(NetworkMetric metric);
     void AddServiceStatus(ServiceStatus status);
     void AddApplicationPoolStatus(ApplicationPoolStatus status);
+    void AddEndpointStatus(EndpointStatus status);
     void AddIncident(Incident incident);
 
     IReadOnlyList<CpuMetric> GetCpuMetrics(TimeSpan period);
@@ -20,6 +21,7 @@ public interface IMetricsStore
     IReadOnlyList<NetworkMetric> GetLatestNetworkMetrics();
     IReadOnlyList<ServiceStatus> GetLatestServiceStatuses();
     IReadOnlyList<ApplicationPoolStatus> GetLatestApplicationPoolStatuses();
+    IReadOnlyList<EndpointStatus> GetLatestEndpointStatuses();
     IReadOnlyList<Incident> GetIncidents(TimeSpan period);
 
     /// <summary>Age-based safety-net purge: deletes cpu/ram/incident rows older than <paramref name="maxAge"/>.</summary>
@@ -27,15 +29,55 @@ public interface IMetricsStore
 
     /// <summary>
     /// Post-report purge. Deletes cpu/ram rows only up to the rowids that have been
-    /// confirmed delivered to the portal (so un-acked rows are never lost), and clears
-    /// all snapshot tables and incidents. Returns which append tables became empty so
-    /// the caller can reset the forwarding cursors (SQLite reuses rowids from 1 once a
-    /// table is emptied).
+    /// confirmed delivered to the portal (so un-acked rows are never lost) and deletes
+    /// incidents with a timestamp at or before <paramref name="incidentsUpToUtc"/> (the
+    /// report's snapshot time) so incidents raised while the report was being built and sent
+    /// survive for the next report. Returns which append tables became empty so the caller can
+    /// reset the forwarding cursors (SQLite reuses rowids from 1 once a table is emptied).
+    /// History only: the latest-state snapshot tables are kept (see <see cref="SnapshotKind"/>).
     /// </summary>
-    PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId);
+    PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc);
 
     (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit);
     (long LastRowId, IReadOnlyList<RamMetric> Metrics) GetRamMetricsSince(long afterRowId, int limit);
+
+    /// <summary>Names of the resources that have a latest-state row of <paramref name="kind"/>.</summary>
+    IReadOnlyList<string> GetSnapshotNames(SnapshotKind kind);
+
+    /// <summary>
+    /// Deletes the latest-state rows of <paramref name="kind"/> for <paramref name="names"/>
+    /// (case-insensitive), so resources that are gone stop being reported. Returns the number
+    /// of rows deleted. A later reading of the same resource adds its row again.
+    /// </summary>
+    int RemoveSnapshots(SnapshotKind kind, IEnumerable<string> names);
+
+    /// <summary>
+    /// Deletes every latest-state row of <paramref name="kind"/> whose name is not in
+    /// <paramref name="keep"/>, for resources that are configured rather than discovered.
+    /// Names match case-insensitively (OrdinalIgnoreCase), like the workers' schedules and the
+    /// alert keys: a row whose name only differs in case from a configured name is kept and
+    /// renamed to the configured spelling (another row of the same name is deleted). Returns
+    /// the names deleted.
+    /// </summary>
+    IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep);
+}
+
+/// <summary>
+/// The latest-state ("snapshot") tables repeated in every metrics batch. Current state, not
+/// history: neither purge touches them. A row only goes when its resource is gone, through
+/// <see cref="IMetricsStore.RemoveSnapshots"/> (discovered resources missing for a grace period)
+/// or <see cref="IMetricsStore.RemoveSnapshotsExcept"/> (configured resources removed from the
+/// configuration). A resource that is still there keeps its last row, with that reading's
+/// timestamp, until it is read again.
+/// </summary>
+public enum SnapshotKind
+{
+    Disk,
+    DiskQueue,
+    Network,
+    Service,
+    ApplicationPool,
+    Endpoint,
 }
 
 /// <summary>Outcome of <see cref="IMetricsStore.PurgeReportedData"/>.</summary>

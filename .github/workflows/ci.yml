@@ -1,0 +1,68 @@
+name: CI
+
+# Build, format check, tests and a packaging smoke test on GitHub-hosted runners for every
+# push and pull request (safe for pull requests from forks: nothing runs on our own servers).
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore: ['**.md', 'branding/**', 'logo.png']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore WatchTower.slnx
+
+      - name: Check formatting
+        run: dotnet format WatchTower.slnx --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build WatchTower.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --project tests/WatchTower.Tests/WatchTower.Tests.csproj --configuration Release --no-build --report-trx --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: TestResults/**/*.trx
+          retention-days: 7
+
+      - name: Package (smoke test)
+        shell: pwsh
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./build/package.ps1 -Version "0.0.0-ci.$env:RUN_NUMBER" -Repository $env:REPOSITORY -OutputDir artifacts
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: watchtower-ci-package
+          path: |
+            artifacts/WatchTower-*.zip
+            artifacts/watchtower-update.json
+          retention-days: 7

@@ -17,19 +17,19 @@ public class AppPoolRestartHandler : IActionHandler
         _logger = logger;
     }
 
-    public Task<ActionResult> ExecuteAsync(
+    public async Task<ActionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, CancellationToken ct)
     {
         if (!AppPoolStartHandler.TryGetPoolName(parameters, out var name))
-            return Task.FromResult(new ActionResult(false, "Missing or invalid AppPoolName parameter"));
+            return new ActionResult(false, "Missing or invalid AppPoolName parameter");
 
         var timeout = AppPoolStartHandler.GetTimeout(parameters);
         _logger.LogInformation("Portal command: restarting app pool '{Name}'", name);
 
-        _poolManager.StopApplicationPool(name, timeout);
-        var ok = _poolManager.StartApplicationPool(name, timeout);
-        return Task.FromResult(ok
+        await _poolManager.StopApplicationPoolAsync(name, timeout, ct);
+        var ok = await _poolManager.StartApplicationPoolAsync(name, timeout, ct);
+        return ok
             ? new ActionResult(true, $"App pool '{name}' restarted successfully")
-            : new ActionResult(false, $"Failed to restart app pool '{name}'"));
+            : new ActionResult(false, $"Failed to restart app pool '{name}'");
     }
 }

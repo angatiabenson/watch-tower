@@ -1,20 +1,23 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <!-- xUnit v3 test projects are standalone executables. -->
+    <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <PackageReference Include="FluentAssertions" Version="6.12.2" />
-    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
-    <PackageReference Include="Moq" Version="4.20.72" />
-    <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="AwesomeAssertions" />
+    <PackageReference Include="Corvus.Text.Json.Validator" />
+    <PackageReference Include="Corvus.Text.Json.Yaml" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
+    <PackageReference Include="Microsoft.Testing.Extensions.TrxReport" />
+    <PackageReference Include="Moq" />
+    <PackageReference Include="xunit.v3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +26,26 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\WatchTower\WatchTower.csproj" />
+    <!-- The contract tests (PortalContract/) host the reference portal in-process. -->
+    <ProjectReference Include="..\..\samples\MinimalPortal\MinimalPortal.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- The contract tests read the spec and the guides from the output directory. -->
+    <None Include="..\..\spec\portal-agent-api.v1.openapi.yaml" Link="PortalContract\Spec\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\guides\portal-api\**\*.md" Link="PortalContract\Guides\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    Corvus.Text.Json ships a Roslyn analyzer (CTJ*) that suggests its own APIs in place of System.Text.Json.
+    The tests only use the validator, so keep the analyzer out (it also runs under dotnet format).
+  -->
+  <Target Name="RemoveCorvusTextJsonAnalyzers" AfterTargets="ResolveLockFileAnalyzers">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="'%(Filename)' == 'Corvus.Text.Json.Analyzers'" />
+    </ItemGroup>
+  </Target>
 
 </Project>

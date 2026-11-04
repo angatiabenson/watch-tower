@@ -1,0 +1,239 @@
+<#
+.SYNOPSIS
+    Installs (or upgrades) WatchTower on this server as a Windows service.
+
+.DESCRIPTION
+    Copies WatchTower.exe from this folder to the install folder, registers the service
+    (delayed auto-start, automatic restart on failure), imports optional settings, sets the
+    web console password, starts the service and prints the console address.
+
+    Re-running it upgrades an existing installation in place; settings, history and logs in
+    the data folder are kept.
+
+.EXAMPLE
+    # Interactive: you are asked for the console password.
+    .\install.ps1
+
+.EXAMPLE
+    # Install and connect to a Visibility Portal in one step (code from the portal's "Add server"):
+    .\install.ps1 -EnrollmentCode WT1.eyJ2IjoxLC...
+
+.EXAMPLE
+    # Unattended (GPO, Intune, SCCM, Ansible, Invoke-Command), pre-configured for a portal:
+    .\install.ps1 -ConfigFile .\watchtower.seed.json -AdminPassword (ConvertTo-SecureString $pw -AsPlainText -Force)
+
+.EXAMPLE
+    # Install on several servers from one admin workstation:
+    $servers = 'SRV-01','SRV-02'
+    $servers | ForEach-Object { Copy-Item .\WatchTower-1.6.0-win-x64 "\\$_\C$\Temp\WatchTower" -Recurse -Force }
+    Invoke-Command -ComputerName $servers -ScriptBlock { & C:\Temp\WatchTower\install.ps1 -ConfigFile C:\Temp\WatchTower\seed.json -AdminPassword $using:securePw }
+#>
+[CmdletBinding()]
+param(
+    # Where the binaries go.
+    [string] $InstallDir = (Join-Path $env:ProgramFiles 'WatchTower'),
+
+    # Where settings, the database and logs go (default: %ProgramData%\WatchTower).
+    [string] $DataDir,
+
+    # Windows service name; change it only to run several instances side by side.
+    [string] $ServiceName = 'WatchTower',
+
+    # JSON settings to merge into the operator settings (portal URL, agent ID/token, SMTP...).
+    [string] $ConfigFile,
+
+    # Enrollment code from the portal's "Add server" dialog (WT1....): connects this server to
+    # the portal in one step.
+    [string] $EnrollmentCode,
+
+    # Web console administrator password. Prompted for when omitted and no password exists yet.
+    [SecureString] $AdminPassword,
+
+    # Do not start the service after installing.
+    [switch] $NoStart,
+
+    # Open the web console in the default browser when done.
+    [switch] $OpenConsole
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+function Assert-Administrator {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Run this script from an elevated PowerShell (Run as administrator).'
+    }
+}
+
+function Invoke-WatchTower {
+    param([string[]] $Arguments, [string] $StandardInput, [string] $Exe)
+    $exe = if ($Exe) { $Exe } else { Join-Path $InstallDir 'WatchTower.exe' }
+    if ($StandardInput) {
+        # Pipe through cmd's echo-free path: write the secret to the process's stdin directly.
+        $psi = New-Object System.Diagnostics.ProcessStartInfo $exe
+        $psi.Arguments = ($Arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.WriteLine($StandardInput)
+        $p.StandardInput.Close()
+        $p.WaitForExit()
+        $code = $p.ExitCode
+    }
+    else {
+        & $exe @Arguments
+        $code = $LASTEXITCODE
+    }
+    if ($code -ne 0) { throw "WatchTower.exe $($Arguments[0]) failed with exit code $code." }
+}
+
+Assert-Administrator
+
+$source = $PSScriptRoot
+if (-not (Test-Path (Join-Path $source 'WatchTower.exe'))) {
+    throw "WatchTower.exe was not found next to install.ps1 ($source)."
+}
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$common = @('--service-name', $ServiceName)
+if ($DataDir) { $common += @('--data-dir', [IO.Path]::GetFullPath($DataDir)) }
+$newExe = Join-Path $source 'WatchTower.exe'
+
+Write-Host "Installing WatchTower to $InstallDir" -ForegroundColor Green
+
+# ── 1. Validate everything BEFORE touching the running installation ─────────────────────
+if ($ConfigFile) {
+    $ConfigFile = [IO.Path]::GetFullPath($ConfigFile)
+    # Checked by the NEW version against its own defaults; nothing is written.
+    Invoke-WatchTower (@('config', 'validate', $ConfigFile) + $common) -Exe $newExe
+}
+if ($EnrollmentCode) {
+    Invoke-WatchTower (@('enroll', $EnrollmentCode, '--check') + $common) -Exe $newExe
+}
+
+$settings = (& $newExe config path @common | Select-Object -Last 1)
+$hasPassword = (Test-Path $settings) -and ((Get-Content $settings -Raw) -match 'AdminPasswordHash')
+if (-not $AdminPassword -and -not $hasPassword -and [Environment]::UserInteractive) {
+    Write-Host ''
+    Write-Host 'Choose a password for the WatchTower web console (at least 10 characters).'
+    $AdminPassword = Read-Host -AsSecureString 'Console password'
+}
+$plain = $null
+if ($AdminPassword) {
+    $plain = [Runtime.InteropServices.Marshal]::PtrToStringUni(
+        [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($AdminPassword))
+    if ($plain.Length -lt 10) { throw 'The console password must be at least 10 characters.' }
+}
+
+# ── 2. Stop the existing service and back up its binaries ───────────────────────────────
+$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$wasRunning = $existing -and $existing.Status -ne 'Stopped'
+$sameFolder = [IO.Path]::GetFullPath($source).TrimEnd('\') -eq $InstallDir.TrimEnd('\')
+$backup = $null
+if ((Test-Path (Join-Path $InstallDir 'WatchTower.exe')) -and -not $sameFolder) {
+    $backup = Join-Path ([IO.Path]::GetTempPath()) ("WatchTower-upgrade-backup-" + (Get-Date -Format 'yyyyMMddHHmmss'))
+}
+
+# ── 3. Install; on any failure restore the previous binaries and running state ──────────
+$backupComplete = $false   # only a fully written backup may be restored
+$keepBackup = $false       # kept when recovery fails, for a manual restore
+$filesChanged = $false     # whether the installation folder has been touched yet
+try {
+    # Stopping is inside the recovery scope: a stop that times out (or any later failure)
+    # still ends with the previous service running again.
+    if ($wasRunning) {
+        Write-Host "Stopping the existing '$ServiceName' service..."
+        Stop-Service -Name $ServiceName -Force
+        $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
+    }
+
+    if ($backup) {
+        Copy-Item $InstallDir $backup -Recurse -Force -ErrorAction Stop
+        $backupComplete = $true
+    }
+
+    # Installations from before the data directory kept settings, history and the database
+    # next to the exe. Import them NOW, while the old appsettings.json is still in place;
+    # copying the new files would replace it with the shipped defaults.
+    if (Test-Path (Join-Path $InstallDir 'watchtower.db')) {
+        Invoke-WatchTower (@('import-legacy', '--from', $InstallDir) + $common) -Exe $newExe
+    }
+
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    if (-not $sameFolder) {
+        $filesChanged = $true
+        Get-ChildItem $source -Exclude 'install.ps1', '*.seed.json' | Copy-Item -Destination $InstallDir -Recurse -Force
+    }
+
+    $installArgs = @('install') + $common
+    if ($ConfigFile) { $installArgs += @('--config', $ConfigFile) }
+    Invoke-WatchTower $installArgs
+
+    if ($EnrollmentCode) { Invoke-WatchTower (@('enroll', $EnrollmentCode, '--no-restart') + $common) }
+
+    if ($plain) { Invoke-WatchTower (@('set-password', '--password-stdin') + $common) -StandardInput $plain }
+
+    if (-not $NoStart) { Invoke-WatchTower (@('start') + $common) }
+}
+catch {
+    $installError = $_
+    Write-Warning "Installation failed: $($installError.Exception.Message)"
+    $recovered = $true
+
+    if ($filesChanged -and $backupComplete) {
+        Write-Warning 'Restoring the previous version...'
+        # Mirror the COMPLETE backup back (also removes files the failed version added).
+        robocopy $backup $InstallDir /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) {
+            $recovered = $false
+            Write-Warning "Restoring the previous files failed (robocopy exit code $LASTEXITCODE)."
+        }
+    }
+    elseif ($filesChanged) {
+        $recovered = $false
+        Write-Warning 'The installation folder was partly updated and no complete backup exists; reinstall to repair.'
+    }
+
+    # Whatever failed — stopping, backing up, importing or installing — bring the previous
+    # service back if it was running before, and check that it actually comes up and stays up.
+    if ($wasRunning) {
+        try {
+            Start-Service -Name $ServiceName -ErrorAction Stop
+            $svc = Get-Service -Name $ServiceName
+            $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+            Start-Sleep -Seconds 10
+            $svc.Refresh()
+            if ($svc.Status -ne 'Running') { throw "it stopped again after starting (status: $($svc.Status))" }
+        }
+        catch {
+            $recovered = $false
+            Write-Warning "The previous '$ServiceName' service could not be brought back up: $($_.Exception.Message)"
+        }
+    }
+
+    if ($recovered) {
+        if ($filesChanged) { Write-Warning 'The previous version was restored and is running.' }
+        elseif ($wasRunning) { Write-Warning 'Nothing was changed; the previous version is running.' }
+    }
+    elseif ($backupComplete) {
+        # Never delete the evidence needed for a manual restore.
+        $keepBackup = $true
+        Write-Warning "Automatic recovery did not complete. The previous installation is preserved at '$backup'."
+        Write-Warning "Restore it with: robocopy `"$backup`" `"$InstallDir`" /MIR, then: Start-Service $ServiceName"
+    }
+    throw $installError
+}
+finally {
+    $plain = $null
+    if ($backup -and -not $keepBackup -and (Test-Path $backup)) {
+        Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Write-Host ''
+Invoke-WatchTower (@('status') + $common)
+if ($OpenConsole) { Invoke-WatchTower (@('open') + $common) }
+
+Write-Host ''
+Write-Host 'Done. Open the web console from the Start menu ("WatchTower Console") or run:' -ForegroundColor Green
+Write-Host "  & '$InstallDir\WatchTower.exe' open"

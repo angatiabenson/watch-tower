@@ -17,18 +17,18 @@ public class AppPoolStopHandler : IActionHandler
         _logger = logger;
     }
 
-    public Task<ActionResult> ExecuteAsync(
+    public async Task<ActionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, CancellationToken ct)
     {
         if (!AppPoolStartHandler.TryGetPoolName(parameters, out var name))
-            return Task.FromResult(new ActionResult(false, "Missing or invalid AppPoolName parameter"));
+            return new ActionResult(false, "Missing or invalid AppPoolName parameter");
 
         var timeout = AppPoolStartHandler.GetTimeout(parameters);
         _logger.LogInformation("Portal command: stopping app pool '{Name}'", name);
 
-        var ok = _poolManager.StopApplicationPool(name, timeout);
-        return Task.FromResult(ok
+        var ok = await _poolManager.StopApplicationPoolAsync(name, timeout, ct);
+        return ok
             ? new ActionResult(true, $"App pool '{name}' stopped successfully")
-            : new ActionResult(false, $"Failed to stop app pool '{name}'"));
+            : new ActionResult(false, $"Failed to stop app pool '{name}'");
     }
 }

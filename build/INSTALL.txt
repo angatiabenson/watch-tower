@@ -1,0 +1,59 @@
+WATCHTOWER — server monitoring agent for Windows
+=================================================
+
+Requirements: Windows Server 2016+ / Windows 10+ (x64). No .NET installation is needed.
+
+INSTALL (on the server, in an elevated PowerShell)
+  1. Extract this zip anywhere (e.g. C:\Temp\WatchTower).
+  2. Run:   powershell -ExecutionPolicy Bypass -File .\install.ps1
+     - installs to C:\Program Files\WatchTower, data in C:\ProgramData\WatchTower
+     - registers the "WatchTower" service (delayed auto-start, restarts on failure) and starts it
+     - asks you for a web console password (at least 10 characters) if none is set yet
+  3. Open the web console: Start menu > "WatchTower Console"
+     (or run: WatchTower.exe open; the default address is http://127.0.0.1:8750 on the server)
+  4. Configure email and notification channels, watched services / IIS app pools, endpoint
+     checks, thresholds and the optional Visibility Portal connection from the console.
+
+INSTALL.PS1 OPTIONS
+  -InstallDir <path>        where the binaries go (default C:\Program Files\WatchTower)
+  -DataDir <path>           settings, database and logs (default C:\ProgramData\WatchTower)
+  -ServiceName <name>       service name, only to run several instances side by side
+  -ConfigFile <file>        JSON settings to import (validated first; secrets encrypted)
+  -EnrollmentCode <WT1...>  connect to a Visibility Portal (code from its "Add server" dialog)
+  -AdminPassword <SecureString>  console password, for unattended installs
+  -NoStart                  do not start the service afterwards
+  -OpenConsole              open the web console when done
+
+UNATTENDED / FLEET INSTALL
+  .\install.ps1 -EnrollmentCode WT1.eyJ2IjoxLC... -AdminPassword <SecureString>
+  or, without an enrollment code:
+  .\install.ps1 -ConfigFile .\watchtower.seed.json -AdminPassword <SecureString>
+  The seed file is plain JSON with the same keys as appsettings.json, e.g.:
+    {
+      "Email": { "SmtpHost": "smtp.example.com", "Username": "alerts", "Password": "...",
+                 "FromAddress": "watchtower@example.com", "ToAddresses": ["ops@example.com"] },
+      "VisibilityPortal": { "Enabled": true, "BaseUrl": "https://portal.example.com",
+                            "AgentId": "SRV-01", "AgentToken": "<token from the portal>" }
+    }
+  Secrets in it are encrypted on import, and *.seed.json files are not copied to the install
+  folder. Delete the seed file afterwards. Without -AdminPassword (and no prompt), set the
+  password on the first visit to the console from the server itself, or with set-password.
+
+UPGRADE
+  Use the console (Settings > Updates > Download update) or re-run install.ps1 from a newer
+  zip. Settings, history and logs are kept; a failed install restores the previous version.
+  Old installations in C:\Services\WatchTower (from before this installer): run once
+    .\install.ps1 -InstallDir C:\Services\WatchTower
+  to import their appsettings.json, database and portal settings into the data folder.
+
+USEFUL COMMANDS (from C:\Program Files\WatchTower)
+  WatchTower.exe status          service state, version, folders, console address
+  WatchTower.exe open            open the web console
+  WatchTower.exe set-password    reset the console password
+  WatchTower.exe enroll <code>   connect to a Visibility Portal with an enrollment code
+  WatchTower.exe maintenance start --minutes 60 --reason "Patching"   hold notifications
+  WatchTower.exe restart         restart the service
+  WatchTower.exe uninstall       remove the service (add --purge-data to delete all data)
+  WatchTower.exe --help          everything else
+
+Documentation: https://github.com/angatiabenson/watch-tower

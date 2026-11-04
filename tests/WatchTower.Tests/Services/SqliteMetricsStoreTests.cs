@@ -1,4 +1,5 @@
-using FluentAssertions;
+using AwesomeAssertions;
+
 using WatchTower.Models;
 using WatchTower.Services;
 
@@ -62,7 +63,7 @@ public class SqliteMetricsStoreTests : IDisposable
         all.Should().HaveCount(5);
         lastRowId.Should().Be(5);
 
-        var result = _store.PurgeReportedData(cpuForwardedRowId: 3, ramForwardedRowId: 0);
+        var result = _store.PurgeReportedData(cpuForwardedRowId: 3, ramForwardedRowId: 0, incidentsUpToUtc: DateTime.UtcNow);
 
         // Rows 1-3 (acknowledged) removed; rows 4-5 (un-acked) preserved -> no data loss.
         var (_, remaining) = _store.GetCpuMetricsSince(0, 100);
@@ -76,11 +77,25 @@ public class SqliteMetricsStoreTests : IDisposable
         _store.AddCpuMetric(new CpuMetric(DateTime.UtcNow, 1));
         _store.AddCpuMetric(new CpuMetric(DateTime.UtcNow, 2));
 
-        var result = _store.PurgeReportedData(cpuForwardedRowId: long.MaxValue, ramForwardedRowId: long.MaxValue);
+        var result = _store.PurgeReportedData(cpuForwardedRowId: long.MaxValue, ramForwardedRowId: long.MaxValue, incidentsUpToUtc: DateTime.UtcNow);
 
         _store.GetCpuMetrics(TimeSpan.FromHours(1)).Should().BeEmpty();
         result.CpuTableEmptied.Should().BeTrue();
         result.RamTableEmptied.Should().BeTrue();
+    }
+
+    [Fact]
+    public void PurgeReportedData_KeepsIncidentsRecordedAfterTheReportSnapshot()
+    {
+        var snapshot = DateTime.UtcNow;
+        _store.AddIncident(new Incident(snapshot.AddMinutes(-10), IncidentType.DiskCritical, "reported"));
+        _store.AddIncident(new Incident(snapshot, IncidentType.ServiceDown, "reported at cutoff"));
+        _store.AddIncident(new Incident(snapshot.AddSeconds(5), IncidentType.CpuSpikeDetected, "raised while sending"));
+
+        _store.PurgeReportedData(long.MaxValue, long.MaxValue, incidentsUpToUtc: snapshot);
+
+        // Previously every incident was deleted, losing the one raised after the report was built.
+        _store.GetIncidents(TimeSpan.FromHours(1)).Select(i => i.Description).Should().Equal("raised while sending");
     }
 
     [Fact]

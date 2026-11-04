@@ -9,9 +9,12 @@ public interface IOutboxStore
     Task MarkSentAsync(long id);
     /// <summary>Records a failed delivery. Transitions the message to terminal 'Failed' once attempts reach <paramref name="maxAttempts"/>.</summary>
     Task MarkFailedAsync(long id, string error, DateTime? nextRetryAt, int maxAttempts);
+    /// <summary>Gives up on a message without another attempt (terminal 'Failed'), recording why.</summary>
+    Task MarkDroppedAsync(long id, string reason);
     Task PurgeDeliveredAsync(TimeSpan maxAge);
 }
 
+/// <param name="CreatedAt">When the message was enqueued (UTC); null if unknown.</param>
 public record OutboxMessage(
     long Id,
     string MessageType,
@@ -19,5 +22,6 @@ public record OutboxMessage(
     int Priority,
     int Attempts,
     long? CpuRowId = null,
-    long? RamRowId = null
+    long? RamRowId = null,
+    DateTime? CreatedAt = null
 );

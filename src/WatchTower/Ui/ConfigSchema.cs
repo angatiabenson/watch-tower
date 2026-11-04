@@ -1,0 +1,372 @@
+using System.Text.Json.Serialization;
+
+namespace WatchTower.Ui;
+
+/// <summary>Kinds of editor the UI renders for a field.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<FieldType>))]
+public enum FieldType
+{
+    String,
+    /// <summary>Write-only secret: the API never returns its value, only whether one is set.</summary>
+    Secret,
+    Int,
+    Number,
+    Bool,
+    /// <summary>One of <see cref="ConfigField.Options"/>.</summary>
+    Enum,
+    /// <summary>List of strings (optionally validated by <see cref="ConfigField.Format"/>).</summary>
+    List,
+    /// <summary>Time of day, HH:mm.</summary>
+    Time,
+    /// <summary>IANA or Windows time zone id; options from <c>/api/system/timezones</c>.</summary>
+    TimeZone,
+    /// <summary>List of Windows service names; picker data from <c>/api/system/services</c>.</summary>
+    Services,
+    /// <summary>List of IIS application pool names; picker data from <c>/api/system/apppools</c>.</summary>
+    AppPools,
+    Url,
+    /// <summary>
+    /// List of objects whose properties are described by <see cref="ConfigField.Fields"/>
+    /// (item field keys are relative, e.g. <c>Name</c>). Value: an array of JSON objects.
+    /// </summary>
+    ObjectList,
+}
+
+/// <summary>Show an item field only while the item's <paramref name="Key"/> is one of <paramref name="Values"/>.</summary>
+public sealed record FieldCondition(string Key, IReadOnlyList<string> Values);
+
+public sealed record ConfigField(
+    string Key,
+    string Label,
+    FieldType Type,
+    string? Help = null,
+    double? Min = null,
+    double? Max = null,
+    IReadOnlyList<string>? Options = null,
+    string? Placeholder = null,
+    bool RestartRequired = false,
+    /// <summary>Extra validation for strings / list items: "email" | "url".</summary>
+    string? Format = null,
+    /// <summary>Rendered in an "Advanced" disclosure.</summary>
+    bool Advanced = false,
+    /// <summary>ObjectList: the properties of one item (keys relative to the item).</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<ConfigField>? Fields = null,
+    /// <summary>ObjectList item field: must be present and non-empty.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool Required = false,
+    /// <summary>ObjectList item field: value used for new items and when the property is absent.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    object? Default = null,
+    /// <summary>ObjectList item field: only relevant while another property of the item has one of these values.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FieldCondition? VisibleWhen = null,
+    /// <summary>ObjectList: item property whose (trimmed, case-insensitive) value must be unique.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? UniqueBy = null,
+    /// <summary>ObjectList: what one item is called in the UI, e.g. "endpoint check".</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ItemNoun = null);
+
+public sealed record ConfigSection(string Id, string Title, string Description, IReadOnlyList<ConfigField> Fields);
+
+/// <summary>
+/// Everything the configuration UI can edit. The UI is rendered entirely from this schema,
+/// and the API only accepts keys listed here — so adding a setting is a one-line change.
+/// </summary>
+public static class ConfigSchema
+{
+    private static readonly IReadOnlyList<string> SeverityOptions = ["Info", "Warning", "Critical"];
+
+    /// <summary>Most endpoint checks one server may have (keeps the probe loop and the UI bounded).</summary>
+    public const int MaxEndpointChecks = 100;
+
+    private static readonly FieldCondition HttpOnly = new("Type", ["Http"]);
+
+    /// <summary>
+    /// One <see cref="Configuration.EndpointCheckOptions"/> entry. Defaults mirror that class;
+    /// ranges mirror <see cref="Services.Endpoints.EndpointCheck.TryCreate"/>, which still
+    /// validates the whole list (targets, status ranges) before anything is saved.
+    /// </summary>
+    private static readonly IReadOnlyList<ConfigField> EndpointCheckFields =
+    [
+        new("Name", "Name", FieldType.String,
+            "Unique. Alerts and the dashboard use it, e.g. intranet or billing-api.",
+            Max: Services.Endpoints.EndpointCheck.MaxNameLength, Placeholder: "intranet", Required: true),
+        new("Type", "Check", FieldType.Enum,
+            "Http: request a URL and check the status code. Tcp: open a connection. " +
+            "Certificate: warn before the TLS certificate expires.",
+            Options: ["Http", "Tcp", "Certificate"], Default: "Http"),
+        new("Target", "Target", FieldType.String,
+            "Http: an http(s) URL. Tcp: host:port. Certificate: host, host:port (default 443) or an https URL.",
+            Format: "endpoint-target", Required: true),
+        new("IntervalSeconds", "Check every (s)", FieldType.Int, null,
+            Services.Endpoints.EndpointCheck.MinIntervalSeconds, 86_400, Default: 60),
+        new("TimeoutSeconds", "Timeout (s)", FieldType.Int, null,
+            1, Services.Endpoints.EndpointCheck.MaxTimeoutSeconds, Default: 10),
+        new("FailuresBeforeAlert", "Failures before alert", FieldType.Int,
+            "Consecutive failed checks before the endpoint is reported down.", 1, 100, Default: 2),
+        new("ExpectStatus", "Expected status", FieldType.String,
+            "Accepted HTTP status codes, e.g. 200-399, 200 or 200,204,301-302.",
+            Placeholder: "200-399", Format: "status-ranges", Default: "200-399", VisibleWhen: HttpOnly),
+        new("ExpectBodyContains", "Body must contain", FieldType.String,
+            "Text the response must contain (case-sensitive). Empty = not checked.",
+            Default: "", VisibleWhen: HttpOnly),
+        new("CertificateWarnDays", "Warn days before expiry", FieldType.Int,
+            "Report the certificate as expiring when fewer days than this are left.",
+            1, 3_650, Default: 21, VisibleWhen: new("Type", ["Certificate"])),
+    ];
+
+    public static IReadOnlyList<ConfigSection> Sections { get; } =
+    [
+        new("general", "General", "Reporting schedule and how times are displayed.",
+        [
+            new("Reporting:DailyReportTime", "Daily report time", FieldType.Time,
+                "Local time (in the display time zone) at which the daily summary email is sent."),
+            new("Display:Timezone", "Display time zone", FieldType.TimeZone,
+                "Time zone used for the report schedule and all timestamps in emails."),
+            new("Display:TimezoneLabel", "Time zone label", FieldType.String,
+                "Short label shown after timestamps, e.g. EAT or UTC.", Placeholder: "UTC"),
+        ]),
+
+        new("alerting", "Alerting", "When operators are notified about a problem, and how often.",
+        [
+            new("Alerting:RenotifyMinutes", "Remind every (min)", FieldType.Int,
+                "While an alert stays open, send a reminder this often. 0 = notify once per occurrence.", 0, 10_080),
+            new("Alerting:SendRecovery", "Notify when resolved", FieldType.Bool,
+                "Send a \"resolved\" message (with how long it lasted) when an alert clears."),
+            new("Alerting:IncludeFullReport", "Attach full server report to alert emails", FieldType.Bool,
+                "Off: alert emails are short. On: they also contain the 24-hour server report."),
+            new("Alerting:ResolveAfterSeconds", "Resolve after clear for (s)", FieldType.Int,
+                "CPU, memory, disk, disk-queue and network alerts resolve only once the condition stayed clear this long, so values hovering around a threshold do not flap.",
+                0, 86_400, Advanced: true),
+        ]),
+
+        new("maintenance", "Maintenance window",
+            "While a window is active, incidents are still recorded but notifications are held back and " +
+            "services / application pools are not restarted automatically. Still-open alerts notify once it ends.",
+        [
+            new("Maintenance:Until", "Maintenance until (UTC)", FieldType.String,
+                "ISO-8601 UTC end time, e.g. 2026-11-03T18:00:00Z. Empty or in the past = no maintenance. " +
+                "'WatchTower maintenance start --minutes 60' sets it for you.",
+                Placeholder: "2026-11-03T18:00:00Z"),
+            new("Maintenance:Reason", "Reason", FieldType.String, "Shown in the console and the portal.",
+                Placeholder: "Monthly patching"),
+        ]),
+
+        new("notifications", "Notification channels",
+            "Where alerts are sent besides email. Webhook URLs are stored encrypted (Windows DPAPI). " +
+            "More channels, or several of one kind, can be added with 'WatchTower config import' (Notifications:Channels).",
+        [
+            new("Notifications:Email:Enabled", "Send alerts by email", FieldType.Bool,
+                "Uses the SMTP settings and recipients of the Email alerts section."),
+            new("Notifications:Email:MinSeverity", "Email: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:Teams:Url", "Microsoft Teams webhook URL", FieldType.Secret,
+                "A Teams Workflows \"Post to a channel when a webhook request is received\" URL. Alerts are posted as Adaptive Cards.",
+                Format: "url"),
+            new("Notifications:Teams:MinSeverity", "Teams: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:Slack:Url", "Slack incoming webhook URL", FieldType.Secret,
+                "e.g. https://hooks.slack.com/services/…", Format: "url"),
+            new("Notifications:Slack:MinSeverity", "Slack: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:Webhook:Url", "Webhook URL", FieldType.Secret,
+                "Receives a JSON document per notification (schema watchtower.alert.v1).", Format: "url"),
+            new("Notifications:Webhook:Secret", "Webhook signing secret", FieldType.Secret,
+                "When set, each request carries X-WatchTower-Signature: sha256=<HMAC-SHA256 of the body>."),
+            new("Notifications:Webhook:MinSeverity", "Webhook: minimum severity", FieldType.Enum, Options: SeverityOptions),
+            new("Notifications:TimeoutSeconds", "Webhook timeout (s)", FieldType.Int, null, 1, 120, Advanced: true),
+            new("Notifications:CriticalProbeCooldownSeconds", "Critical probe cooldown (s)", FieldType.Int,
+                "While a channel backs off after failures, a new critical alert may probe it this often at most.",
+                60, 3600, Advanced: true),
+        ]),
+
+        new("email", "Email alerts", "SMTP server and recipients for daily reports and emergency alerts.",
+        [
+            new("Email:SmtpHost", "SMTP host", FieldType.String, "Leave empty to disable email.",
+                Placeholder: "smtp.office365.com"),
+            new("Email:SmtpPort", "SMTP port", FieldType.Int, null, 1, 65_535),
+            new("Email:Security", "Connection security", FieldType.Enum,
+                "StartTls for port 587, Ssl for port 465, None only for trusted internal relays.",
+                Options: ["StartTls", "Ssl", "None", "Auto"]),
+            new("Email:Username", "Username", FieldType.String, "Leave empty for unauthenticated relays."),
+            new("Email:Password", "Password", FieldType.Secret, "Stored encrypted (Windows DPAPI)."),
+            new("Email:FromAddress", "From address", FieldType.String, Format: "email",
+                Placeholder: "watchtower@example.com"),
+            new("Email:FromName", "From name", FieldType.String),
+            new("Email:ToAddresses", "Recipients", FieldType.List, "One email address per entry.", Format: "email"),
+            new("Email:TimeoutSeconds", "SMTP timeout (s)", FieldType.Int, null, 1, 600, Advanced: true),
+        ]),
+
+        new("cpu", "CPU", "Alert when processor usage stays above a threshold.",
+        [
+            new("Monitoring:Cpu:ThresholdPercent", "Alert threshold (%)", FieldType.Number, null, 1, 100),
+            new("Monitoring:Cpu:SustainedSeconds", "Sustained for (s)", FieldType.Int,
+                "Usage must stay above the threshold this long before an emergency alert. Shorter bursts are logged as spikes.",
+                0, 86_400),
+            new("Monitoring:Cpu:PollIntervalSeconds", "Sample every (s)", FieldType.Int, null, 1, 3_600),
+            new("Monitoring:Cpu:TopProcessCount", "Top processes in alerts", FieldType.Int, null, 0, 20, Advanced: true),
+        ]),
+
+        new("ram", "Memory", "Alert when memory usage stays above a threshold.",
+        [
+            new("Monitoring:Ram:ThresholdPercent", "Alert threshold (%)", FieldType.Number, null, 1, 100),
+            new("Monitoring:Ram:SustainedSeconds", "Sustained for (s)", FieldType.Int, null, 0, 86_400),
+            new("Monitoring:Ram:PollIntervalSeconds", "Sample every (s)", FieldType.Int, null, 1, 3_600),
+            new("Monitoring:Ram:TopProcessCount", "Top processes in alerts", FieldType.Int, null, 0, 20, Advanced: true),
+        ]),
+
+        new("disk", "Disks", "Free space and I/O queue depth per drive.",
+        [
+            new("Monitoring:Disk:WarningThresholdPercent", "Warning at (% used)", FieldType.Number, null, 1, 100),
+            new("Monitoring:Disk:CriticalThresholdPercent", "Critical alert at (% used)", FieldType.Number, null, 1, 100),
+            new("Monitoring:Disk:QueueLengthWarningThreshold", "I/O queue alert threshold", FieldType.Number,
+                "SSD/NVMe: ~2. Spinning disks: 4–5.", 0, 1_000),
+            new("Monitoring:Disk:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
+        ]),
+
+        new("network", "Network", "Alert when a network adapter's output queue backs up.",
+        [
+            new("Monitoring:Network:OutputQueueWarningThreshold", "Output queue alert threshold", FieldType.Number,
+                "0 is right for most servers: any queued packets mean the NIC is saturated.", 0, 10_000),
+            new("Monitoring:Network:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
+        ]),
+
+        new("services", "Windows services", "Services to watch and automatically restart.",
+        [
+            new("Monitoring:Services:WatchedServices", "Watched services", FieldType.Services,
+                "Stopped services are restarted automatically; an alert is sent if recovery fails."),
+            new("Monitoring:Services:MaxRestartAttempts", "Max restart attempts", FieldType.Int, null, 0, 50),
+            new("Monitoring:Services:RestartDelaySeconds", "Delay before restart (s)", FieldType.Int, null, 0, 3_600),
+            new("Monitoring:Services:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
+            new("Monitoring:Services:RestartTimeoutSeconds", "Restart timeout (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
+            new("Monitoring:Services:StableStateDelaySeconds", "Stability check after restart (s)", FieldType.Int,
+                null, 0, 600, Advanced: true),
+            new("Monitoring:Services:StartupGraceSeconds", "Grace period after boot (s)", FieldType.Int,
+                "Right after WatchTower starts, stopped services are recorded but not restarted or alerted on.",
+                0, 3_600, Advanced: true),
+        ]),
+
+        new("apppools", "IIS application pools", "Application pools to watch and automatically start.",
+        [
+            new("Monitoring:ApplicationPools:WatchedApplicationPools", "Watched application pools", FieldType.AppPools),
+            new("Monitoring:ApplicationPools:MaxStartAttempts", "Max start attempts", FieldType.Int, null, 0, 50),
+            new("Monitoring:ApplicationPools:StartDelaySeconds", "Delay before start (s)", FieldType.Int, null, 0, 3_600),
+            new("Monitoring:ApplicationPools:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
+            new("Monitoring:ApplicationPools:StartTimeoutSeconds", "Start timeout (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
+            new("Monitoring:ApplicationPools:StableStateDelaySeconds", "Stability check after start (s)", FieldType.Int,
+                null, 0, 600, Advanced: true),
+        ]),
+
+        new("endpoints", "Endpoint checks",
+            "HTTP, TCP and TLS-certificate checks run from this server. Results appear on the dashboard; " +
+            "an endpoint that keeps failing, or a certificate close to expiry, raises an alert. Changes apply without a restart.",
+        [
+            new("Monitoring:Endpoints", "Checks", FieldType.ObjectList,
+                "Each check runs on its own schedule. Removing a check stops it.",
+                Max: MaxEndpointChecks, Fields: EndpointCheckFields, UniqueBy: "Name", ItemNoun: "endpoint check"),
+        ]),
+
+        new("heartbeat", "Dead man's switch", "Ping an external monitor (e.g. healthchecks.io) so you hear about it if WatchTower itself stops.",
+        [
+            new("Heartbeat:Url", "Ping URL", FieldType.Secret,
+                "e.g. https://hc-ping.com/<uuid>. Stored encrypted: anyone with the URL can forge pings.",
+                Format: "url"),
+            new("Heartbeat:IntervalSeconds", "Ping every (s)", FieldType.Int, null, 60, 86_400),
+        ]),
+
+        new("portal", "Visibility Portal", "Stream metrics and incidents to a central portal and accept remote commands.",
+        [
+            new("VisibilityPortal:Enabled", "Connect to a portal", FieldType.Bool, RestartRequired: true),
+            new("VisibilityPortal:BaseUrl", "Portal URL", FieldType.Url, Placeholder: "https://portal.example.com",
+                RestartRequired: true),
+            new("VisibilityPortal:AgentId", "Agent ID", FieldType.String, "Identifier issued by the portal for this server."),
+            new("VisibilityPortal:AgentToken", "Agent token", FieldType.Secret, "Stored encrypted (Windows DPAPI)."),
+            new("VisibilityPortal:Protocol", "Protocol", FieldType.Enum, Options: ["Https", "Grpc"], RestartRequired: true),
+            new("VisibilityPortal:RemoteConfig:Enabled", "Allow the portal to manage settings", FieldType.Bool,
+                "Portal-managed values override the ones set here.", RestartRequired: true),
+            new("VisibilityPortal:Tls:RequireTls", "Require HTTPS (recommended)", FieldType.Bool,
+                "Turn off to connect to a portal at an http:// address, e.g. on a trusted internal network. " +
+                "The agent token, metrics and commands then travel unencrypted."),
+            new("VisibilityPortal:Outbox:FlushIntervalSeconds", "Send metrics every (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
+            new("VisibilityPortal:CommandPoll:PollIntervalSeconds", "Poll for commands every (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
+            new("VisibilityPortal:RemoteConfig:PollIntervalSeconds", "Fetch remote settings every (s)", FieldType.Int, null, 1, 86_400, Advanced: true),
+            new("VisibilityPortal:CommandPoll:MaxCommandAgeSeconds", "Reject commands older than (s)", FieldType.Int,
+                "Replay protection. 0 disables.", 0, 86_400, Advanced: true),
+            new("VisibilityPortal:RequireCommandIssuedAt", "Require issuedAt on commands", FieldType.Bool,
+                "On: commands without an issuedAt time are rejected (\"Rejected: issuedAt is required\"). " +
+                "Off: they are accepted for older portals; their age cannot be checked, but a command id is never run twice.",
+                Advanced: true),
+            new("VisibilityPortal:CommandIdRetentionDays", "Remember command ids for (days)", FieldType.Int,
+                "A replayed command id is never executed again while it is remembered, even after its history is purged. " +
+                "0 removes the age limit.", 0, 3_650, Advanced: true),
+            new("VisibilityPortal:CommandIdMaxCount", "Remember at most (command ids)", FieldType.Int,
+                "The oldest ids are forgotten first. 0 removes the limit.", 0, 10_000_000, Advanced: true),
+            new("VisibilityPortal:CommandPoll:AllowPortalManagedTargets", "Let the portal choose command targets", FieldType.Bool,
+                "Off: portal commands may only start/stop services and pools watched in THIS server's settings. On: lists pushed by the portal count too.",
+                Advanced: true),
+            new("VisibilityPortal:CommandPoll:RetentionDays", "Keep command history (days)", FieldType.Int,
+                "0 keeps it forever.", 0, 3_650, Advanced: true),
+            new("VisibilityPortal:CommandPoll:ResultRetryMaxHours", "Retry undelivered command results for (hours)", FieldType.Int,
+                "Each result the portal does not accept is retried 1, 2, 4… up to every 30 minutes, then given up on.",
+                1, 8_760, Advanced: true),
+            new("VisibilityPortal:Outbox:EventMaxAgeHours", "Keep undelivered incidents for (hours)", FieldType.Int,
+                "Incidents waiting for an unreachable portal are dropped after this long.", 1, 8_760, Advanced: true),
+            new("VisibilityPortal:Tls:ClientCertThumbprint", "Client certificate thumbprint (mTLS)", FieldType.String,
+                @"Certificate in LocalMachine\My presented to the portal.", RestartRequired: true, Advanced: true),
+        ]),
+
+        new("ui", "Web console", "Where this configuration console listens.",
+        [
+            new("Ui:SessionTimeoutMinutes", "Sign-out after idle (min)", FieldType.Int, null, 5, 1_440, RestartRequired: true),
+            new("Ui:Urls", "Listen URLs", FieldType.List,
+                "Default http://127.0.0.1:8750 (this server only). Non-local addresses need remote access enabled, " +
+                "and https:// with a certificate unless HTTPS is no longer required below.",
+                Format: "url", RestartRequired: true, Advanced: true),
+            new("Ui:AllowRemoteAccess", "Allow remote access", FieldType.Bool,
+                "Expose the console beyond this server.", RestartRequired: true, Advanced: true),
+            new("Ui:RequireHttpsForRemoteAccess", "Require HTTPS for remote access (recommended)", FieldType.Bool,
+                "Turn off to serve the console to other machines over plain http://. The console password and " +
+                "session then travel unencrypted.", RestartRequired: true, Advanced: true),
+            new("Ui:AllowedHosts", "Allowed host names", FieldType.List,
+                "Names other machines use to reach the console, e.g. srv-01.corp.local. Empty allows any.",
+                Advanced: true),
+            new("Ui:CertificateThumbprint", "HTTPS certificate thumbprint", FieldType.String,
+                "Certificate in LocalMachine\\My used for https:// URLs.", RestartRequired: true, Advanced: true),
+        ]),
+
+        new("updates", "Updates", "How WatchTower checks for and installs new versions.",
+        [
+            new("Updates:Enabled", "Check for updates automatically", FieldType.Bool),
+            new("Updates:Channel", "Release channel", FieldType.Enum,
+                "Prerelease builds get features earlier but are less tested.", Options: ["stable", "prerelease"]),
+            new("Updates:CheckIntervalHours", "Check every (hours)", FieldType.Int, null, 1, 168),
+            new("Updates:AutoDownload", "Download new versions in the background", FieldType.Bool,
+                "Installing always needs a click (or a portal command)."),
+            new("Updates:RestartCountdownSeconds", "Restart countdown (s)", FieldType.Int,
+                "Delay between a finished download and the restart that installs it.", 5, 3_600),
+            new("Updates:FeedUrl", "Release feed", FieldType.Url,
+                "A GitHub releases API URL or your own watchtower-update.json manifest URL.",
+                Placeholder: Updates.UpdateOptions.DefaultFeedUrl, Advanced: true),
+            new("Updates:RequireHttps", "Require HTTPS for downloads (recommended)", FieldType.Bool,
+                "Turn off to use a plain http:// feed (e.g. an internal file server). Also set a signing key " +
+                "below so tampered packages are still rejected.", Advanced: true),
+            new("Updates:PublicKey", "Signing public key (PEM)", FieldType.String,
+                "When set, only packages signed with the matching private key are installed.", Advanced: true),
+        ]),
+
+        new("logging", "Logging","Diagnostic log verbosity. Logs are kept for 30 days.",
+        [
+            new("Serilog:MinimumLevel:Default", "Log level", FieldType.Enum,
+                Options: ["Verbose", "Debug", "Information", "Warning", "Error"], RestartRequired: true),
+        ]),
+    ];
+
+    private static readonly Dictionary<string, ConfigField> ByKey = Sections
+        .SelectMany(s => s.Fields)
+        .ToDictionary(f => f.Key, StringComparer.OrdinalIgnoreCase);
+
+    public static bool TryGetField(string key, out ConfigField field) => ByKey.TryGetValue(key, out field!);
+
+    public static IEnumerable<ConfigField> AllFields => ByKey.Values;
+
+    public static bool IsListType(FieldType type) => type is FieldType.List or FieldType.Services or FieldType.AppPools;
+}

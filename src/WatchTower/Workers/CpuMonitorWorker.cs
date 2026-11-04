@@ -1,8 +1,11 @@
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
 using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Workers;
 
@@ -10,38 +13,36 @@ public class CpuMonitorWorker : BackgroundService
 {
     private readonly ISystemMetricsProvider _metricsProvider;
     private readonly IMetricsStore _metricsStore;
-    private readonly IEmailService _emailService;
-    private readonly IReportBuilder _reportBuilder;
+    private readonly IAlertManager _alerts;
     private readonly IPortalEventPublisher _portalEventPublisher;
     private readonly IOptionsMonitor<CpuMonitorOptions> _options;
-    private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CpuMonitorWorker> _logger;
+    private readonly IWorkerHealth? _health;
 
+    private readonly RecoveryDebouncer _recovery = new();
     private DateTime? _firstBreachTime;
-    private DateTime _lastEmergencyEmail = DateTime.MinValue;
+    private bool _metricUnavailable;
 
     public CpuMonitorWorker(
         ISystemMetricsProvider metricsProvider,
         IMetricsStore metricsStore,
-        IEmailService emailService,
-        IReportBuilder reportBuilder,
+        IAlertManager alerts,
         IPortalEventPublisher portalEventPublisher,
         IOptionsMonitor<CpuMonitorOptions> options,
-        IOptionsMonitor<ReportingOptions> reportingOptions,
         TimeProvider timeProvider,
-        ILogger<CpuMonitorWorker> logger
+        ILogger<CpuMonitorWorker> logger,
+        IWorkerHealth? workerHealth = null
     )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
-        _emailService = emailService;
-        _reportBuilder = reportBuilder;
+        _alerts = alerts;
         _portalEventPublisher = portalEventPublisher;
         _options = options;
-        _reportingOptions = reportingOptions;
         _timeProvider = timeProvider;
         _logger = logger;
+        _health = workerHealth;
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -50,11 +51,14 @@ public class CpuMonitorWorker : BackgroundService
     {
         _logger.LogInformation("CPU Monitor Worker started");
 
+        ReportAlive();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
+                ReportAlive();
                 await Task.Delay(
                     TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
                     _timeProvider, stoppingToken);
@@ -73,11 +77,17 @@ public class CpuMonitorWorker : BackgroundService
         _logger.LogInformation("CPU Monitor Worker stopped");
     }
 
+    /// <summary>Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>).</summary>
+    private void ReportAlive() =>
+        _health?.ReportSuccess(WorkerNames.Cpu, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
+
     /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
-        var cpuUsage = _metricsProvider.GetCpuUsage();
+        if (!TryReadCpu(out var cpuUsage))
+            return;
+
         var metric = new CpuMetric(UtcNow, cpuUsage);
         _metricsStore.AddCpuMetric(metric);
 
@@ -85,6 +95,8 @@ public class CpuMonitorWorker : BackgroundService
 
         if (cpuUsage >= opts.ThresholdPercent)
         {
+            _recovery.Breached(AlertKey.Cpu);
+
             if (_firstBreachTime == null)
             {
                 _firstBreachTime = UtcNow;
@@ -105,47 +117,67 @@ public class CpuMonitorWorker : BackgroundService
             var elapsed = UtcNow - _firstBreachTime.Value;
             if (elapsed.TotalSeconds >= opts.SustainedSeconds)
             {
-                await HandleEmergencyAsync(cpuUsage, opts, ct);
+                await RaiseEmergencyAsync(cpuUsage, opts, ct);
                 _firstBreachTime = UtcNow;
             }
         }
         else
         {
             _firstBreachTime = null;
+            if (_recovery.Clear(AlertKey.Cpu, UtcNow, _alerts.RecoveryWindow))
+                await _alerts.ResolveAsync(AlertKey.Cpu, ct: ct);
         }
     }
 
-    private async Task HandleEmergencyAsync(
-        double cpuUsage,
-        CpuMonitorOptions opts,
-        CancellationToken ct
-    )
+    /// <summary>
+    /// Reads CPU usage, tolerating an unavailable metric source (NaN or a throwing provider):
+    /// the cycle is skipped with a warning on the first miss of a streak instead of failing.
+    /// Breach tracking is left untouched so a single missed sample does not reset it.
+    /// </summary>
+    private bool TryReadCpu(out double cpuUsage)
     {
-        var cooldown = TimeSpan.FromSeconds(
-            _reportingOptions.CurrentValue.EmergencyCooldownSeconds
-        );
-        if (UtcNow - _lastEmergencyEmail < cooldown)
-            return;
+        try
+        {
+            cpuUsage = _metricsProvider.GetCpuUsage();
+        }
+        catch (Exception ex)
+        {
+            cpuUsage = double.NaN;
+            _logger.LogDebug(ex, "Reading CPU usage threw");
+        }
 
-        var topProcesses = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, ct)).ToList();
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.CpuThresholdBreached,
-            $"CPU at {cpuUsage:F1}% for over {opts.SustainedSeconds}s",
-            topProcesses
-        );
+        if (double.IsFinite(cpuUsage))
+        {
+            if (_metricUnavailable)
+                _logger.LogInformation("CPU usage is available again");
+            _metricUnavailable = false;
+            return true;
+        }
 
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-        _logger.LogWarning("CPU EMERGENCY: {Description}", incident.Description);
-
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync($"[WatchTower] CPU Emergency: {cpuUsage:F1}%", html, ct);
-
-        // Only start the cooldown if the alert was actually delivered, so a transient
-        // SMTP outage does not silently suppress alerts for the whole cooldown window.
-        if (sent)
-            _lastEmergencyEmail = UtcNow;
+        if (!_metricUnavailable)
+            _logger.LogWarning("CPU usage is unavailable; skipping this cycle");
+        _metricUnavailable = true;
+        return false;
     }
+
+    /// <summary>
+    /// Sustained breach: raise (or keep open) the <c>cpu</c> alert. The alert manager decides
+    /// whether anything is recorded or sent; top processes are only sampled when it is.
+    /// </summary>
+    private Task RaiseEmergencyAsync(double cpuUsage, CpuMonitorOptions opts, CancellationToken ct) =>
+        _alerts.RaiseAsync(
+            AlertKey.Cpu,
+            AlertSeverity.Critical,
+            $"CPU Emergency: {cpuUsage:F1}%",
+            async token =>
+            {
+                var topProcesses = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, token)).ToList();
+                return new Incident(
+                    UtcNow,
+                    IncidentType.CpuThresholdBreached,
+                    $"CPU at {cpuUsage:F1}% for over {opts.SustainedSeconds}s",
+                    topProcesses
+                );
+            },
+            ct);
 }

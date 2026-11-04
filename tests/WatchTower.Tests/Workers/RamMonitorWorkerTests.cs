@@ -1,11 +1,16 @@
-using FluentAssertions;
+using AwesomeAssertions;
+
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
+
 using Moq;
+
 using WatchTower.Configuration;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
+using WatchTower.Tests.Alerting;
 using WatchTower.Workers;
 
 namespace WatchTower.Tests.Workers;
@@ -17,7 +22,6 @@ public class RamMonitorWorkerTests
     private readonly Mock<IEmailService> _emailService = new();
     private readonly Mock<IReportBuilder> _reportBuilder = new();
     private readonly Mock<IOptionsMonitor<RamMonitorOptions>> _options = new();
-    private readonly Mock<IOptionsMonitor<ReportingOptions>> _reportingOptions = new();
     private readonly FakeTimeProvider _time = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
     private readonly Mock<ILogger<RamMonitorWorker>> _logger = new();
 
@@ -30,13 +34,14 @@ public class RamMonitorWorkerTests
             SustainedSeconds = 300,
             TopProcessCount = 5
         });
-        _reportingOptions.Setup(o => o.CurrentValue).Returns(new ReportingOptions { EmergencyCooldownSeconds = 300 });
+        _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _metricsProvider.Setup(m => m.GetTopMemoryProcessesAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<ProcessInfo>());
         _reportBuilder.Setup(r => r.BuildReport(It.IsAny<TimeSpan>())).Returns(new ServerReport());
         _reportBuilder.Setup(r => r.RenderEmergencyReportHtml(It.IsAny<ServerReport>(), It.IsAny<Incident>())).Returns("<html/>");
+        _reportBuilder.Setup(r => r.RenderAlertHtml(It.IsAny<AlertNotification>())).Returns("<html/>");
     }
 
     [Fact]
@@ -87,14 +92,35 @@ public class RamMonitorWorkerTests
             Times.Once);
     }
 
+    [Fact]
+    public async Task PollOnce_RamUnavailable_SkipsCycleWithoutRecording()
+    {
+        _metricsProvider.Setup(m => m.GetRamMetric())
+            .Returns(new RamMetric(_time.GetUtcNow().UtcDateTime, double.NaN, double.NaN, 0));
+
+        await CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        _metricsStore.Verify(s => s.AddRamMetric(It.IsAny<RamMetric>()), Times.Never);
+        _metricsStore.Verify(s => s.AddIncident(It.IsAny<Incident>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PollOnce_RamProviderThrows_SkipsCycleInsteadOfFailing()
+    {
+        _metricsProvider.Setup(m => m.GetRamMetric()).Throws(new InvalidOperationException("counter registry corrupt"));
+
+        var act = () => CreateWorker().PollOnceAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        _metricsStore.Verify(s => s.AddRamMetric(It.IsAny<RamMetric>()), Times.Never);
+    }
+
     private RamMonitorWorker CreateWorker() => new(
         _metricsProvider.Object,
         _metricsStore.Object,
-        _emailService.Object,
-        _reportBuilder.Object,
+        TestAlerts.WithEmail(_metricsStore.Object, _time, _emailService.Object, _reportBuilder.Object),
         new WatchTower.Portal.NullPortalEventPublisher(),
         _options.Object,
-        _reportingOptions.Object,
         _time,
         _logger.Object);
 }

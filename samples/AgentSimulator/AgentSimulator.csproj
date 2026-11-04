@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A cross-platform stand-in for the WatchTower agent, for portal developers without a Windows
+    server. It compiles the agent's REAL wire code (DTOs, HttpsPortalClient, auth handler, TLS
+    policy, enrollment-code parser and remote-config validator) straight from src/WatchTower, so
+    what it sends is byte-for-byte what the agent sends. The agent project itself targets
+    net10.0-windows, which is why the files are linked instead of referenced.
+
+    The linked files must stay free of Windows-only APIs; the build of this project checks that.
+    It is a sample: build/package.ps1 only publishes src/WatchTower.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WatchTower.Samples.AgentSimulator</RootNamespace>
+    <AssemblyName>AgentSimulator</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft.Extensions.Http / Options / Logging, as in the agent. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Using Include="Microsoft.Extensions.Logging" />
+  </ItemGroup>
+
+  <ItemGroup Label="The agent's own portal code">
+    <Compile Include="..\..\src\WatchTower\Configuration\PortalOptions.cs" Link="Agent\PortalOptions.cs" />
+    <Compile Include="..\..\src\WatchTower\Models\EndpointStatus.cs" Link="Agent\EndpointStatus.cs" />
+    <Compile Include="..\..\src\WatchTower\Models\IncidentType.cs" Link="Agent\IncidentType.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Actions\ActionType.cs" Link="Agent\ActionType.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Actions\RemoteConfigValidator.cs" Link="Agent\RemoteConfigValidator.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Clients\AgentAuthHandler.cs" Link="Agent\AgentAuthHandler.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Clients\HttpsPortalClient.cs" Link="Agent\HttpsPortalClient.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Clients\IPortalClient.cs" Link="Agent\IPortalClient.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Clients\PortalTls.cs" Link="Agent\PortalTls.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Contracts\AgentEventDto.cs" Link="Agent\AgentEventDto.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Contracts\CommandDtos.cs" Link="Agent\CommandDtos.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Contracts\MetricsBatchDto.cs" Link="Agent\MetricsBatchDto.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Contracts\RemoteAgentConfigDto.cs" Link="Agent\RemoteAgentConfigDto.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\EnrollmentCode.cs" Link="Agent\EnrollmentCode.cs" />
+    <Compile Include="..\..\src\WatchTower\Services\SnapshotFreshness.cs" Link="Agent\SnapshotFreshness.cs" />
+  </ItemGroup>
+
+</Project>

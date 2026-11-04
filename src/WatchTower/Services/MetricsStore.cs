@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 
@@ -14,6 +15,7 @@ public class MetricsStore : IMetricsStore
     private readonly ConcurrentDictionary<string, ServiceStatus> _serviceStatuses = new();
     private readonly ConcurrentDictionary<string, ApplicationPoolStatus> _applicationPoolStatuses =
         new();
+    private readonly ConcurrentDictionary<string, EndpointStatus> _endpointStatuses = new();
     private readonly ConcurrentQueue<Incident> _incidents = new();
 
     public void AddCpuMetric(CpuMetric metric) => _cpuMetrics.Enqueue(metric);
@@ -33,6 +35,8 @@ public class MetricsStore : IMetricsStore
 
     public void AddApplicationPoolStatus(ApplicationPoolStatus status) =>
         _applicationPoolStatuses[status.ApplicationPoolName] = status;
+
+    public void AddEndpointStatus(EndpointStatus status) => _endpointStatuses[status.Name] = status;
 
     public void AddIncident(Incident incident) => _incidents.Enqueue(incident);
 
@@ -62,6 +66,8 @@ public class MetricsStore : IMetricsStore
     public IReadOnlyList<ApplicationPoolStatus> GetLatestApplicationPoolStatuses() =>
         _applicationPoolStatuses.Values.ToList();
 
+    public IReadOnlyList<EndpointStatus> GetLatestEndpointStatuses() => _endpointStatuses.Values.ToList();
+
     public IReadOnlyList<Incident> GetIncidents(TimeSpan period)
     {
         var cutoff = DateTime.UtcNow - period;
@@ -82,18 +88,23 @@ public class MetricsStore : IMetricsStore
             _incidents.TryDequeue(out _);
     }
 
-    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId)
+    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc)
     {
-        // In-memory cursors are running indices; clear everything that has been
-        // collected. Snapshots and incidents are always cleared.
+        // In-memory cursors are running indices; clear the cpu/ram history collected so far and
+        // incidents up to the report cutoff. Snapshots are current state and are kept, as in
+        // SqliteMetricsStore.
         _cpuMetrics.Clear();
         _ramMetrics.Clear();
-        _diskMetrics.Clear();
-        _diskQueueMetrics.Clear();
-        _networkMetrics.Clear();
-        _serviceStatuses.Clear();
-        _applicationPoolStatuses.Clear();
-        _incidents.Clear();
+
+        var newer = new List<Incident>();
+        while (_incidents.TryDequeue(out var incident))
+        {
+            if (incident.Timestamp > incidentsUpToUtc)
+                newer.Add(incident);
+        }
+        foreach (var incident in newer)
+            _incidents.Enqueue(incident);
+
         return new PurgeReportResult(CpuTableEmptied: true, RamTableEmptied: true);
     }
 
@@ -111,5 +122,70 @@ public class MetricsStore : IMetricsStore
         var slice = all.Skip((int)afterRowId).Take(limit).ToList();
         var lastRowId = afterRowId + slice.Count;
         return (lastRowId, slice);
+    }
+
+    private System.Collections.IDictionary Snapshot(SnapshotKind kind) => kind switch
+    {
+        SnapshotKind.Disk => _diskMetrics,
+        SnapshotKind.DiskQueue => _diskQueueMetrics,
+        SnapshotKind.Network => _networkMetrics,
+        SnapshotKind.Service => _serviceStatuses,
+        SnapshotKind.ApplicationPool => _applicationPoolStatuses,
+        SnapshotKind.Endpoint => _endpointStatuses,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
+
+    public IReadOnlyList<string> GetSnapshotNames(SnapshotKind kind) => Snapshot(kind).Keys.Cast<string>().ToList();
+
+    public int RemoveSnapshots(SnapshotKind kind, IEnumerable<string> names)
+    {
+        var wanted = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return RemoveWhere(kind, wanted.Contains).Count;
+    }
+
+    public IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep)
+    {
+        var plan = SnapshotPrunePlan.Create(Snapshot(kind).Keys.Cast<string>().ToList(), keep);
+        var removed = plan.Remove.ToHashSet(StringComparer.Ordinal);
+        RemoveWhere(kind, removed.Contains);
+        foreach (var (stored, configured) in plan.Rename)
+            Rename(kind, stored, configured);
+        return plan.Remove;
+    }
+
+    private void Rename(SnapshotKind kind, string from, string to)
+    {
+        switch (kind)
+        {
+            case SnapshotKind.Disk:
+                if (_diskMetrics.TryRemove(from, out var disk)) _diskMetrics[to] = disk with { DriveName = to };
+                break;
+            case SnapshotKind.DiskQueue:
+                if (_diskQueueMetrics.TryRemove(from, out var queue)) _diskQueueMetrics[to] = queue with { InstanceName = to };
+                break;
+            case SnapshotKind.Network:
+                if (_networkMetrics.TryRemove(from, out var network)) _networkMetrics[to] = network with { InterfaceName = to };
+                break;
+            case SnapshotKind.Service:
+                if (_serviceStatuses.TryRemove(from, out var service)) _serviceStatuses[to] = service with { ServiceName = to };
+                break;
+            case SnapshotKind.ApplicationPool:
+                if (_applicationPoolStatuses.TryRemove(from, out var pool)) _applicationPoolStatuses[to] = pool with { ApplicationPoolName = to };
+                break;
+            case SnapshotKind.Endpoint:
+                if (_endpointStatuses.TryRemove(from, out var endpoint)) _endpointStatuses[to] = endpoint with { Name = to };
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
+        }
+    }
+
+    private List<string> RemoveWhere(SnapshotKind kind, Func<string, bool> predicate)
+    {
+        var snapshot = Snapshot(kind);
+        var removed = snapshot.Keys.Cast<string>().Where(predicate).ToList();
+        foreach (var name in removed)
+            snapshot.Remove(name);
+        return removed;
     }
 }

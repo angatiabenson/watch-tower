@@ -1,0 +1,75 @@
+/*
+ * WatchTower theme — design tokens shared by the agent console and the Visibility Portal.
+ * Dark is the default; light applies when the root element does NOT carry the `dark` class
+ * (the portal convention). Copy this block verbatim; do not fork values per product.
+ */
+
+:root,
+.dark {
+  /* Surfaces (near-black, cool) */
+  --bg-0: #0A0B0D;
+  --bg-1: #101216;
+  --bg-2: #161A20;
+  --bg-3: #1E232B;
+
+  /* Hairlines */
+  --line-1: #23272F;
+  --line-2: #2E343E;
+
+  /* Text (warm off-white) */
+  --fg-1: #F2EFEA;
+  --fg-2: #B8B3A8;
+  --fg-3: #8F8A81;
+  --fg-dim: #4A4843;
+
+  /* Brand — WatchTower Green (emerald). 7.4–7.8:1 on dark surfaces. */
+  --wt-accent: #10B981;
+  --wt-accent-hover: #34D399;
+  --wt-accent-dim: rgba(16, 185, 129, 0.15);
+  /* Text on a filled accent surface (white fails contrast on bright green). 7.5:1 */
+  --wt-on-accent: #04130C;
+
+  /* Status (never colour alone — always pair with a label or ■ glyph) */
+  --ok: #6DBE7C;
+  --warn: #E6B14C;
+  --crit: #E5484D;
+  --info: #5A9FE6;
+  --ok-soft: rgba(109, 190, 124, 0.12);
+  --warn-soft: rgba(230, 177, 76, 0.12);
+  --crit-soft: rgba(229, 72, 77, 0.12);
+  --info-soft: rgba(90, 159, 230, 0.12);
+
+  --radius: 2px;
+  --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", Consolas, monospace;
+}
+
+:root:not(.dark) {
+  --bg-0: #FAFAF9;
+  --bg-1: #F4F3F1;
+  --bg-2: #ECEAE7;
+  --bg-3: #E2E0DC;
+
+  --line-1: #D0CCC6;
+  --line-2: #BDB9B2;
+
+  --fg-1: #1A1714;
+  --fg-2: #3D3A36;
+  --fg-3: #625E59;
+  --fg-dim: #A8A49E;
+
+  /* Deep emerald for light surfaces. 4.6–5.3:1 on light surfaces; white on it 5.5:1 */
+  --wt-accent: #047857;
+  --wt-accent-hover: #065F46;
+  --wt-accent-dim: rgba(4, 120, 87, 0.12);
+  --wt-on-accent: #FFFFFF;
+
+  --ok: #276749;
+  --warn: #8A5A12;
+  --crit: #C53030;
+  --info: #2B6CB0;
+  --ok-soft: rgba(39, 103, 73, 0.12);
+  --warn-soft: rgba(138, 90, 18, 0.12);
+  --crit-soft: rgba(197, 48, 48, 0.10);
+  --info-soft: rgba(43, 108, 176, 0.10);
+}

@@ -1,7 +1,10 @@
 using MailKit.Net.Smtp;
 using MailKit.Security;
+
 using Microsoft.Extensions.Options;
+
 using MimeKit;
+
 using WatchTower.Configuration;
 using WatchTower.Services.Abstractions;
 
@@ -16,6 +19,17 @@ public class EmailService : IEmailService
     {
         _options = options;
         _logger = logger;
+    }
+
+    public bool IsConfigured
+    {
+        get
+        {
+            var opts = _options.CurrentValue;
+            return !string.IsNullOrWhiteSpace(opts.SmtpHost) &&
+                   !string.IsNullOrWhiteSpace(opts.FromAddress) &&
+                   opts.ToAddresses.Any(a => !string.IsNullOrWhiteSpace(a));
+        }
     }
 
     public async Task<bool> SendEmailAsync(

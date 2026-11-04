@@ -37,15 +37,48 @@ message MetricsBatchPayload {
   repeated ServiceStatusProto    service_statuses   = 7;
   repeated AppPoolStatusProto    app_pool_statuses  = 8;
   string batch_id                            = 9;  // idempotency key for de-duplicating retried batches
+  AgentTelemetryProto            agent              = 10; // optional: agent identity/version/update state
+  repeated EndpointStatusProto   endpoint_statuses  = 11; // latest endpoint check results (absent from older agents)
 }
 
+// Agent self-description sent with every metrics batch (additive; absent from older agents).
+message AgentTelemetryProto {
+  string                version            = 1;
+  string                machine_name       = 2;
+  string                os                 = 3;
+  string                started_at         = 4;
+  int64                 uptime_seconds     = 5;
+  string                update_phase       = 6;  // Idle|Checking|UpToDate|Available|Downloading|ReadyToInstall|Installing|Failed
+  optional string       available_version  = 7;
+  UpdateResultProto     last_update_result = 8;  // unset when no update has been installed yet
+  MaintenanceProto      maintenance        = 9;  // maintenance window state (absent from older agents)
+}
+message UpdateResultProto { string to_version = 1; bool success = 2; string completed_at = 3; }
+message MaintenanceProto { bool active = 1; optional string until_utc = 2; optional string reason = 3; }
+
+// Snapshot entries (disk to endpoint) carry is_stale: true when the reading is older than its
+// freshness window when the batch is built (polled resources: max(3 x poll interval, 10 min);
+// endpoint checks: max(2 x interval + timeout, 10 min)), false otherwise. Unset from agents that
+// predate it: treat unset as unknown and fall back to the timestamp.
 message CpuMetricProto       { string timestamp = 1; double usage_percent = 2; }
 message RamMetricProto       { string timestamp = 1; double usage_percent = 2; double available_mb = 3; double total_mb = 4; }
-message DiskMetricProto      { string timestamp = 1; string drive_name = 2; double total_gb = 3; double free_gb = 4; double usage_percent = 5; }
-message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; double queue_length = 3; }
-message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; }
-message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; }
-message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; }
+message DiskMetricProto      { string timestamp = 1; string drive_name = 2; double total_gb = 3; double free_gb = 4; double usage_percent = 5; optional bool is_stale = 6; }
+message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; double queue_length = 3; optional bool is_stale = 4; }
+message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; optional bool is_stale = 4; }
+message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; optional bool is_stale = 6; }
+message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; optional bool is_stale = 5; }
+message EndpointStatusProto  {
+  string          timestamp             = 1;
+  string          name                  = 2;
+  string          type                  = 3;  // Http | Tcp | Certificate
+  string          target                = 4;  // without credentials or query string
+  string          status                = 5;  // Up | Down | Expiring | ConfigurationError (open set)
+  bool            is_up                 = 6;
+  optional double response_time_ms      = 7;
+  optional double certificate_days_left = 8;
+  optional string detail                = 9;
+  optional bool   is_stale              = 10; // computed for ConfigurationError entries too
+}
 
 // ── Event ────────────────────────────────────────────────────────────────────
 
@@ -61,6 +94,8 @@ message AgentEvent {
   int32                    incident_type = 3;
   string                   description   = 4;
   repeated ProcessInfoProto top_processes = 5;
+  optional string          alert_key     = 6;  // alert lifecycle key, e.g. "cpu", "svc:W3SVC"; unset outside an alert
+  optional bool            resolved      = 7;  // false = alert opened/escalated, true = cleared; unset for one-shot events
 }
 message ProcessInfoProto { string name = 1; int32 pid = 2; double cpu_seconds = 3; double memory_mb = 4; double cpu_percent = 5; }
 
@@ -112,12 +147,14 @@ message RemoteAgentConfig {
   RemoteServiceConfig services = 5;
   RemoteAppPoolConfig app_pools = 6;
   RemotePortalConfig  portal   = 7;
+  RemoteMaintenanceConfig maintenance = 8;  // optional maintenance window (absent from older portals)
 }
 
-message RemoteCpuConfig     { int32 poll_interval_seconds = 1; double threshold_percent = 2; int32 sustained_seconds = 3; }
-message RemoteRamConfig     { int32 poll_interval_seconds = 1; double threshold_percent = 2; int32 sustained_seconds = 3; }
-message RemoteDiskConfig    { int32 poll_interval_seconds = 1; double warning_threshold_percent = 2; double critical_threshold_percent = 3; double queue_length_warning_threshold = 4; }
-message RemoteNetworkConfig { int32 poll_interval_seconds = 1; double output_queue_warning_threshold = 2; }
-message RemoteServiceConfig { int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
-message RemoteAppPoolConfig { int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
-message RemotePortalConfig  { int32 outbox_flush_interval_seconds = 1; int32 command_poll_interval_seconds = 2; int32 remote_config_poll_interval_seconds = 3; }
+message RemoteCpuConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
+message RemoteRamConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
+message RemoteDiskConfig    { optional int32 poll_interval_seconds = 1; optional double warning_threshold_percent = 2; optional double critical_threshold_percent = 3; optional double queue_length_warning_threshold = 4; }
+message RemoteNetworkConfig { optional int32 poll_interval_seconds = 1; optional double output_queue_warning_threshold = 2; }
+message RemoteServiceConfig { optional int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
+message RemoteAppPoolConfig { optional int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
+message RemotePortalConfig  { optional int32 outbox_flush_interval_seconds = 1; optional int32 command_poll_interval_seconds = 2; optional int32 remote_config_poll_interval_seconds = 3; }
+message RemoteMaintenanceConfig { optional string until_utc = 1; optional string reason = 2; }

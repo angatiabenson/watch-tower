@@ -1,0 +1,1469 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+
+info:
+  title: WatchTower Portal Agent API
+  version: 1.0.0
+  summary: The HTTP API a WatchTower agent calls on a portal (protocol v1).
+  description: |
+    The WatchTower agent is a Windows service that monitors a server. It only makes OUTBOUND
+    requests: it pushes metrics and events to a portal and polls the portal for commands and
+    remote configuration. A portal is any HTTP server that implements the seven operations in
+    this document. Nothing ever connects to the agent, so agents behind NAT or a firewall that
+    only allows outbound HTTPS work unchanged.
+
+    This file is the machine-readable reference. The human guide is
+    `guides/portal-api/README.md` in the same repository, and `samples/MinimalPortal` is a
+    runnable reference implementation.
+
+    ## Conventions
+
+    * Key words MUST, SHOULD and MAY are used as described in RFC 2119.
+    * All bodies are UTF-8 JSON. Property names are camelCase and are matched
+      **case-sensitively** by the agent: a portal MUST send `commandId`, not `CommandId`.
+    * The agent omits properties whose value is null instead of sending `null`. Optional
+      properties in agent-sent schemas are therefore either present with a value or absent.
+    * Timestamps are ISO-8601 / RFC 3339 strings. The agent sends UTC, usually with a `Z`
+      suffix and seven fractional digits (`2026-11-03T10:15:00.1234567Z`); a few fields carry
+      an explicit offset instead (`+00:00`). A portal MUST accept any RFC 3339 offset.
+    * Every numeric metric is a JSON number (IEEE 754 double); counts and identifiers that are
+      integers are noted as such.
+
+    ## Forward compatibility (MUST)
+
+    * A portal MUST ignore JSON properties it does not know. Later v1 agents add properties
+      (see `x-since`) and will keep doing so.
+    * Value sets that grow (incident types, action types, statuses) are NOT closed `enum`s. Their
+      schema accepts any value of the declared type; the values known today are listed in
+      `x-extensible-enum` and in the description. A portal MUST accept a value it does not know
+      and treat it as unrecognised but valid, for example by storing and displaying it.
+    * A portal MUST NOT reject a request because an optional property is missing. Older v1
+      agents do not send properties marked `x-since: 1.0.19` or `x-since: after-1.0.19`.
+    * The agent ignores response properties it does not know, so a portal MAY add its own.
+
+    ## Field availability (`x-since`)
+
+    * `base`: sent by every released v1 agent (up to and including 1.0.19).
+    * `1.0.19`: added in 1.0.19 (released 2026-06-15). Not sent by 1.0.18 or earlier.
+    * `after-1.0.19`: added after 1.0.19 (unreleased): sent by agents built from the current
+      source and by the first release after 1.0.19. Not sent by 1.0.19 or earlier. `isStale` on
+      snapshot entries came later than the rest of after-1.0.19, so earlier unreleased builds
+      omit it too (see SnapshotIsStale): never infer it from the presence of other after-1.0.19
+      fields.
+
+    ## Status codes
+
+    The agent only distinguishes success (any 2xx) from failure (everything else, plus
+    timeouts and network errors). It never treats a 4xx as a permanent rejection. See each
+    operation's `x-agent-behaviour` and `guides/portal-api/10-reliability.md`.
+
+    The agent does NOT follow redirects. Any 3xx (304 included) fails that call: a POST counts
+    as not delivered (metrics batches and events stay in the outbox and are retried with
+    backoff, command results are retried with their own backoff for up to a week,
+    acknowledgements are never retried), `GET commands/pending` counts as no commands and `GET config` as no change. The
+    agent logs, at most once per 15 minutes per endpoint: "Portal redirected <path> to
+    <absolute Location>; update VisibilityPortal:BaseUrl. The redirect (<status>) was not
+    followed and the call counts as failed (<n> more redirect(s) of this endpoint since the
+    last warning)", with "(no Location header)" when there is none. A portal MUST NOT redirect
+    agent API calls (for example from http to https, or to add a trailing slash); publish the
+    final URL as the agent's BaseUrl instead.
+
+    The bearer token and `X-Agent-Id` are only ever sent to URLs below BaseUrl (same scheme,
+    host, port and path prefix); a request for any other URL is refused and logged.
+
+    Outbox delivery (metrics batches and events) stops for the current flush cycle at the first
+    failure; the remaining messages wait for the next cycle. The failed message itself is not
+    resent on the very next cycle: it waits until its backoff expires (see each operation's
+    `x-agent-behaviour.failure`) and is retried on the first flush cycle after that. Other
+    eligible messages may be delivered in the meantime, so delivery order is not guaranteed
+    after a failure.
+  license:
+    name: MIT
+    identifier: MIT
+  contact:
+    name: WatchTower
+    url: https://github.com/angatiabenson/watch-tower
+
+servers:
+  - url: '{baseUrl}'
+    description: |
+      The agent's `VisibilityPortal:BaseUrl`. It MAY contain a path prefix: the agent removes
+      trailing slashes from BaseUrl and appends `/api/v1/agent/...`, so a BaseUrl of
+      `https://portal.example.com/watchtower/` produces
+      `https://portal.example.com/watchtower/api/v1/agent/metrics/batch`.
+    variables:
+      baseUrl:
+        default: https://portal.example.com
+
+security:
+  - agentToken: []
+    agentId: []
+
+tags:
+  - name: Telemetry
+    description: Data the agent pushes (outbox-backed, retried, at-least-once).
+  - name: Commands
+    description: Remote actions the agent polls for, acknowledges and reports on.
+  - name: Configuration
+    description: Remote configuration the agent polls for and acknowledges.
+
+paths:
+  /api/v1/agent/metrics/batch:
+    post:
+      operationId: sendMetricsBatch
+      tags: [Telemetry]
+      summary: Receive a batch of metrics and the agent's self-description
+      description: |
+        Sent from the agent's outbox, by default every 30 s (`VisibilityPortal:Outbox:FlushIntervalSeconds`)
+        and immediately after a ForceMetricSnapshot (301) command. One batch per request.
+
+        CPU and RAM samples are incremental: each sample is sent in exactly one batch (but that
+        batch may be delivered more than once). The first batches after the portal is enabled
+        can also carry samples the agent collected (and still retained) before that: forwarding
+        starts at the oldest stored sample, at most Outbox:MaxBatchSize per batch.
+
+        Disk, disk-queue, network, service, application pool and endpoint entries are the
+        last-known reading per resource and are repeated in every batch until a newer reading
+        replaces them or the resource is removed:
+
+        * Drives, physical disks and network interfaces are removed once the resource has been
+          absent from 3 consecutive successful inventories AND for at least 10 minutes, whether
+          or not it has an alert. A failed read never counts, and neither does an empty disk
+          listing (an empty network-interface listing does).
+        * Services, application pools and endpoint checks are removed on the next poll after the
+          name leaves Monitoring:Services:WatchedServices,
+          Monitoring:ApplicationPools:WatchedApplicationPools or Monitoring:Endpoints (every
+          configured check, valid or not; an invalid one is reported with status
+          ConfigurationError, see EndpointStatus). Names are compared case-insensitively:
+          renaming only the letter case keeps the entry and its last reading, reported under the
+          new spelling. Portals SHOULD key these resources case-insensitively.
+        * The next batch is built from what remains; a resource that comes back starts a fresh
+          entry. A portal MUST NOT expect a resource to vanish from the very next batch.
+        * Nothing else removes an entry (the agent's daily report purge deletes only history).
+          A resource that is still present but cannot be read (for example a fixed drive that is
+          not ready) keeps its last reading and `timestamp` until it is removed. Current agents
+          then send the entry with `isStale: true` once that reading is older than its freshness
+          window (see SnapshotIsStale). Presence in the batch never means fresh: use `isStale`,
+          and where it is missing (older agents) the entry's `timestamp`.
+
+        Deduplicate on `batchId` (when present). The same `batchId` MUST produce the same
+        stored result however many times it arrives.
+      x-agent-behaviour:
+        frequency: every Outbox.FlushIntervalSeconds (default 30 s) when there is data; immediately after command 301
+        success: any 2xx; the response body is ignored
+        failure: any other status (including every 3xx, 304 too, which is never followed), a timeout (30 s) or a network error. The batch waits RetryBackoffSeconds x attempt (default 60 s, 120 s, ...) and is retried on the first flush cycle after that; it is dropped after MaxRetryAttempts (default 5) failed attempts
+        ordering: oldest first within the same priority, events before metrics; after a failure, later messages may be delivered before the one that failed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetricsBatch'
+            examples:
+              full:
+                $ref: '#/components/examples/MetricsBatchFull'
+              minimal:
+                $ref: '#/components/examples/MetricsBatchMinimal'
+      responses:
+        '200':
+          description: Accepted. Any 2xx status means delivered; 202 or 204 are equally fine.
+        '401':
+          description: Missing or invalid credentials. The agent logs an error ("Check AgentToken") and retries like any failure.
+        '413':
+          description: Too large. Treated as a failure and retried, so a portal MUST accept batches of the documented maximum size.
+        '429':
+          description: Rate limited. Treated as a failure; the agent does not read Retry-After and retries the batch once its backoff (60 s by default for the first retry) has expired.
+        default:
+          description: Any other status (including 3xx, 400, 403, 404 and 5xx) is a failure and the batch is retried after its backoff. Redirects are not followed.
+
+  /api/v1/agent/events:
+    post:
+      operationId: sendEvent
+      tags: [Telemetry]
+      summary: Receive one incident or alert-lifecycle event
+      description: |
+        One event per request. Events have a higher outbox priority than metrics batches and
+        are retried with exponential backoff for up to a week (`Outbox:EventMaxAgeHours`,
+        default 168 h). Deduplicate on `eventId`.
+      x-agent-behaviour:
+        frequency: when an incident happens; queued in the outbox and sent on the next flush cycle (default every 30 s)
+        success: any 2xx; the response body is ignored
+        failure: any other status (including every 3xx, 304 too, which is never followed), a timeout or a network error. The event waits 30 s, 60 s, 120 s ... (capped at 15 min) and is retried on the first flush cycle after that; it is dropped once older than EventMaxAgeHours (default 168 h)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentEvent'
+            examples:
+              alertOpened:
+                $ref: '#/components/examples/EventCpuOpened'
+              alertResolved:
+                $ref: '#/components/examples/EventCpuResolved'
+              recovery:
+                $ref: '#/components/examples/EventServiceRestarted'
+              oneShot:
+                $ref: '#/components/examples/EventServerRestarted'
+              withoutAlert:
+                $ref: '#/components/examples/EventServiceDown'
+      responses:
+        '200':
+          description: Accepted. Any 2xx status means delivered.
+        '401':
+          description: Missing or invalid credentials; logged as an error and retried.
+        default:
+          description: Any other status (including 3xx) is a failure and the event is retried after its backoff.
+
+  /api/v1/agent/commands/pending:
+    get:
+      operationId: pollCommands
+      tags: [Commands]
+      summary: Return the commands waiting for this agent
+      description: |
+        Polled by default every 30 s (`VisibilityPortal:CommandPoll:PollIntervalSeconds`).
+        Return every command that has not been acknowledged yet. The agent deduplicates on
+        `commandId`, so returning a command again until it is acknowledged is safe and is the
+        RECOMMENDED way to survive a lost acknowledgement.
+
+        Replay protection by id: the agent records every `commandId` it receives (executed,
+        failed, rejected or not authorized) before anything runs. A known id is never stored or
+        executed again; an accepted re-delivery is acknowledged again. Ids are remembered for
+        VisibilityPortal:CommandIdRetentionDays (default 365; 0 = no age limit), at most
+        VisibilityPortal:CommandIdMaxCount of them (default 200000; 0 = no limit; the oldest are
+        forgotten first), pruned hourly, and never while the agent still keeps the command
+        itself. This is independent of CommandPoll:RetentionDays. A `commandId` MUST therefore be
+        globally unique and never reused: a reused id is silently not executed.
+
+        The whole response is parsed as one JSON array. If it cannot be parsed (for example
+        one command has a numeric `parameters` value or a string `actionType`), the agent
+        logs a warning and processes NONE of the commands in that response. Property names that
+        do not match exactly (such as PascalCase `CommandId`) are ignored instead, so such a
+        command parses with defaults and is then dropped on its own (no `commandId`).
+
+        `issuedAt` also protects against replays, by age (unless the agent sets
+        CommandPoll:MaxCommandAgeSeconds to 0, which disables the age check):
+
+        * Absent, by default: the command is accepted, acknowledged and executed. The agent logs
+          once per process (and again after a BaseUrl change): "Portal sends commands without
+          issuedAt; replay protection is reduced. Update the portal."
+        * Absent, when the operator sets VisibilityPortal:RequireCommandIssuedAt to true
+          (default false): the command is rejected with the reason "issuedAt is required". This
+          applies even when MaxCommandAgeSeconds is 0.
+        * Present: the command is rejected when it is older than MaxCommandAgeSeconds +
+          ClockSkewSeconds (3600 + 300 s by default), more than ClockSkewSeconds (300 s) in the
+          future, or unparseable. Exactly 3900 s old or exactly 300 s ahead is accepted.
+        * A rejected command is never acknowledged or executed. The agent stores it as failed and
+          POSTs its result (`success: false`, `message` "Rejected: <reason>"), retried like every
+          result (see `POST commands/{commandId}/result`). If the commandId is already known to
+          the agent, nothing is reported: the earlier outcome stands.
+      x-agent-behaviour:
+        frequency: every CommandPoll.PollIntervalSeconds (default 30 s); disabled when that value is 0 or less
+        success: 200 with a JSON array (an empty array or a JSON null means no commands) or 204
+        failure: any other status (including a 3xx, which is not followed), unparseable JSON, a timeout or a network error is logged and treated as no commands; the next poll happens on schedule
+      responses:
+        '200':
+          description: The pending commands, oldest first is RECOMMENDED.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentCommand'
+              examples:
+                several:
+                  $ref: '#/components/examples/PendingCommands'
+                empty:
+                  summary: Nothing to do
+                  value: []
+        '204':
+          description: No commands. Equivalent to an empty array.
+        '401':
+          description: Missing or invalid credentials; logged as a warning and treated as no commands.
+        default:
+          description: Treated as no commands.
+
+  /api/v1/agent/commands/{commandId}/acknowledge:
+    post:
+      operationId: acknowledgeCommand
+      tags: [Commands]
+      summary: Record that the agent received a command
+      description: |
+        Sent once, right after the agent stored a command it accepted, before it executes it.
+        The acknowledgement is NOT retried when it fails; the command is executed anyway. A
+        portal MUST therefore accept a result for a command it never saw acknowledged.
+
+        A re-delivered command whose `commandId` the agent already knows is acknowledged again
+        (the first acknowledgement may have been lost) but not executed again.
+
+        A command the agent rejects for its `issuedAt` (stale, from the future, unparseable, or
+        missing while the agent requires it; see `GET commands/pending`) is never acknowledged:
+        it gets a failed result instead. A command that was acknowledged can still end with a
+        `Rejected: ` result: one the agent stored but could not run before it stopped, and that
+        was too old to run after the restart (see `POST commands/{commandId}/result`).
+      x-agent-behaviour:
+        frequency: once per accepted command delivery (again for a re-delivered command)
+        success: any 2xx
+        failure: logged and ignored; never retried
+      parameters:
+        - $ref: '#/components/parameters/CommandId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgeCommand'
+            examples:
+              ack:
+                $ref: '#/components/examples/AcknowledgeCommand'
+      responses:
+        '200':
+          description: Recorded. Any 2xx status means accepted.
+        '404':
+          description: Unknown command. Treated as a failure and ignored by the agent.
+        default:
+          description: Treated as a failure and ignored by the agent.
+
+  /api/v1/agent/commands/{commandId}/result:
+    post:
+      operationId: reportCommandResult
+      tags: [Commands]
+      summary: Record the outcome of a command
+      description: |
+        Sent when a command finished, failed, was refused (for example "Not authorized", or
+        "Rejected: <reason>" for an `issuedAt` that is stale, in the future, unparseable or
+        missing while the agent requires it), timed out, or was cut short by an agent restart.
+        Results are stored by the agent (surviving restarts) and retried until the portal
+        answers 2xx.
+
+        After a restart (crash, kill, reboot, update) the agent settles the commands it had
+        stored, so their results can arrive long after the portal sent them:
+
+        * A command left running is never run again (it may have had effects); at start-up it
+          is reported failed with "Interrupted: the agent stopped while this command was
+          running; its outcome is unknown".
+        * A command stored but not yet started (status Received, no `scheduledAt`) is picked up
+          at the start of every poll cycle. If it is still within the age limit
+          (MaxCommandAgeSeconds + ClockSkewSeconds from `issuedAt`, or from when the agent
+          received it if `issuedAt` was absent; no limit when MaxCommandAgeSeconds is 0) it
+          runs through the normal path and reports its result. Otherwise it is failed with
+          "Rejected: command expired before it could run (agent restarted)", retried like
+          every rejection. Such a command was usually acknowledged already.
+        * Deferred commands (with a `scheduledAt`) run when due, as before.
+
+        Delivery of every result:
+
+        * Each undelivered result has its own schedule: after the 1st, 2nd, 3rd, 4th and 5th
+          failed attempt it is due again 1, 2, 4, 8 and 16 minutes later, then every 30
+          minutes. Due results are sent on the next command-poll cycle, at most 50 per cycle,
+          the longest-due first, so a result the portal keeps refusing does not hold back
+          newer ones.
+        * A result still not accepted VisibilityPortal:CommandPoll:ResultRetryMaxHours after
+          it was produced (default 168 h, minimum 1) is given up on and logged as a warning
+          ("Gave up delivering the result of command <id>: ...").
+        * At most 1000 rejected commands ("Rejected: ...") are kept; beyond that the oldest are
+          deleted, delivered or not. Their ids stay known, so they are never executed later.
+
+        The same result can therefore arrive more than once: the first accepted result for a
+        `commandId` SHOULD win, and later copies MUST still be answered 2xx.
+      x-agent-behaviour:
+        frequency: once when the command ends, then with a per-result backoff (1, 2, 4, 8, 16, then every 30 min) until accepted
+        success: any 2xx
+        failure: any other status, a timeout or a network error; retried after the backoff, on the first poll cycle when due, for up to ResultRetryMaxHours (default 168 h), then given up
+      parameters:
+        - $ref: '#/components/parameters/CommandId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandResult'
+            examples:
+              success:
+                $ref: '#/components/examples/CommandResultSuccess'
+              refused:
+                $ref: '#/components/examples/CommandResultRefused'
+              interrupted:
+                $ref: '#/components/examples/CommandResultInterrupted'
+      responses:
+        '200':
+          description: Recorded. Any 2xx status means accepted. Answer 2xx for duplicates too.
+        default:
+          description: Treated as a failure; the result is sent again on the next poll cycle.
+
+  /api/v1/agent/config:
+    get:
+      operationId: fetchConfig
+      tags: [Configuration]
+      summary: Return the agent's remote configuration when it differs from the agent's version
+      description: |
+        Polled by default every 300 s (`VisibilityPortal:RemoteConfig:PollIntervalSeconds`) and
+        immediately after a ForceConfigSync (302) command. The `version` query parameter is the
+        version the agent applied last; it is absent until the agent has applied one.
+
+        Answer 204 when the agent is up to date. Answer 200 with `{config, version}` when the
+        agent should apply something else. The agent does not compare the returned `version`
+        with its own: a 200 is always applied (and acknowledged again), so answering 200 with
+        the same version on every poll works but rewrites the agent's overlay file each time.
+
+        The `config` object replaces the previous remote configuration as a whole: a section
+        missing from a new version falls back to the agent's local settings.
+        Invalid configurations (see the validation rules on `RemoteAgentConfig`) are logged
+        and NOT applied and NOT acknowledged; the agent keeps its previous version and asks
+        again on the next poll. There is no negative acknowledgement.
+      x-agent-behaviour:
+        frequency: every RemoteConfig.PollIntervalSeconds (default 300 s); immediately after command 302; not at all when RemoteConfig.Enabled is false
+        success: 204 (no change) or 200 with a body whose config and version are both non-null
+        failure: any other status (including a 3xx, which is not followed), unparseable JSON, a 200 whose config or version is null, a timeout or a network error is treated as no change
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: The version the agent currently has applied. Absent when none.
+          schema:
+            type: string
+          example: '2026-11-03.4'
+      responses:
+        '200':
+          description: A configuration for the agent to validate, apply and acknowledge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigFetchResponse'
+              examples:
+                thresholds:
+                  $ref: '#/components/examples/ConfigThresholds'
+                maintenance:
+                  $ref: '#/components/examples/ConfigMaintenance'
+                empty:
+                  $ref: '#/components/examples/ConfigEmpty'
+        '204':
+          description: The agent's version is current. No body.
+        default:
+          description: Treated as no change.
+
+  /api/v1/agent/config/acknowledge:
+    post:
+      operationId: acknowledgeConfig
+      tags: [Configuration]
+      summary: Record that the agent applied a configuration version
+      description: |
+        Sent after the agent wrote a configuration version to its overlay file (fetched from
+        `GET config`, or pushed with an ApplyConfiguration (401) command).
+
+        The agent remembers only its current version. While that version is unacknowledged,
+        the acknowledgement is retried on every config poll cycle until the portal answers 2xx.
+        Once a newer version is applied, the older one is never acknowledged: the newer
+        version supersedes it. A missing acknowledgement therefore does not prove that a
+        version was not applied; compare with the `version` query parameter of later polls.
+      x-agent-behaviour:
+        frequency: on the config poll cycle after a new version was applied, then on every cycle while that version is current and unacknowledged
+        success: any 2xx
+        failure: any other status, a timeout or a network error; retried on the next config poll cycle unless a newer version has been applied meanwhile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigAcknowledge'
+            examples:
+              ack:
+                $ref: '#/components/examples/ConfigAcknowledge'
+      responses:
+        '200':
+          description: Recorded. Any 2xx status means accepted.
+        default:
+          description: Treated as a failure; retried on the next config poll cycle.
+
+components:
+  securitySchemes:
+    agentToken:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <AgentToken>`, sent on every request. The token is an opaque
+        string issued by the portal (see `guides/portal-api/03-authentication-and-enrollment.md`).
+        The agent never refreshes or rotates it by itself.
+    agentId:
+      type: apiKey
+      in: header
+      name: X-Agent-Id
+      description: |
+        The agent's `VisibilityPortal:AgentId`, sent on every request together with the bearer
+        token. A portal MUST authenticate the pair (look the agent up by ID, then verify the
+        token) and MUST derive the agent identity from it, never from body fields.
+
+  parameters:
+    CommandId:
+      name: commandId
+      in: path
+      required: true
+      description: The `commandId` of the command, percent-encoded by the agent (RFC 3986 unreserved characters are left as they are).
+      schema:
+        type: string
+        minLength: 1
+      example: 6f1c9a52-6a43-4f3c-9d55-0d9c2b7f4e10
+
+  schemas:
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339 timestamp. The agent sends UTC; accept any offset.
+      examples:
+        - '2026-11-03T10:15:00.1234567Z'
+        - '2026-11-03T08:00:00.0000000+00:00'
+
+    SnapshotIsStale:
+      type: boolean
+      description: |
+        Staleness of a snapshot entry (drive, physical disk, network interface, service,
+        application pool, endpoint check), computed by the agent when it assembles the batch.
+        `true`: the entry's reading is older than its freshness window, that is
+        `batchedAt - timestamp > window`. `false`: it is not (a reading exactly at the edge of
+        its window, or with a `timestamp` after `batchedAt`, is fresh). Nothing else in the entry
+        changes: a stale entry still carries the last reading and its original `timestamp`.
+
+        A stale entry is a resource that is still listed (it was not removed, see the
+        sendMetricsBatch operation) but has not been read within its window: for example a fixed
+        drive that is not ready, a performance counter that stopped returning an instance, a
+        monitor that keeps failing, or an endpoint check with status ConfigurationError (which
+        does not run; its isStale is computed the same way and its status is kept). The agent
+        logs a warning, once, when an entry first becomes stale.
+
+        Freshness windows, from the agent's current configuration (local or remote):
+        * drives and physical disks: max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min);
+        * network interfaces: max(3 x Monitoring:Network:PollIntervalSeconds, 10 min);
+        * services: max(3 x Monitoring:Services:PollIntervalSeconds, 10 min);
+        * application pools: max(3 x Monitoring:ApplicationPools:PollIntervalSeconds, 10 min);
+        * endpoint checks: max(2 x IntervalSeconds + TimeoutSeconds, 10 min) of that check, with
+          the interval clamped to 5 to 86400 s and the timeout to 1 to 120 s (a daily check is
+          fresh for 48 h plus its timeout).
+        With the default intervals every window is 10 minutes; an endpoint check's is longer
+        once 2 x IntervalSeconds + TimeoutSeconds exceeds 600 s.
+
+        It is evaluated at `batchedAt`: a batch delivered late says whether the reading was stale
+        when the batch was built, not when it arrived. Just after an agent restart the first
+        batch can mark entries read before the restart stale until they are read again.
+
+        Optional for portals to rely on: agents built from this version on always send it, older
+        agents never do (1.0.19 and earlier, and unreleased builds from before this field). A
+        missing `isStale` means UNKNOWN, not fresh: a portal MUST then fall back to the entry's
+        `timestamp`, for example
+        comparing `batchedAt - timestamp` with the windows above.
+
+    MetricsBatch:
+      type: object
+      description: One outbox batch. Arrays are always present and may be empty.
+      required:
+        - agentId
+        - batchedAt
+        - cpuMetrics
+        - ramMetrics
+        - diskMetrics
+        - diskQueueMetrics
+        - networkMetrics
+        - serviceStatuses
+        - applicationPoolStatuses
+      properties:
+        agentId:
+          type: string
+          description: The agent's configured AgentId (same value as the X-Agent-Id header). Informational; authenticate with the headers.
+          x-since: base
+        batchId:
+          type: string
+          format: uuid
+          description: Idempotency key, a random UUID generated when the batch was queued and kept across retries. Added in 1.0.19; absent from agents up to 1.0.18.
+          x-since: 1.0.19
+        batchedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: When the batch was assembled (UTC).
+          x-since: base
+        cpuMetrics:
+          type: array
+          description: New CPU samples since the previous batch, oldest first; at most Outbox:MaxBatchSize (default 500) entries.
+          maxItems: 10000
+          items:
+            $ref: '#/components/schemas/CpuMetric'
+          x-since: base
+        ramMetrics:
+          type: array
+          description: New memory samples since the previous batch, oldest first; at most Outbox:MaxBatchSize entries.
+          maxItems: 10000
+          items:
+            $ref: '#/components/schemas/RamMetric'
+          x-since: base
+        diskMetrics:
+          type: array
+          description: Last-known reading per fixed drive (snapshot, repeated every batch; see the operation for when an entry is removed).
+          items:
+            $ref: '#/components/schemas/DiskMetric'
+          x-since: base
+        diskQueueMetrics:
+          type: array
+          description: Last-known disk queue length per physical disk (snapshot).
+          items:
+            $ref: '#/components/schemas/DiskQueueMetric'
+          x-since: base
+        networkMetrics:
+          type: array
+          description: Last-known output queue length per network interface (snapshot).
+          items:
+            $ref: '#/components/schemas/NetworkMetric'
+          x-since: base
+        serviceStatuses:
+          type: array
+          description: Last-known status per watched Windows service (snapshot).
+          items:
+            $ref: '#/components/schemas/ServiceStatus'
+          x-since: base
+        applicationPoolStatuses:
+          type: array
+          description: Last-known status per watched IIS application pool (snapshot).
+          items:
+            $ref: '#/components/schemas/ApplicationPoolStatus'
+          x-since: base
+        agent:
+          $ref: '#/components/schemas/AgentTelemetry'
+          x-since: after-1.0.19
+        endpointStatuses:
+          type: array
+          description: Last-known result per configured endpoint check (snapshot). Absent when no endpoint has a result yet.
+          items:
+            $ref: '#/components/schemas/EndpointStatus'
+          x-since: after-1.0.19
+
+    AgentTelemetry:
+      type: object
+      description: The agent's self-description, attached to every batch by current agents.
+      required: [version, machineName, os, startedAt, uptimeSeconds, updatePhase]
+      properties:
+        version:
+          type: string
+          description: Agent version, semantic version without build metadata (e.g. 1.6.0; development builds report 0.0.0-dev).
+          examples: ['1.6.0']
+        machineName:
+          type: string
+          description: NetBIOS computer name (Environment.MachineName).
+        os:
+          type: string
+          description: Operating system description (RuntimeInformation.OSDescription), e.g. "Microsoft Windows 10.0.20348".
+        startedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: When this agent process started, with an explicit +00:00 offset.
+        uptimeSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Seconds since this agent PROCESS started (not the machine's uptime).
+        updatePhase:
+          type: string
+          description: Self-update state. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Idle, Checking, UpToDate, Available, Downloading, ReadyToInstall, Installing, Failed]
+        availableVersion:
+          type: string
+          description: Newer version offered by the update feed. Absent when none is known.
+        lastUpdateResult:
+          $ref: '#/components/schemas/AgentUpdateResult'
+        maintenance:
+          $ref: '#/components/schemas/MaintenanceTelemetry'
+
+    AgentUpdateResult:
+      type: object
+      description: Outcome of the last self-update install. Absent when no update was installed yet.
+      required: [toVersion, success, completedAt]
+      properties:
+        toVersion:
+          type: string
+        success:
+          type: boolean
+        completedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: When the install finished. Carries an explicit offset, which may be the server's local offset.
+
+    MaintenanceTelemetry:
+      type: object
+      description: Maintenance window state. Always present in current agents.
+      required: [active]
+      properties:
+        active:
+          type: boolean
+          description: True while a maintenance window is in effect (notifications and automatic restarts are held).
+        untilUtc:
+          $ref: '#/components/schemas/Timestamp'
+          description: End of the configured window (UTC, Z suffix). May be present (and in the past) while active is false.
+        reason:
+          type: string
+          maxLength: 500
+          description: Operator- or portal-supplied reason. May be an empty string.
+
+    CpuMetric:
+      type: object
+      required: [timestamp, usagePercent]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        usagePercent:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Total processor time, percent of all logical processors.
+
+    RamMetric:
+      type: object
+      required: [timestamp, usagePercent, availableMb, totalMb]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        usagePercent:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: (totalMb - availableMb) / totalMb x 100.
+        availableMb:
+          type: number
+          minimum: 0
+          description: Available physical memory in MiB.
+        totalMb:
+          type: number
+          minimum: 0
+          description: Installed physical memory in MiB.
+
+    DiskMetric:
+      type: object
+      required: [timestamp, driveName, totalGb, freeGb, usagePercent]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        driveName:
+          type: string
+          description: Drive root as Windows reports it, including the trailing backslash (e.g. "C:\\").
+        totalGb:
+          type: number
+          minimum: 0
+          description: Capacity in GiB (1024^3 bytes).
+        freeGb:
+          type: number
+          minimum: 0
+          description: Free space available to all users, in GiB.
+        usagePercent:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: (totalGb - freeGb) / totalGb x 100; 0 when totalGb is 0.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt (for example a fixed drive that is not ready). Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: after-1.0.19
+
+    DiskQueueMetric:
+      type: object
+      required: [timestamp, instanceName, queueLength]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        instanceName:
+          type: string
+          description: PhysicalDisk performance counter instance, e.g. "0 C:".
+        queueLength:
+          type: number
+          minimum: 0
+          description: Current disk queue length (requests waiting), a dimensionless count.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: after-1.0.19
+
+    NetworkMetric:
+      type: object
+      required: [timestamp, interfaceName, outputQueueLength]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        interfaceName:
+          type: string
+          description: Network Interface performance counter instance name.
+        outputQueueLength:
+          type: number
+          minimum: 0
+          description: Packets waiting in the output queue, a dimensionless count.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this reading is older than max(3 x Monitoring:Network:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: after-1.0.19
+
+    ServiceStatus:
+      type: object
+      required: [timestamp, serviceName, displayName, status, isRunning]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        serviceName:
+          type: string
+          description: Service key name (e.g. W3SVC).
+        displayName:
+          type: string
+          description: Display name; equals serviceName when the service was not found.
+        status:
+          type: string
+          description: Service Control Manager state, or NotFound when the service could not be read. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Running, Stopped, StartPending, StopPending, ContinuePending, PausePending, Paused, NotFound]
+        isRunning:
+          type: boolean
+          description: True only when status is Running.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this status is older than max(3 x Monitoring:Services:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: after-1.0.19
+
+    ApplicationPoolStatus:
+      type: object
+      required: [timestamp, applicationPoolName, status, isRunning]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        applicationPoolName:
+          type: string
+        status:
+          type: string
+          description: IIS state as reported by appcmd or PowerShell, Unknown when it could not be read, or NotFound when IIS has no pool of that name. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Started, Stopped, Starting, Stopping, Unknown, NotFound]
+        isRunning:
+          type: boolean
+          description: True only when status is Started.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this status is older than max(3 x Monitoring:ApplicationPools:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: after-1.0.19
+
+    EndpointStatus:
+      type: object
+      required: [timestamp, name, type, target, status, isUp]
+      properties:
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        name:
+          type: string
+          description: Operator-chosen check name, unique per agent.
+        type:
+          type: string
+          description: Check type. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Http, Tcp, Certificate]
+        target:
+          type: string
+          description: URL or host:port, without credentials or query string.
+        status:
+          type: string
+          x-extensible-enum: [Up, Down, Expiring, ConfigurationError]
+          description: |
+            Expiring means reachable, but the TLS certificate is inside its warning window.
+            ConfigurationError means the check is still configured but its configuration is
+            invalid, so it does not run: the entry keeps its last result (timestamp, type,
+            target, isUp, responseTimeMs, certificateDaysLeft unchanged) and `detail` is
+            "Configuration error: <error> Last result: <status>[: <detail>]". A check that never
+            produced a result has no entry. As the timestamp does not change, a portal that
+            keeps the latest entry per name MUST let an entry with an equal timestamp from a
+            newer batch (later `batchedAt`) replace the stored one. When the check is fixed it
+            runs at once and reports a new result. Known values are listed in
+            x-extensible-enum; accept others.
+        isUp:
+          type: boolean
+          description: |
+            False when status is Down. With ConfigurationError it is the value of the last
+            result (true unless that result was Down), so it does not mean the check is healthy
+            now.
+        responseTimeMs:
+          type: number
+          minimum: 0
+          description: Round-trip time in milliseconds. Absent when not measured.
+        certificateDaysLeft:
+          type: number
+          description: Days until the TLS certificate expires, rounded to 0.1 (negative once expired, which also makes status Down). Absent when no certificate was inspected.
+        detail:
+          type: string
+          description: Human-readable result or error. Absent when there is none.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: |
+            True when this result is older than max(2 x the check's IntervalSeconds + its
+            TimeoutSeconds, 10 min) at batchedAt. Computed the same way for ConfigurationError
+            entries (which keep their status and last result, and turn stale once that result
+            is older than the window, as the check does not run). Absent from older agents,
+            which means unknown (see SnapshotIsStale).
+          x-since: after-1.0.19
+
+    AgentEvent:
+      type: object
+      required: [eventId, timestamp, incidentType, description]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Idempotency key, a random UUID generated when the event was queued and kept across retries.
+          x-since: base
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+          description: When the incident happened (UTC). Events can arrive late and out of order; order them by this field.
+          x-since: base
+        incidentType:
+          $ref: '#/components/schemas/IncidentType'
+          x-since: base
+        description:
+          type: string
+          description: Human-readable text written by the agent, in English. Do not parse it.
+          x-since: base
+        topProcesses:
+          type: array
+          description: Busiest processes at the time, by CPU on CPU events (types 0, 1) and by working set on memory events (types 2, 3). Absent otherwise.
+          items:
+            $ref: '#/components/schemas/ProcessInfo'
+          x-since: base
+        alertKey:
+          type: string
+          minLength: 1
+          description: |
+            The alert this event belongs to. Known shapes: cpu, ram, disk:<drive>, diskqueue:<instance>,
+            net:<interface>, svc:<serviceName>, pool:<appPoolName>, endpoint:<name>, reboot. Compare
+            case-insensitively. Absent for incidents outside an alert lifecycle and from agents up to 1.0.19.
+          x-since: after-1.0.19
+        resolved:
+          type: boolean
+          description: |
+            false = the alert opened or escalated; true = the alert cleared or was retired.
+            Absent for one-shot events (e.g. ServerRestarted with alertKey "reboot") and for
+            incidents outside an alert lifecycle.
+          x-since: after-1.0.19
+
+    IncidentType:
+      type: integer
+      format: int32
+      description: |
+        0 CpuThresholdBreached, 1 CpuSpikeDetected, 2 RamThresholdBreached, 3 RamSpikeDetected,
+        4 DiskCritical, 5 DiskQueueHigh, 6 NetworkQueueSaturated, 7 ServiceDown, 8 ServiceRestarted,
+        9 ServiceRestartFailed, 10 ApplicationPoolDown, 11 ApplicationPoolStarted,
+        12 ApplicationPoolStartFailed, 13 EndpointDown, 14 EndpointRecovered,
+        15 CertificateExpiring, 16 ServerRestarted. Numbers never change; new types are appended,
+        so accept (store and display) a number not in this list.
+      x-extensible-enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+      x-enum-names: [CpuThresholdBreached, CpuSpikeDetected, RamThresholdBreached, RamSpikeDetected, DiskCritical, DiskQueueHigh, NetworkQueueSaturated, ServiceDown, ServiceRestarted, ServiceRestartFailed, ApplicationPoolDown, ApplicationPoolStarted, ApplicationPoolStartFailed, EndpointDown, EndpointRecovered, CertificateExpiring, ServerRestarted]
+
+    ProcessInfo:
+      type: object
+      required: [name, pid, cpuSeconds, memoryMb, cpuPercent]
+      properties:
+        name:
+          type: string
+          description: Process name without extension.
+        pid:
+          type: integer
+          format: int32
+        cpuSeconds:
+          type: number
+          minimum: 0
+          description: Total processor time the process has used since it started, in seconds.
+        memoryMb:
+          type: number
+          minimum: 0
+          description: Working set in MiB.
+        cpuPercent:
+          type: number
+          minimum: 0
+          description: Share of total CPU over the sampling interval, percent of all logical processors.
+
+    ActionType:
+      type: integer
+      format: int32
+      description: |
+        101 ServiceStart, 102 ServiceStop, 103 ServiceRestart, 201 AppPoolStart, 202 AppPoolStop,
+        203 AppPoolRestart, 204 AppPoolRecycle, 301 ForceMetricSnapshot, 302 ForceConfigSync,
+        303 AgentRestart, 304 AgentUpdate, 401 ApplyConfiguration, 501 SendTestNotification.
+        Unknown numbers are accepted by the agent and answered with a failed result
+        ("Unknown action type: N").
+      x-extensible-enum: [101, 102, 103, 201, 202, 203, 204, 301, 302, 303, 304, 401, 501]
+      x-enum-names: [ServiceStart, ServiceStop, ServiceRestart, AppPoolStart, AppPoolStop, AppPoolRestart, AppPoolRecycle, ForceMetricSnapshot, ForceConfigSync, AgentRestart, AgentUpdate, ApplyConfiguration, SendTestNotification]
+
+    AgentCommand:
+      type: object
+      description: A command sent by the portal (portal to agent).
+      required: [commandId, actionType]
+      properties:
+        commandId:
+          type: string
+          minLength: 1
+          description: |
+            MUST be globally unique and never reused, not even to retry a failed command. The
+            agent remembers every id it has received (by default for 365 days and up to 200000
+            ids, independently of CommandPoll:RetentionDays) and never executes a known id
+            again, so a reused id is acknowledged but silently not executed. A UUID is
+            RECOMMENDED. A missing or blank commandId makes the agent ignore the command.
+        actionType:
+          $ref: '#/components/schemas/ActionType'
+        parameters:
+          type: [object, 'null']
+          description: |
+            Action parameters. Every value MUST be a JSON string (numbers and booleans are
+            encoded as strings, e.g. "30"). null or absent means no parameters.
+          additionalProperties:
+            type: string
+        scheduledAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Execute at or after this time. Values without an offset are taken as UTC. Absent,
+            null, unparseable or no more than 10 s in the future means execute now.
+        issuedAt:
+          type: string
+          format: date-time
+          description: |
+            When the portal issued the command, as an RFC 3339 timestamp (UTC RECOMMENDED; a
+            value without an offset is taken as UTC). Portals SHOULD send it; it becomes REQUIRED
+            in protocol v2. When present, and while CommandPoll:MaxCommandAgeSeconds is above 0
+            (default 3600), the agent rejects a command issued more than ClockSkewSeconds
+            (default 300 s) in the future or longer ago than MaxCommandAgeSeconds +
+            ClockSkewSeconds (default 3900 s; the exact limits are accepted), and one whose
+            value it cannot parse. A rejected command is never acknowledged or executed; its
+            result is `success: false` with the message "Rejected: " followed by
+            "command is stale: issuedAt <t> is more than 3900s old (...)", "issuedAt <t> is more
+            than 300s in the future (...)" or "unparseable issuedAt '<value>'". When absent, the
+            command is accepted, acknowledged and executed, with a one-time warning in the
+            agent log (see `GET commands/pending`), unless the operator set
+            VisibilityPortal:RequireCommandIssuedAt to true: the command is then rejected the
+            same way with "Rejected: issuedAt is required", even when MaxCommandAgeSeconds is 0.
+            Generate it when the command is created, never from a fixed literal.
+
+    AcknowledgeCommand:
+      type: object
+      required: [commandId, acknowledgedAt]
+      properties:
+        commandId:
+          type: string
+          minLength: 1
+          description: Same value as the commandId path parameter.
+        acknowledgedAt:
+          $ref: '#/components/schemas/Timestamp'
+
+    CommandResult:
+      type: object
+      required: [commandId, success, message, executedAt]
+      properties:
+        commandId:
+          type: string
+          minLength: 1
+          description: Same value as the commandId path parameter.
+        success:
+          type: boolean
+        message:
+          type: string
+          description: 'Human-readable outcome written by the agent (English). Do not parse it, except that a message starting with "Rejected: " means the command never ran (refused for its issuedAt, or expired before it could run after an agent restart), and one starting with "Interrupted: " means it was running when the agent stopped and its outcome is unknown.'
+        executedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: When execution started (or when the command was refused or found interrupted).
+
+    ConfigFetchResponse:
+      type: object
+      description: Both properties are needed; if either is null the agent treats the response as no change.
+      required: [config, version]
+      properties:
+        config:
+          $ref: '#/components/schemas/RemoteAgentConfig'
+        version:
+          type: string
+          minLength: 1
+          description: Opaque version label, echoed back in GET config?version= and in the acknowledgement.
+
+    RemoteAgentConfig:
+      type: object
+      description: |
+        Settings the portal may change. Every section and every property is optional; absent or
+        null means "use the agent's local setting". Anything not listed here cannot be changed
+        remotely. The agent validates the whole object and rejects it as a whole when any
+        value is out of range; in addition to the per-field ranges below,
+        disk.warningThresholdPercent MUST NOT be greater than disk.criticalThresholdPercent
+        when both are present.
+      properties:
+        cpu:
+          $ref: '#/components/schemas/RemoteCpuConfig'
+        ram:
+          $ref: '#/components/schemas/RemoteRamConfig'
+        disk:
+          $ref: '#/components/schemas/RemoteDiskConfig'
+        network:
+          $ref: '#/components/schemas/RemoteNetworkConfig'
+        services:
+          $ref: '#/components/schemas/RemoteServiceConfig'
+        appPools:
+          $ref: '#/components/schemas/RemoteAppPoolConfig'
+        portal:
+          $ref: '#/components/schemas/RemotePortalConfig'
+        maintenance:
+          $ref: '#/components/schemas/RemoteMaintenanceConfig'
+
+    IntervalSeconds:
+      type: [integer, 'null']
+      minimum: 1
+      maximum: 86400
+      description: Whole seconds, 1 to 86400. A fractional number makes the whole configuration unreadable.
+
+    Percent:
+      type: [number, 'null']
+      minimum: 1
+      maximum: 100
+
+    QueueThreshold:
+      type: [number, 'null']
+      minimum: 0
+      maximum: 10000
+
+    WatchedNames:
+      type: [array, 'null']
+      maxItems: 200
+      description: |
+        Replaces the local list entirely (it is not merged). Names may contain letters, digits,
+        underscore, space and . - $ @ ( ). An empty array means "watch nothing".
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+        pattern: '^[\w .\-$@()]+$'
+
+    RemoteCpuConfig:
+      type: [object, 'null']
+      properties:
+        pollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        thresholdPercent:
+          $ref: '#/components/schemas/Percent'
+        sustainedSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+
+    RemoteRamConfig:
+      type: [object, 'null']
+      properties:
+        pollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        thresholdPercent:
+          $ref: '#/components/schemas/Percent'
+        sustainedSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+
+    RemoteDiskConfig:
+      type: [object, 'null']
+      properties:
+        pollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        warningThresholdPercent:
+          $ref: '#/components/schemas/Percent'
+        criticalThresholdPercent:
+          $ref: '#/components/schemas/Percent'
+        queueLengthWarningThreshold:
+          $ref: '#/components/schemas/QueueThreshold'
+
+    RemoteNetworkConfig:
+      type: [object, 'null']
+      properties:
+        pollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        outputQueueWarningThreshold:
+          $ref: '#/components/schemas/QueueThreshold'
+
+    RemoteServiceConfig:
+      type: [object, 'null']
+      properties:
+        pollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        watchedServices:
+          $ref: '#/components/schemas/WatchedNames'
+
+    RemoteAppPoolConfig:
+      type: [object, 'null']
+      properties:
+        pollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        watchedApplicationPools:
+          $ref: '#/components/schemas/WatchedNames'
+
+    RemotePortalConfig:
+      type: [object, 'null']
+      properties:
+        outboxFlushIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        commandPollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+        remoteConfigPollIntervalSeconds:
+          $ref: '#/components/schemas/IntervalSeconds'
+
+    RemoteMaintenanceConfig:
+      type: [object, 'null']
+      description: |
+        A maintenance window set by the portal. It takes precedence over a window the operator
+        set locally. untilUtc may be at most 7 days (plus 5 minutes of clock-skew allowance)
+        in the future; a past value ends the window; omitting maintenance from a later
+        configuration version hands control back to the local setting.
+      x-since: after-1.0.19
+      properties:
+        untilUtc:
+          type: [string, 'null']
+          format: date-time
+          description: End of the window. Values without an offset are taken as UTC.
+        reason:
+          type: [string, 'null']
+          maxLength: 500
+
+    ConfigAcknowledge:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: string
+          minLength: 1
+          description: The version the agent applied.
+
+    EnrollmentCodePayload:
+      type: object
+      description: |
+        Not an HTTP body. The JSON inside an enrollment code: "WT1." followed by the
+        base64url encoding (RFC 4648 section 5, padding removed) of the UTF-8 bytes of this
+        object. See guides/portal-api/03-authentication-and-enrollment.md.
+      required: [v, url, agentId, token]
+      properties:
+        v:
+          type: integer
+          const: 1
+          description: Payload version. Agents reject any other value.
+        url:
+          type: string
+          format: uri
+          pattern: '^[Hh][Tt][Tt][Pp][Ss]?://'
+          description: The portal BaseUrl (http or https, may contain a path prefix).
+        agentId:
+          type: string
+          minLength: 1
+          description: Leading and trailing whitespace is trimmed by the agent.
+        token:
+          type: string
+          minLength: 1
+          description: Leading and trailing whitespace is trimmed by the agent.
+        requireTls:
+          type: boolean
+          description: Value for Tls:RequireTls. When absent, true for https URLs and false for http URLs.
+
+  examples:
+    MetricsBatchFull:
+      summary: A batch from a current agent with every section populated
+      value:
+        agentId: SRV-WEB-01
+        batchId: 0b6f3c1e-8f6c-4d8e-9a43-3c2a7d5e9b11
+        batchedAt: '2026-11-03T10:15:30.0000000Z'
+        cpuMetrics:
+          - timestamp: '2026-11-03T10:15:00.0000000Z'
+            usagePercent: 12.5
+          - timestamp: '2026-11-03T10:15:05.0000000Z'
+            usagePercent: 14.1
+        ramMetrics:
+          - timestamp: '2026-11-03T10:15:00.0000000Z'
+            usagePercent: 61.2
+            availableMb: 6355.4
+            totalMb: 16384
+        diskMetrics:
+          - timestamp: '2026-11-03T10:14:30.0000000Z'
+            driveName: 'C:\'
+            totalGb: 126.4
+            freeGb: 40.2
+            usagePercent: 68.2
+            isStale: false
+          - timestamp: '2026-11-01T06:12:00.0000000Z'
+            driveName: 'D:\'
+            totalGb: 931.5
+            freeGb: 210.7
+            usagePercent: 77.4
+            isStale: true
+        diskQueueMetrics:
+          - timestamp: '2026-11-03T10:14:30.0000000Z'
+            instanceName: '0 C:'
+            queueLength: 0.4
+            isStale: false
+        networkMetrics:
+          - timestamp: '2026-11-03T10:15:00.0000000Z'
+            interfaceName: Intel[R] 82574L Gigabit Network Connection
+            outputQueueLength: 0
+            isStale: false
+        serviceStatuses:
+          - timestamp: '2026-11-03T10:15:10.0000000Z'
+            serviceName: W3SVC
+            displayName: World Wide Web Publishing Service
+            status: Running
+            isRunning: true
+            isStale: false
+        applicationPoolStatuses:
+          - timestamp: '2026-11-03T10:15:10.0000000Z'
+            applicationPoolName: DefaultAppPool
+            status: Started
+            isRunning: true
+            isStale: false
+        agent:
+          version: 1.6.0
+          machineName: SRV-WEB-01
+          os: Microsoft Windows 10.0.20348
+          startedAt: '2026-11-03T08:00:00.0000000+00:00'
+          uptimeSeconds: 8130
+          updatePhase: UpToDate
+          lastUpdateResult:
+            toVersion: 1.6.0
+            success: true
+            completedAt: '2026-11-03T07:59:41.0000000+00:00'
+          maintenance:
+            active: false
+        endpointStatuses:
+          - timestamp: '2026-11-03T10:15:20.0000000Z'
+            name: shop-home
+            type: Http
+            target: https://shop.example.com/
+            status: Up
+            isUp: true
+            responseTimeMs: 182
+            certificateDaysLeft: 61.4
+            detail: HTTP 200
+            isStale: false
+          - timestamp: '2026-11-03T09:58:41.0000000Z'
+            name: sql-port
+            type: Tcp
+            target: sql01.corp.local:1433
+            status: ConfigurationError
+            isUp: true
+            responseTimeMs: 3.1
+            detail: 'Configuration error: Monitoring:Endpoints:1:Target must be host:port. Last result: Up: Connected'
+            isStale: true
+    MetricsBatchMinimal:
+      summary: A batch as sent by an agent up to 1.0.18 (no batchId, agent or endpointStatuses)
+      value:
+        agentId: SRV-WEB-01
+        batchedAt: '2026-11-03T10:15:30.0000000Z'
+        cpuMetrics:
+          - timestamp: '2026-11-03T10:15:00.0000000Z'
+            usagePercent: 12.5
+        ramMetrics: []
+        diskMetrics: []
+        diskQueueMetrics: []
+        networkMetrics: []
+        serviceStatuses: []
+        applicationPoolStatuses: []
+    EventCpuOpened:
+      summary: An alert opened (CPU above threshold)
+      value:
+        eventId: 7d0c2f8e-1b5a-4f0e-8c3d-2a9e6b4f1c22
+        timestamp: '2026-11-03T10:20:00.0000000Z'
+        incidentType: 0
+        description: CPU at 99.6% for over 300s
+        topProcesses:
+          - name: w3wp
+            pid: 4412
+            cpuSeconds: 1890.2
+            memoryMb: 812.5
+            cpuPercent: 71.3
+        alertKey: cpu
+        resolved: false
+    EventCpuResolved:
+      summary: The same alert cleared (no dedicated recovery type, so incidentType repeats the opening type)
+      value:
+        eventId: 1e4b7a90-6c2d-4e8f-b1a3-5d7c9e0f2a33
+        timestamp: '2026-11-03T10:31:00.0000000Z'
+        incidentType: 0
+        description: 'Resolved after 11 min: CPU at 99.6% for over 300s'
+        alertKey: cpu
+        resolved: true
+    EventServiceRestarted:
+      summary: A recovery event closing a svc alert
+      value:
+        eventId: 9a3e5c71-2d4b-4f6a-8e1c-7b0d3f5a9c44
+        timestamp: '2026-11-03T11:02:00.0000000Z'
+        incidentType: 8
+        description: Service 'World Wide Web Publishing Service' (W3SVC) was found stopped and restarted successfully
+        alertKey: svc:W3SVC
+        resolved: true
+    EventServerRestarted:
+      summary: A one-shot event (alertKey without resolved)
+      value:
+        eventId: 2c8f1a6d-9e3b-4c7a-a5d2-6f0e8b1c3d55
+        timestamp: '2026-11-03T06:00:12.0000000Z'
+        incidentType: 16
+        description: 'The server restarted at 2026-11-03 05:58 UTC. WatchTower was not stopped cleanly before it: possible crash, power loss or forced reset.'
+        alertKey: reboot
+    EventServiceDown:
+      summary: An incident outside an alert lifecycle (no alertKey, no resolved)
+      value:
+        eventId: 5f2d8b3a-7c1e-4a9f-b6d0-3e8a1c5f7b66
+        timestamp: '2026-11-03T11:00:30.0000000Z'
+        incidentType: 7
+        description: Service 'World Wide Web Publishing Service' (W3SVC) is Stopped
+    PendingCommands:
+      summary: Three pending commands
+      value:
+        - commandId: 6f1c9a52-6a43-4f3c-9d55-0d9c2b7f4e10
+          actionType: 103
+          parameters:
+            ServiceName: W3SVC
+            TimeoutSeconds: '60'
+          issuedAt: '2026-11-03T10:40:00Z'
+        - commandId: 3b7e2d14-8c5f-4a61-9e2b-1d4f6a8c0e21
+          actionType: 301
+          parameters: {}
+          issuedAt: '2026-11-03T10:40:05Z'
+        - commandId: c4a8e6f2-1b3d-4e5f-8a7c-9d0b2e4f6a32
+          actionType: 204
+          parameters:
+            AppPoolName: ShopPool
+          scheduledAt: '2026-11-03T23:00:00Z'
+          issuedAt: '2026-11-03T10:41:00Z'
+    AcknowledgeCommand:
+      value:
+        commandId: 6f1c9a52-6a43-4f3c-9d55-0d9c2b7f4e10
+        acknowledgedAt: '2026-11-03T10:40:12.4410000Z'
+    CommandResultSuccess:
+      value:
+        commandId: 6f1c9a52-6a43-4f3c-9d55-0d9c2b7f4e10
+        success: true
+        message: Service 'W3SVC' restarted successfully
+        executedAt: '2026-11-03T10:40:12.4520000Z'
+    CommandResultRefused:
+      summary: A target outside the local allow-list
+      value:
+        commandId: 8e1f3a5c-7b9d-4c2e-a4f6-0b8d2c4e6f43
+        success: false
+        message: "Not authorized: 'WinDefend' is not a locally watched service"
+        executedAt: '2026-11-03T10:42:00.1000000Z'
+    CommandResultInterrupted:
+      summary: The agent stopped while the command ran
+      value:
+        commandId: d2b4f6a8-0c1e-4a3b-8d5f-7e9a1c3b5d54
+        success: false
+        message: 'Interrupted: the agent stopped while this command was running; its outcome is unknown'
+        executedAt: '2026-11-03T10:50:03.0000000Z'
+    ConfigThresholds:
+      summary: Tighter thresholds and a portal-managed service list
+      value:
+        version: '2026-11-03.4'
+        config:
+          cpu:
+            thresholdPercent: 90
+            sustainedSeconds: 600
+          disk:
+            warningThresholdPercent: 75
+            criticalThresholdPercent: 90
+          services:
+            watchedServices: [W3SVC, MSSQLSERVER]
+          portal:
+            commandPollIntervalSeconds: 15
+    ConfigMaintenance:
+      summary: A maintenance window pushed by the portal
+      value:
+        version: '2026-11-03.5'
+        config:
+          maintenance:
+            untilUtc: '2026-11-03T18:00:00Z'
+            reason: Patch Tuesday
+    ConfigEmpty:
+      summary: Clear every remote override (all settings fall back to local values)
+      value:
+        version: '2026-11-03.6'
+        config: {}
+    ConfigAcknowledge:
+      value:
+        version: '2026-11-03.4'

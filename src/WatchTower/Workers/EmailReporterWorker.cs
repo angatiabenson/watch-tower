@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Portal.Storage;
 using WatchTower.Services.Abstractions;
 
@@ -20,12 +22,26 @@ public class EmailReporterWorker : BackgroundService
     // Persisted marker (survives restarts and purges) recording the local date of the
     // last successfully-sent daily report, so a restart after the scheduled time does
     // not silently skip that day's report.
-    private readonly string _lastReportMarkerPath =
-        Path.Combine(AppContext.BaseDirectory, "last-report.txt");
+    private readonly string _lastReportMarkerPath;
 
     // Backstop retention used only when the daily report repeatedly fails to send, so the
     // metric tables stay bounded without losing the most recent data.
     private const int SafetyRetentionHours = 48;
+
+    /// <summary>
+    /// Waits between attempts after a failed daily report send. Once exhausted, the worker
+    /// waits for the next scheduled report instead.
+    /// </summary>
+    internal static readonly IReadOnlyList<TimeSpan> RetryDelays = new[]
+    {
+        TimeSpan.FromMinutes(5),
+        TimeSpan.FromMinutes(15),
+        TimeSpan.FromMinutes(30),
+        TimeSpan.FromMinutes(60),
+    };
+
+    /// <summary>Delay used between retries; replaceable in tests to observe the schedule.</summary>
+    internal Func<TimeSpan, CancellationToken, Task> RetryDelayAsync { get; set; }
 
     public EmailReporterWorker(
         IReportBuilder reportBuilder,
@@ -36,9 +52,11 @@ public class EmailReporterWorker : BackgroundService
         IOptionsMonitor<DisplayOptions> displayOptions,
         IOptionsMonitor<PortalOptions> portalOptions,
         TimeProvider timeProvider,
+        WatchTowerPaths paths,
         ILogger<EmailReporterWorker> logger
     )
     {
+        _lastReportMarkerPath = paths.LastReportMarkerPath;
         _reportBuilder = reportBuilder;
         _emailService = emailService;
         _metricsStore = metricsStore;
@@ -48,6 +66,7 @@ public class EmailReporterWorker : BackgroundService
         _portalOptions = portalOptions;
         _timeProvider = timeProvider;
         _logger = logger;
+        RetryDelayAsync = (delay, ct) => Task.Delay(delay, _timeProvider, ct);
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -74,7 +93,7 @@ public class EmailReporterWorker : BackgroundService
             if (IsReportOwed())
             {
                 _logger.LogInformation("Daily report is owed for today; running catch-up report");
-                await RunDailyReportAsync(stoppingToken);
+                await RunDailyReportWithRetriesAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -95,7 +114,7 @@ public class EmailReporterWorker : BackgroundService
 
                 await Task.Delay(delay, _timeProvider, stoppingToken);
 
-                await RunDailyReportAsync(stoppingToken);
+                await RunDailyReportWithRetriesAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -111,13 +130,59 @@ public class EmailReporterWorker : BackgroundService
         _logger.LogInformation("Email Reporter Worker stopped");
     }
 
-    /// <summary>Builds and sends the daily report, purging only on confirmed delivery. Exposed for testing.</summary>
-    internal async Task RunDailyReportAsync(CancellationToken stoppingToken)
+    internal enum DailyReportOutcome
     {
+        Sent,
+        SendFailed,
+        EmailNotConfigured,
+    }
+
+    /// <summary>
+    /// Runs the daily report and, if sending fails, retries after each of
+    /// <see cref="RetryDelays"/> (5, 15, 30, 60 min) before giving up until the next scheduled
+    /// report. Previously a single failed send meant no report for a full day.
+    /// </summary>
+    internal async Task RunDailyReportWithRetriesAsync(CancellationToken stoppingToken)
+    {
+        // Pin the reporting day up front so a retry that succeeds after local midnight marks
+        // the day it was scheduled for, not the next one (which would skip that day's report).
+        var reportDate = LocalToday(GetConfiguredZone());
+
+        var outcome = await RunDailyReportAsync(stoppingToken, reportDate);
+        for (var attempt = 0; outcome == DailyReportOutcome.SendFailed && attempt < RetryDelays.Count; attempt++)
+        {
+            var delay = RetryDelays[attempt];
+            _logger.LogWarning(
+                "Daily report send failed; retry {Attempt}/{Total} in {Minutes} min",
+                attempt + 1, RetryDelays.Count, delay.TotalMinutes);
+
+            await RetryDelayAsync(delay, stoppingToken);
+            outcome = await RunDailyReportAsync(stoppingToken, reportDate);
+        }
+
+        if (outcome == DailyReportOutcome.SendFailed)
+            _logger.LogError("Daily report could not be sent after {Count} retries; waiting for the next scheduled report",
+                RetryDelays.Count);
+    }
+
+    /// <summary>Builds and sends the daily report, purging only on confirmed delivery. Exposed for testing.</summary>
+    internal async Task<DailyReportOutcome> RunDailyReportAsync(
+        CancellationToken stoppingToken, DateOnly? reportDate = null)
+    {
+        var zone = GetConfiguredZone();
+
+        if (!_emailService.IsConfigured)
+        {
+            // Nothing can be delivered: skip building the report and do not retry. The
+            // backstop purge still keeps the tables bounded.
+            _logger.LogWarning("Daily report skipped: SMTP is not configured (age-based backstop purge only)");
+            _metricsStore.Purge(TimeSpan.FromHours(SafetyRetentionHours));
+            return DailyReportOutcome.EmailNotConfigured;
+        }
+
         _logger.LogInformation("Generating daily scheduled report");
 
         var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var zone = GetConfiguredZone();
         var localTime = TimeZoneInfo.ConvertTimeFromUtc(report.GeneratedAt, zone);
         var html = _reportBuilder.RenderScheduledReportHtml(report);
 
@@ -134,18 +199,19 @@ public class EmailReporterWorker : BackgroundService
             // cannot grow without bound if email stays down for days.
             _logger.LogError("Daily report send failed; metrics data preserved (age-based backstop purge only)");
             _metricsStore.Purge(TimeSpan.FromHours(SafetyRetentionHours));
-            return;
+            return DailyReportOutcome.SendFailed;
         }
 
-        // Mark today as reported before purging so a crash mid-purge cannot cause a
+        // Mark the day as reported before purging so a crash mid-purge cannot cause a
         // duplicate report tomorrow.
-        WriteLastReportDate(LocalToday(zone));
+        WriteLastReportDate(reportDate ?? LocalToday(zone));
 
-        await PurgeAfterReportAsync();
+        await PurgeAfterReportAsync(report.GeneratedAt);
         _logger.LogInformation("Metrics data purged after daily report");
+        return DailyReportOutcome.Sent;
     }
 
-    private async Task PurgeAfterReportAsync()
+    private async Task PurgeAfterReportAsync(DateTime reportSnapshotUtc)
     {
         long cpuFloor, ramFloor;
         if (_portalOptions.CurrentValue.Enabled)
@@ -161,7 +227,8 @@ public class EmailReporterWorker : BackgroundService
             ramFloor = long.MaxValue;
         }
 
-        var result = _metricsStore.PurgeReportedData(cpuFloor, ramFloor);
+        // Incidents recorded after the report snapshot were not in it; keep them for the next one.
+        var result = _metricsStore.PurgeReportedData(cpuFloor, ramFloor, reportSnapshotUtc);
 
         // SQLite reuses rowids from 1 once a table is emptied; reset the cursors so the
         // next batch is not skipped (cursor would otherwise be greater than every new rowid).

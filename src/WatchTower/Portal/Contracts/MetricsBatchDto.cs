@@ -10,36 +10,84 @@ public record MetricsBatchDto(
     List<DiskQueueMetricDto> DiskQueueMetrics,
     List<NetworkMetricDto> NetworkMetrics,
     List<ServiceStatusDto> ServiceStatuses,
-    List<ApplicationPoolStatusDto> ApplicationPoolStatuses
+    List<ApplicationPoolStatusDto> ApplicationPoolStatuses,
+    AgentTelemetryDto? Agent = null,
+    List<EndpointStatusDto>? EndpointStatuses = null
 );
+
+/// <summary>Agent self-description sent with every batch (omitted by older agents).</summary>
+public record AgentTelemetryDto(
+    string Version,
+    string MachineName,
+    string Os,
+    string StartedAt,
+    long UptimeSeconds,
+    string UpdatePhase,
+    string? AvailableVersion,
+    AgentUpdateResultDto? LastUpdateResult,
+    MaintenanceTelemetryDto? Maintenance = null
+);
+
+/// <summary>Maintenance window state (omitted by older agents). <c>UntilUtc</c> is ISO-8601 UTC.</summary>
+public record MaintenanceTelemetryDto(bool Active, string? UntilUtc, string? Reason);
+
+public record AgentUpdateResultDto(string ToVersion, bool Success, string CompletedAt);
 
 public record CpuMetricDto(string Timestamp, double UsagePercent);
 
 public record RamMetricDto(string Timestamp, double UsagePercent, double AvailableMb, double TotalMb);
+
+// Snapshot entries (last-known reading per resource) carry IsStale: true when the reading is older
+// than its freshness window when the batch is built (see Services.SnapshotFreshness), false
+// otherwise. Null only in a batch queued by an agent that predates it (sent without isStale).
 
 public record DiskMetricDto(
     string Timestamp,
     string DriveName,
     double TotalGb,
     double FreeGb,
-    double UsagePercent
+    double UsagePercent,
+    bool? IsStale = null
 );
 
-public record DiskQueueMetricDto(string Timestamp, string InstanceName, double QueueLength);
+public record DiskQueueMetricDto(string Timestamp, string InstanceName, double QueueLength, bool? IsStale = null);
 
-public record NetworkMetricDto(string Timestamp, string InterfaceName, double OutputQueueLength);
+public record NetworkMetricDto(string Timestamp, string InterfaceName, double OutputQueueLength, bool? IsStale = null);
 
 public record ServiceStatusDto(
     string Timestamp,
     string ServiceName,
     string DisplayName,
     string Status,
-    bool IsRunning
+    bool IsRunning,
+    bool? IsStale = null
+);
+
+/// <summary>Latest endpoint check result (omitted when no endpoints are configured, and by older agents).</summary>
+/// <param name="Type">Http | Tcp | Certificate.</param>
+/// <param name="Target">Target without credentials or query string.</param>
+/// <param name="Status">
+/// Up | Down | Expiring | ConfigurationError (open set). ConfigurationError: the check is
+/// configured but invalid and not running; the other fields, isUp included, are its last result.
+/// </param>
+/// <param name="IsStale">Computed like every snapshot entry's, ConfigurationError included.</param>
+public record EndpointStatusDto(
+    string Timestamp,
+    string Name,
+    string Type,
+    string Target,
+    string Status,
+    bool IsUp,
+    double? ResponseTimeMs,
+    double? CertificateDaysLeft,
+    string? Detail,
+    bool? IsStale = null
 );
 
 public record ApplicationPoolStatusDto(
     string Timestamp,
     string ApplicationPoolName,
     string Status,
-    bool IsRunning
+    bool IsRunning,
+    bool? IsStale = null
 );

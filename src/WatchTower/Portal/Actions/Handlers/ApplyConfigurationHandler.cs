@@ -1,4 +1,9 @@
 using System.Text.Json;
+
+using Microsoft.Extensions.Options;
+
+using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Storage;
 
@@ -6,7 +11,13 @@ namespace WatchTower.Portal.Actions.Handlers;
 
 public class ApplyConfigurationHandler : IActionHandler
 {
+    /// <summary>The result when the operator turned off portal-managed settings.</summary>
+    public const string DisabledMessage =
+        "Rejected: this server does not let the portal manage its settings (VisibilityPortal:RemoteConfig:Enabled is false)";
+
     private readonly IRemoteConfigStore _configStore;
+    private readonly WatchTowerPaths _paths;
+    private readonly IOptionsMonitor<PortalOptions> _portal;
     private readonly ILogger<ApplyConfigurationHandler> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -18,15 +29,27 @@ public class ApplyConfigurationHandler : IActionHandler
 
     public ApplyConfigurationHandler(
         IRemoteConfigStore configStore,
+        WatchTowerPaths paths,
+        IOptionsMonitor<PortalOptions> portal,
         ILogger<ApplyConfigurationHandler> logger)
     {
         _configStore = configStore;
+        _paths = paths;
+        _portal = portal;
         _logger = logger;
     }
 
     public async Task<ActionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, CancellationToken ct)
     {
+        // "Allow the portal to manage settings" covers both ways the portal can push settings:
+        // config polling and this command.
+        if (!_portal.CurrentValue.RemoteConfig.Enabled)
+        {
+            _logger.LogWarning("ApplyConfiguration refused: the portal may not manage this server's settings");
+            return new ActionResult(false, DisabledMessage);
+        }
+
         if (!parameters.TryGetValue("ConfigJson", out var configJson) ||
             string.IsNullOrWhiteSpace(configJson))
             return new ActionResult(false, "Missing ConfigJson parameter");
@@ -53,16 +76,17 @@ public class ApplyConfigurationHandler : IActionHandler
 
         var version = parameters.TryGetValue("Version", out var v) ? v : Guid.NewGuid().ToString();
 
+        // Write the overlay first: only record the version once it is actually in effect.
+        await WriteRemoteConfigFileAsync(_paths.RemoteConfigFilePath, config, ct);
         await _configStore.SaveConfigAsync(config, version);
-        await WriteRemoteConfigFileAsync(config, ct);
 
         _logger.LogInformation("Remote configuration applied (version {Version})", version);
         return new ActionResult(true, $"Configuration applied (version {version})");
     }
 
-    internal static async Task WriteRemoteConfigFileAsync(RemoteAgentConfigDto config, CancellationToken ct)
+    internal static async Task WriteRemoteConfigFileAsync(string filePath, RemoteAgentConfigDto config, CancellationToken ct)
     {
-        var filePath = Path.Combine(AppContext.BaseDirectory, "remote-config.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
         var tempPath = filePath + ".tmp";
 
         var json = BuildConfigFileJson(config);
@@ -147,6 +171,16 @@ public class ApplyConfigurationHandler : IActionHandler
             if (commandPoll.Count > 0) portal["CommandPoll"] = commandPoll;
             if (remoteConfig.Count > 0) portal["RemoteConfig"] = remoteConfig;
             if (portal.Count > 0) root["VisibilityPortal"] = portal;
+        }
+
+        if (config.Maintenance != null)
+        {
+            var maintenance = new Dictionary<string, object?>();
+            if (config.Maintenance.UntilUtc != null &&
+                Services.Alerting.MaintenanceState.TryParseUntil(config.Maintenance.UntilUtc, out var until))
+                maintenance["Until"] = Services.Alerting.MaintenanceState.Format(until);
+            if (config.Maintenance.Reason != null) maintenance["Reason"] = config.Maintenance.Reason.Trim();
+            if (maintenance.Count > 0) root["Maintenance"] = maintenance;
         }
 
         return JsonSerializer.Serialize(root, new JsonSerializerOptions { WriteIndented = true });

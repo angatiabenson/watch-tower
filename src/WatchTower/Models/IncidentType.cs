@@ -17,4 +17,8 @@ public enum IncidentType
     ApplicationPoolDown = 10,
     ApplicationPoolStarted = 11,
     ApplicationPoolStartFailed = 12,
+    EndpointDown = 13,
+    EndpointRecovered = 14,
+    CertificateExpiring = 15,
+    ServerRestarted = 16,
 }

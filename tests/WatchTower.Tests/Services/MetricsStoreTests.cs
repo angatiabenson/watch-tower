@@ -1,4 +1,5 @@
-using FluentAssertions;
+using AwesomeAssertions;
+
 using WatchTower.Models;
 using WatchTower.Services;
 
@@ -118,5 +119,19 @@ public class MetricsStoreTests
 
         var result = _store.GetIncidents(TimeSpan.FromHours(10));
         result.Should().ContainSingle().Which.Should().Be(recent);
+    }
+
+    [Fact]
+    public void PurgeReportedData_KeepsIncidentsAfterCutoff()
+    {
+        var cutoff = DateTime.UtcNow;
+        var reported = new Incident(cutoff.AddMinutes(-1), IncidentType.DiskCritical, "reported");
+        var later = new Incident(cutoff.AddSeconds(1), IncidentType.ServiceDown, "later");
+        _store.AddIncident(reported);
+        _store.AddIncident(later);
+
+        _store.PurgeReportedData(long.MaxValue, long.MaxValue, cutoff);
+
+        _store.GetIncidents(TimeSpan.FromHours(1)).Should().ContainSingle().Which.Should().Be(later);
     }
 }

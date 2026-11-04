@@ -1,7 +1,9 @@
 using Grpc.Core;
 using Grpc.Net.Client;
+
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Contracts.Protobuf;
@@ -26,7 +28,10 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         _logger = logger;
 
         var opts = options.CurrentValue;
-        var channelOptions = new GrpcChannelOptions();
+
+        // Same transport policy as the HTTPS client: with RequireTls the BaseUrl must be https,
+        // otherwise the bearer token and remote commands would travel in plaintext (h2c).
+        PortalTls.EnsureTransportAllowed(opts);
 
         if (opts.Tls.AllowUntrustedCert)
         {
@@ -39,15 +44,16 @@ public class GrpcPortalClient : IPortalClient, IDisposable
             _logger.LogWarning(
                 "TLS certificate validation is DISABLED for the portal connection (AllowUntrustedCert=true). " +
                 "This is unsafe and must only be used in development.");
-
-            var handler = new HttpClientHandler
-            {
-                ServerCertificateCustomValidationCallback =
-                    HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-            };
-            channelOptions.HttpHandler = handler;
         }
 
+        // Throws a descriptive InvalidOperationException if ClientCertThumbprint is set but the
+        // certificate cannot be loaded, rather than silently connecting without mutual TLS.
+        var handler = PortalTls.CreateHandler(opts.Tls, allowUntrustedServerCert: opts.Tls.AllowUntrustedCert);
+        if (handler.SslOptions.ClientCertificates is { Count: > 0 })
+            _logger.LogInformation("Presenting client certificate {Thumbprint} to the portal (gRPC)",
+                PortalTls.NormalizeThumbprint(opts.Tls.ClientCertThumbprint!));
+
+        var channelOptions = new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true };
         _channel = GrpcChannel.ForAddress(opts.BaseUrl, channelOptions);
         _client = new WatchTowerPortalService.WatchTowerPortalServiceClient(_channel);
     }
@@ -75,33 +81,54 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         try
         {
             var payload = new MetricsBatchPayload { BatchedAt = batch.BatchedAt, BatchId = batch.BatchId };
+            if (batch.Agent is { } agent)
+            {
+                payload.Agent = new AgentTelemetryProto
+                {
+                    Version = agent.Version,
+                    MachineName = agent.MachineName,
+                    Os = agent.Os,
+                    StartedAt = agent.StartedAt,
+                    UptimeSeconds = agent.UptimeSeconds,
+                    UpdatePhase = agent.UpdatePhase,
+                };
+                if (agent.AvailableVersion is not null)
+                    payload.Agent.AvailableVersion = agent.AvailableVersion;
+                if (agent.Maintenance is { } maintenance)
+                {
+                    payload.Agent.Maintenance = new MaintenanceProto { Active = maintenance.Active };
+                    if (maintenance.UntilUtc is not null)
+                        payload.Agent.Maintenance.UntilUtc = maintenance.UntilUtc;
+                    if (maintenance.Reason is not null)
+                        payload.Agent.Maintenance.Reason = maintenance.Reason;
+                }
+                if (agent.LastUpdateResult is { } result)
+                    payload.Agent.LastUpdateResult = new UpdateResultProto
+                    {
+                        ToVersion = result.ToVersion,
+                        Success = result.Success,
+                        CompletedAt = result.CompletedAt,
+                    };
+            }
             payload.CpuMetrics.AddRange(
                 batch.CpuMetrics.Select(m => new CpuMetricProto
-                    { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent }));
+                { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent }));
             payload.RamMetrics.AddRange(
                 batch.RamMetrics.Select(m => new RamMetricProto
-                    { Timestamp = m.Timestamp, UsagePercent = m.UsagePercent,
-                      AvailableMb = m.AvailableMb, TotalMb = m.TotalMb }));
-            payload.DiskMetrics.AddRange(
-                batch.DiskMetrics.Select(m => new DiskMetricProto
-                    { Timestamp = m.Timestamp, DriveName = m.DriveName,
-                      TotalGb = m.TotalGb, FreeGb = m.FreeGb, UsagePercent = m.UsagePercent }));
-            payload.DiskQueueMetrics.AddRange(
-                batch.DiskQueueMetrics.Select(m => new DiskQueueMetricProto
-                    { Timestamp = m.Timestamp, InstanceName = m.InstanceName,
-                      QueueLength = m.QueueLength }));
-            payload.NetworkMetrics.AddRange(
-                batch.NetworkMetrics.Select(m => new NetworkMetricProto
-                    { Timestamp = m.Timestamp, InterfaceName = m.InterfaceName,
-                      OutputQueueLength = m.OutputQueueLength }));
-            payload.ServiceStatuses.AddRange(
-                batch.ServiceStatuses.Select(m => new ServiceStatusProto
-                    { Timestamp = m.Timestamp, ServiceName = m.ServiceName,
-                      DisplayName = m.DisplayName, Status = m.Status, IsRunning = m.IsRunning }));
-            payload.AppPoolStatuses.AddRange(
-                batch.ApplicationPoolStatuses.Select(m => new AppPoolStatusProto
-                    { Timestamp = m.Timestamp, AppPoolName = m.ApplicationPoolName,
-                      Status = m.Status, IsRunning = m.IsRunning }));
+                {
+                    Timestamp = m.Timestamp,
+                    UsagePercent = m.UsagePercent,
+                    AvailableMb = m.AvailableMb,
+                    TotalMb = m.TotalMb
+                }));
+            payload.DiskMetrics.AddRange(batch.DiskMetrics.Select(ToProto));
+            payload.DiskQueueMetrics.AddRange(batch.DiskQueueMetrics.Select(ToProto));
+            payload.NetworkMetrics.AddRange(batch.NetworkMetrics.Select(ToProto));
+            payload.ServiceStatuses.AddRange(batch.ServiceStatuses.Select(ToProto));
+            payload.AppPoolStatuses.AddRange(batch.ApplicationPoolStatuses.Select(ToProto));
+
+            if (batch.EndpointStatuses is { } endpoints)
+                payload.EndpointStatuses.AddRange(endpoints.Select(ToProto));
 
             var req = new MetricsBatchRequest { Identity = BuildIdentity(), Batch = payload };
             var reply = await _client.SendMetricsBatchAsync(req, headers: BuildMetadata(), deadline: Deadline(),
@@ -126,12 +153,19 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 IncidentType = evt.IncidentType,
                 Description = evt.Description,
             };
+            if (evt.AlertKey is not null)
+                protoEvt.AlertKey = evt.AlertKey;
+            if (evt.Resolved is { } resolved)
+                protoEvt.Resolved = resolved;
             if (evt.TopProcesses != null)
                 protoEvt.TopProcesses.AddRange(evt.TopProcesses.Select(p =>
                     new ProcessInfoProto
                     {
-                        Name = p.Name, Pid = p.Pid, CpuSeconds = p.CpuSeconds,
-                        MemoryMb = p.MemoryMb, CpuPercent = p.CpuPercent
+                        Name = p.Name,
+                        Pid = p.Pid,
+                        CpuSeconds = p.CpuSeconds,
+                        MemoryMb = p.MemoryMb,
+                        CpuPercent = p.CpuPercent
                     }));
 
             var req = new AgentEventRequest { Identity = BuildIdentity(), Event = protoEvt };
@@ -259,33 +293,149 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         }
     }
 
-    private static RemoteAgentConfigDto MapRemoteConfig(RemoteAgentConfig proto)
+    internal static EndpointStatusProto ToProto(EndpointStatusDto e)
+    {
+        var proto = new EndpointStatusProto
+        {
+            Timestamp = e.Timestamp,
+            Name = e.Name,
+            Type = e.Type,
+            Target = e.Target,
+            Status = e.Status,
+            IsUp = e.IsUp,
+        };
+        if (e.ResponseTimeMs is { } ms)
+            proto.ResponseTimeMs = ms;
+        if (e.CertificateDaysLeft is { } days)
+            proto.CertificateDaysLeft = days;
+        if (e.Detail is not null)
+            proto.Detail = e.Detail;
+        if (e.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    // Snapshot entries: is_stale is optional, so it is only set when the batch carries it (a
+    // batch queued by an agent that predates it has none, and unset means "unknown").
+
+    internal static DiskMetricProto ToProto(DiskMetricDto m)
+    {
+        var proto = new DiskMetricProto
+        {
+            Timestamp = m.Timestamp,
+            DriveName = m.DriveName,
+            TotalGb = m.TotalGb,
+            FreeGb = m.FreeGb,
+            UsagePercent = m.UsagePercent,
+        };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static DiskQueueMetricProto ToProto(DiskQueueMetricDto m)
+    {
+        var proto = new DiskQueueMetricProto { Timestamp = m.Timestamp, InstanceName = m.InstanceName, QueueLength = m.QueueLength };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static NetworkMetricProto ToProto(NetworkMetricDto m)
+    {
+        var proto = new NetworkMetricProto { Timestamp = m.Timestamp, InterfaceName = m.InterfaceName, OutputQueueLength = m.OutputQueueLength };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static ServiceStatusProto ToProto(ServiceStatusDto m)
+    {
+        var proto = new ServiceStatusProto
+        {
+            Timestamp = m.Timestamp,
+            ServiceName = m.ServiceName,
+            DisplayName = m.DisplayName,
+            Status = m.Status,
+            IsRunning = m.IsRunning,
+        };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static AppPoolStatusProto ToProto(ApplicationPoolStatusDto m)
+    {
+        var proto = new AppPoolStatusProto { Timestamp = m.Timestamp, AppPoolName = m.ApplicationPoolName, Status = m.Status, IsRunning = m.IsRunning };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    /// <summary>
+    /// Maps every section of the protobuf config onto the transport-neutral DTO. Scalar fields
+    /// are declared <c>optional</c> in the proto, so presence (not a zero value) decides whether a
+    /// setting is sent: an explicit 0 reaches <see cref="Actions.RemoteConfigValidator"/> and is
+    /// rejected there instead of being silently dropped. Repeated fields carry no presence on
+    /// the wire, so an empty watched list is treated as "not specified".
+    /// </summary>
+    internal static RemoteAgentConfigDto MapRemoteConfig(RemoteAgentConfig proto)
     {
         return new RemoteAgentConfigDto
         {
             Cpu = proto.Cpu == null ? null : new Contracts.RemoteCpuConfig
             {
-                PollIntervalSeconds = proto.Cpu.PollIntervalSeconds == 0 ? null : proto.Cpu.PollIntervalSeconds,
-                ThresholdPercent = proto.Cpu.ThresholdPercent == 0 ? null : proto.Cpu.ThresholdPercent,
-                SustainedSeconds = proto.Cpu.SustainedSeconds == 0 ? null : proto.Cpu.SustainedSeconds,
+                PollIntervalSeconds = proto.Cpu.HasPollIntervalSeconds ? proto.Cpu.PollIntervalSeconds : null,
+                ThresholdPercent = proto.Cpu.HasThresholdPercent ? proto.Cpu.ThresholdPercent : null,
+                SustainedSeconds = proto.Cpu.HasSustainedSeconds ? proto.Cpu.SustainedSeconds : null,
             },
             Ram = proto.Ram == null ? null : new Contracts.RemoteRamConfig
             {
-                PollIntervalSeconds = proto.Ram.PollIntervalSeconds == 0 ? null : proto.Ram.PollIntervalSeconds,
-                ThresholdPercent = proto.Ram.ThresholdPercent == 0 ? null : proto.Ram.ThresholdPercent,
-                SustainedSeconds = proto.Ram.SustainedSeconds == 0 ? null : proto.Ram.SustainedSeconds,
+                PollIntervalSeconds = proto.Ram.HasPollIntervalSeconds ? proto.Ram.PollIntervalSeconds : null,
+                ThresholdPercent = proto.Ram.HasThresholdPercent ? proto.Ram.ThresholdPercent : null,
+                SustainedSeconds = proto.Ram.HasSustainedSeconds ? proto.Ram.SustainedSeconds : null,
+            },
+            Disk = proto.Disk == null ? null : new Contracts.RemoteDiskConfig
+            {
+                PollIntervalSeconds = proto.Disk.HasPollIntervalSeconds ? proto.Disk.PollIntervalSeconds : null,
+                WarningThresholdPercent = proto.Disk.HasWarningThresholdPercent
+                    ? proto.Disk.WarningThresholdPercent : null,
+                CriticalThresholdPercent = proto.Disk.HasCriticalThresholdPercent
+                    ? proto.Disk.CriticalThresholdPercent : null,
+                QueueLengthWarningThreshold = proto.Disk.HasQueueLengthWarningThreshold
+                    ? proto.Disk.QueueLengthWarningThreshold : null,
+            },
+            Network = proto.Network == null ? null : new Contracts.RemoteNetworkConfig
+            {
+                PollIntervalSeconds = proto.Network.HasPollIntervalSeconds ? proto.Network.PollIntervalSeconds : null,
+                OutputQueueWarningThreshold = proto.Network.HasOutputQueueWarningThreshold
+                    ? proto.Network.OutputQueueWarningThreshold : null,
             },
             Services = proto.Services == null ? null : new Contracts.RemoteServiceConfig
             {
-                PollIntervalSeconds = proto.Services.PollIntervalSeconds == 0 ? null : proto.Services.PollIntervalSeconds,
+                PollIntervalSeconds = proto.Services.HasPollIntervalSeconds ? proto.Services.PollIntervalSeconds : null,
                 WatchedServices = proto.Services.WatchedServices.Count > 0
                     ? proto.Services.WatchedServices.ToList() : null,
             },
             AppPools = proto.AppPools == null ? null : new Contracts.RemoteAppPoolConfig
             {
-                PollIntervalSeconds = proto.AppPools.PollIntervalSeconds == 0 ? null : proto.AppPools.PollIntervalSeconds,
+                PollIntervalSeconds = proto.AppPools.HasPollIntervalSeconds ? proto.AppPools.PollIntervalSeconds : null,
                 WatchedApplicationPools = proto.AppPools.WatchedApplicationPools.Count > 0
                     ? proto.AppPools.WatchedApplicationPools.ToList() : null,
+            },
+            Portal = proto.Portal == null ? null : new Contracts.RemotePortalConfig
+            {
+                OutboxFlushIntervalSeconds = proto.Portal.HasOutboxFlushIntervalSeconds
+                    ? proto.Portal.OutboxFlushIntervalSeconds : null,
+                CommandPollIntervalSeconds = proto.Portal.HasCommandPollIntervalSeconds
+                    ? proto.Portal.CommandPollIntervalSeconds : null,
+                RemoteConfigPollIntervalSeconds = proto.Portal.HasRemoteConfigPollIntervalSeconds
+                    ? proto.Portal.RemoteConfigPollIntervalSeconds : null,
+            },
+            Maintenance = proto.Maintenance == null ? null : new Contracts.RemoteMaintenanceConfig
+            {
+                UntilUtc = proto.Maintenance.HasUntilUtc ? proto.Maintenance.UntilUtc : null,
+                Reason = proto.Maintenance.HasReason ? proto.Maintenance.Reason : null,
             },
         };
     }

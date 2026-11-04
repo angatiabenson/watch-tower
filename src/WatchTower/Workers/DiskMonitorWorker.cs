@@ -1,9 +1,10 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
+
 using WatchTower.Configuration;
+using WatchTower.Hosting;
 using WatchTower.Models;
-using WatchTower.Portal;
 using WatchTower.Services.Abstractions;
+using WatchTower.Services.Alerting;
 
 namespace WatchTower.Workers;
 
@@ -11,38 +12,43 @@ public class DiskMonitorWorker : BackgroundService
 {
     private readonly ISystemMetricsProvider _metricsProvider;
     private readonly IMetricsStore _metricsStore;
-    private readonly IEmailService _emailService;
-    private readonly IReportBuilder _reportBuilder;
-    private readonly IPortalEventPublisher _portalEventPublisher;
+    private readonly IAlertManager _alerts;
     private readonly IOptionsMonitor<DiskMonitorOptions> _options;
-    private readonly IOptionsMonitor<ReportingOptions> _reportingOptions;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<DiskMonitorWorker> _logger;
+    private readonly IWorkerHealth? _health;
 
-    private readonly ConcurrentDictionary<string, DateTime> _lastEmergencyPerDrive = new();
-    private readonly ConcurrentDictionary<string, DateTime> _lastQueueEmergencyPerDisk = new();
+    private readonly RecoveryDebouncer _recovery = new();
+    private readonly AbsentResourceTracker _removedDisks;
+    private readonly AbsentResourceTracker _removedQueues;
 
     public DiskMonitorWorker(
         ISystemMetricsProvider metricsProvider,
         IMetricsStore metricsStore,
-        IEmailService emailService,
-        IReportBuilder reportBuilder,
-        IPortalEventPublisher portalEventPublisher,
+        IAlertManager alerts,
         IOptionsMonitor<DiskMonitorOptions> options,
-        IOptionsMonitor<ReportingOptions> reportingOptions,
         TimeProvider timeProvider,
-        ILogger<DiskMonitorWorker> logger
+        ILogger<DiskMonitorWorker> logger,
+        IWorkerHealth? workerHealth = null
     )
     {
         _metricsProvider = metricsProvider;
         _metricsStore = metricsStore;
-        _emailService = emailService;
-        _reportBuilder = reportBuilder;
-        _portalEventPublisher = portalEventPublisher;
+        _alerts = alerts;
         _options = options;
-        _reportingOptions = reportingOptions;
         _timeProvider = timeProvider;
         _logger = logger;
+        _health = workerHealth;
+
+        // A host always has a system drive (and its physical disk): an empty listing is a broken
+        // read, never a reason to retire every disk alert. Removed drives and disks also lose
+        // their snapshot row, so the portal stops receiving their last reading.
+        _removedDisks = new AbsentResourceTracker(AlertKey.DiskPrefix, "drives",
+            drive => $"Disk {drive.TrimEnd('\\')} is no longer present", emptyIsSuspicious: true, logger,
+            metricsStore, SnapshotKind.Disk);
+        _removedQueues = new AbsentResourceTracker(AlertKey.DiskQueuePrefix, "physical disks",
+            disk => $"Physical disk {disk} is no longer present", emptyIsSuspicious: true, logger,
+            metricsStore, SnapshotKind.DiskQueue);
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -51,11 +57,14 @@ public class DiskMonitorWorker : BackgroundService
     {
         _logger.LogInformation("Disk Monitor Worker started");
 
+        ReportAlive();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await PollOnceAsync(stoppingToken);
+                ReportAlive();
                 await Task.Delay(
                     TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)),
                     _timeProvider, stoppingToken);
@@ -74,106 +83,116 @@ public class DiskMonitorWorker : BackgroundService
         _logger.LogInformation("Disk Monitor Worker stopped");
     }
 
+    /// <summary>Liveness for the health-gated heartbeat (see <see cref="IWorkerHealth"/>).</summary>
+    private void ReportAlive() =>
+        _health?.ReportSuccess(WorkerNames.Disk, TimeSpan.FromSeconds(Math.Max(1, _options.CurrentValue.PollIntervalSeconds)));
+
     /// <summary>Runs a single poll/evaluate cycle. Exposed for deterministic testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
-        var diskMetrics = _metricsProvider.GetDiskMetrics();
+        if (!TryRead(_metricsProvider.GetDiskMetrics, "disk usage", out var diskMetrics))
+            return;
 
         foreach (var disk in diskMetrics)
         {
             _metricsStore.AddDiskMetric(disk);
+            var key = AlertKey.Disk(disk.DriveName);
 
             if (disk.UsagePercent >= opts.CriticalThresholdPercent)
             {
                 _logger.LogWarning("DISK CRITICAL: {Drive} at {Usage:F1}%", disk.DriveName, disk.UsagePercent);
-                await HandleEmergencyAsync(disk, ct);
+                _recovery.Breached(key);
+                await _alerts.RaiseAsync(
+                    key,
+                    AlertSeverity.Critical,
+                    $"Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%",
+                    new Incident(
+                        UtcNow,
+                        IncidentType.DiskCritical,
+                        $"Drive {disk.DriveName} at {disk.UsagePercent:F1}% ({disk.FreeGb:F1} GB free of {disk.TotalGb:F1} GB)"),
+                    ct);
+                continue;
             }
-            else if (disk.UsagePercent >= opts.WarningThresholdPercent)
-            {
+
+            if (disk.UsagePercent >= opts.WarningThresholdPercent)
                 _logger.LogWarning("DISK WARNING: {Drive} at {Usage:F1}%", disk.DriveName, disk.UsagePercent);
-            }
             else
-            {
                 _logger.LogDebug("Disk {Drive}: {Usage:F1}% ({Free:F1} GB free)", disk.DriveName, disk.UsagePercent, disk.FreeGb);
-            }
+
+            if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
+                await _alerts.ResolveAsync(key, ct: ct);
         }
 
+        await RetireRemovedAsync(_removedDisks, _metricsProvider.GetDiskInventory, ct);
+
         // Disk queue length monitoring
-        var queueMetrics = _metricsProvider.GetDiskQueueMetrics();
+        if (!TryRead(_metricsProvider.GetDiskQueueMetrics, "disk queue length", out var queueMetrics))
+            return;
+
         foreach (var queue in queueMetrics)
         {
             _metricsStore.AddDiskQueueMetric(queue);
+            var key = AlertKey.DiskQueue(queue.InstanceName);
 
             if (queue.QueueLength > opts.QueueLengthWarningThreshold)
             {
                 _logger.LogWarning(
                     "DISK QUEUE HIGH: {Disk} queue length {Queue:F1} (threshold: {Threshold})",
                     queue.InstanceName, queue.QueueLength, opts.QueueLengthWarningThreshold);
-                await HandleQueueEmergencyAsync(queue, ct);
+                _recovery.Breached(key);
+                await _alerts.RaiseAsync(
+                    key,
+                    AlertSeverity.Warning,
+                    $"Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}",
+                    new Incident(
+                        UtcNow,
+                        IncidentType.DiskQueueHigh,
+                        $"Disk '{queue.InstanceName}' queue length at {queue.QueueLength:F1} (threshold: {opts.QueueLengthWarningThreshold})"),
+                    ct);
+                continue;
             }
-            else
-            {
-                _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
-            }
+
+            _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
+            if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
+                await _alerts.ResolveAsync(key, ct: ct);
+        }
+
+        await RetireRemovedAsync(_removedQueues, _metricsProvider.GetDiskQueueInventory, ct);
+    }
+
+    /// <summary>
+    /// Retires the alerts and snapshot rows of drives or physical disks that are gone (see
+    /// <see cref="AbsentResourceTracker"/>); only reached after the metrics read succeeded.
+    /// </summary>
+    private async Task RetireRemovedAsync(AbsentResourceTracker tracker, Func<ResourceInventory?> inventory, CancellationToken ct)
+    {
+        try
+        {
+            await tracker.ReconcileAsync(_alerts, inventory, UtcNow, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not retire alerts or snapshots of removed disks");
         }
     }
 
-    private async Task HandleEmergencyAsync(DiskMetric disk, CancellationToken ct)
+    /// <summary>
+    /// Reads a metric set, skipping the rest of the cycle with a warning (instead of failing the
+    /// iteration) when the underlying source throws.
+    /// </summary>
+    private bool TryRead<T>(Func<IReadOnlyList<T>> read, string what, out IReadOnlyList<T> metrics)
     {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastEmergencyPerDrive.GetValueOrDefault(disk.DriveName, DateTime.MinValue);
-
-        if (UtcNow - lastEmail < cooldown)
-            return;
-
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.DiskCritical,
-            $"Drive {disk.DriveName} at {disk.UsagePercent:F1}% ({disk.FreeGb:F1} GB free of {disk.TotalGb:F1} GB)"
-        );
-
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync(
-            $"[WatchTower] Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%",
-            html,
-            ct
-        );
-
-        if (sent)
-            _lastEmergencyPerDrive[disk.DriveName] = UtcNow;
-    }
-
-    private async Task HandleQueueEmergencyAsync(DiskQueueMetric queue, CancellationToken ct)
-    {
-        var cooldown = TimeSpan.FromSeconds(_reportingOptions.CurrentValue.EmergencyCooldownSeconds);
-        var lastEmail = _lastQueueEmergencyPerDisk.GetValueOrDefault(queue.InstanceName, DateTime.MinValue);
-
-        if (UtcNow - lastEmail < cooldown)
-            return;
-
-        var incident = new Incident(
-            UtcNow,
-            IncidentType.DiskQueueHigh,
-            $"Disk '{queue.InstanceName}' queue length at {queue.QueueLength:F1} (threshold: {_options.CurrentValue.QueueLengthWarningThreshold})"
-        );
-
-        _metricsStore.AddIncident(incident);
-        await _portalEventPublisher.PublishIncidentAsync(incident, ct);
-
-        var report = _reportBuilder.BuildReport(TimeSpan.FromHours(24));
-        var html = _reportBuilder.RenderEmergencyReportHtml(report, incident);
-        var sent = await _emailService.SendEmailAsync(
-            $"[WatchTower] Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}",
-            html,
-            ct
-        );
-
-        if (sent)
-            _lastQueueEmergencyPerDisk[queue.InstanceName] = UtcNow;
+        try
+        {
+            metrics = read();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Reading {What} failed; skipping this cycle", what);
+            metrics = Array.Empty<T>();
+            return false;
+        }
     }
 }

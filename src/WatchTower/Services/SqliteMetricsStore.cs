@@ -1,5 +1,7 @@
 using System.Text.Json;
+
 using Microsoft.Data.Sqlite;
+
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 
@@ -61,6 +63,17 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                 timestamp TEXT NOT NULL,
                 status TEXT NOT NULL,
                 is_running INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS endpoint_status (
+                name                  TEXT PRIMARY KEY,
+                timestamp             TEXT NOT NULL,
+                type                  TEXT NOT NULL,
+                target                TEXT NOT NULL,
+                status                TEXT NOT NULL,
+                is_up                 INTEGER NOT NULL,
+                response_time_ms      REAL,
+                certificate_days_left REAL,
+                detail                TEXT
             );
             CREATE TABLE IF NOT EXISTS incidents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +220,29 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
             cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@status", status.Status);
             cmd.Parameters.AddWithValue("@running", status.IsRunning ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void AddEndpointStatus(EndpointStatus status)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"INSERT OR REPLACE INTO endpoint_status
+                    (name, timestamp, type, target, status, is_up, response_time_ms, certificate_days_left, detail)
+                  VALUES (@name, @ts, @type, @target, @status, @up, @ms, @days, @detail)";
+            cmd.Parameters.AddWithValue("@name", status.Name);
+            cmd.Parameters.AddWithValue("@ts", status.Timestamp.ToString("O"));
+            cmd.Parameters.AddWithValue("@type", status.Type);
+            cmd.Parameters.AddWithValue("@target", status.Target);
+            cmd.Parameters.AddWithValue("@status", status.Status);
+            cmd.Parameters.AddWithValue("@up", status.IsUp ? 1 : 0);
+            cmd.Parameters.AddWithValue("@ms", status.ResponseTimeMs is { } ms ? ms : DBNull.Value);
+            cmd.Parameters.AddWithValue("@days", status.CertificateDaysLeft is { } days ? days : DBNull.Value);
+            cmd.Parameters.AddWithValue("@detail", (object?)status.Detail ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
     }
@@ -424,6 +460,38 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         return results;
     }
 
+    public IReadOnlyList<EndpointStatus> GetLatestEndpointStatuses()
+    {
+        var results = new List<EndpointStatus>();
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT name, timestamp, type, target, status, is_up, response_time_ms, certificate_days_left, detail FROM endpoint_status";
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(
+                    new EndpointStatus(
+                        DateTime.Parse(reader.GetString(1)).ToUniversalTime(),
+                        reader.GetString(0),
+                        reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetString(4),
+                        reader.GetInt32(5) == 1,
+                        reader.IsDBNull(6) ? null : reader.GetDouble(6),
+                        reader.IsDBNull(7) ? null : reader.GetDouble(7),
+                        reader.IsDBNull(8) ? null : reader.GetString(8)
+                    )
+                );
+            }
+        }
+        return results;
+    }
+
     public IReadOnlyList<Incident> GetIncidents(TimeSpan period)
     {
         var cutoff = DateTime.UtcNow - period;
@@ -483,7 +551,7 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         }
     }
 
-    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId)
+    public PurgeReportResult PurgeReportedData(long cpuForwardedRowId, long ramForwardedRowId, DateTime incidentsUpToUtc)
     {
         lock (_lock)
         {
@@ -492,9 +560,14 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
 
             // Delete cpu/ram rows only up to the confirmed-delivered rowid. Rows the
             // portal has not yet acknowledged (rowid > forwarded cursor) are preserved
-            // so a later send failure can never cause silent data loss. Snapshot tables
-            // (latest-state) and incidents (already queued to the portal as events) are
-            // cleared in full. All in one transaction for atomicity.
+            // so a later send failure can never cause silent data loss. Incidents (already
+            // queued to the portal as events) are deleted only up to the report's snapshot time:
+            // anything recorded after the report was built was not in it and must survive for
+            // the next one. All in one transaction for atomicity.
+            // The snapshot tables are current state, not history, and are left alone: clearing
+            // them dropped every resource from the metrics batches until its next reading (up to
+            // a day for an endpoint checked daily). Their rows are only removed when the resource
+            // is gone (RemoveSnapshots / RemoveSnapshotsExcept).
             using (var cmd = conn.CreateCommand())
             {
                 cmd.Transaction = tx;
@@ -502,15 +575,13 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
                     @"
                     DELETE FROM cpu_metrics WHERE rowid <= @cpuRow;
                     DELETE FROM ram_metrics WHERE rowid <= @ramRow;
-                    DELETE FROM disk_metrics;
-                    DELETE FROM disk_queue_metrics;
-                    DELETE FROM network_metrics;
-                    DELETE FROM service_statuses;
-                    DELETE FROM application_pool_statuses;
-                    DELETE FROM incidents;
+                    DELETE FROM incidents WHERE timestamp <= @incidentCutoff;
                 ";
                 cmd.Parameters.AddWithValue("@cpuRow", cpuForwardedRowId);
                 cmd.Parameters.AddWithValue("@ramRow", ramForwardedRowId);
+                // Timestamps are stored as UTC round-trip ("O") strings, so lexicographic
+                // comparison is chronological.
+                cmd.Parameters.AddWithValue("@incidentCutoff", ToUtc(incidentsUpToUtc).ToString("O"));
                 cmd.ExecuteNonQuery();
             }
 
@@ -522,12 +593,117 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         }
     }
 
+    private static DateTime ToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
+
     private static long CountRows(SqliteConnection conn, SqliteTransaction tx, string table)
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
         return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    /// <summary>Table and key column of a snapshot kind (fixed identifiers, never user input).</summary>
+    private static (string Table, string Key) SnapshotTable(SnapshotKind kind) => kind switch
+    {
+        SnapshotKind.Disk => ("disk_metrics", "drive_name"),
+        SnapshotKind.DiskQueue => ("disk_queue_metrics", "instance_name"),
+        SnapshotKind.Network => ("network_metrics", "interface_name"),
+        SnapshotKind.Service => ("service_statuses", "service_name"),
+        SnapshotKind.ApplicationPool => ("application_pool_statuses", "app_pool_name"),
+        SnapshotKind.Endpoint => ("endpoint_status", "name"),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
+
+    public IReadOnlyList<string> GetSnapshotNames(SnapshotKind kind)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            return ReadSnapshotNames(conn, null, kind);
+        }
+    }
+
+    private static List<string> ReadSnapshotNames(SqliteConnection conn, SqliteTransaction? tx, SnapshotKind kind)
+    {
+        var (table, key) = SnapshotTable(kind);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"SELECT {key} FROM {table}";
+        var names = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    public int RemoveSnapshots(SnapshotKind kind, IEnumerable<string> names)
+    {
+        var wanted = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (wanted.Count == 0)
+            return 0;
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            var removed = DeleteSnapshotRows(conn, tx, kind,
+                ReadSnapshotNames(conn, tx, kind).Where(wanted.Contains).ToList());
+            tx.Commit();
+            return removed;
+        }
+    }
+
+    public IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            var plan = SnapshotPrunePlan.Create(ReadSnapshotNames(conn, tx, kind), keep);
+            DeleteSnapshotRows(conn, tx, kind, plan.Remove);
+
+            var (table, key) = SnapshotTable(kind);
+            using var rename = conn.CreateCommand();
+            rename.Transaction = tx;
+            rename.CommandText = $"UPDATE {table} SET {key} = @to WHERE {key} = @from";
+            var from = rename.Parameters.Add("@from", SqliteType.Text);
+            var to = rename.Parameters.Add("@to", SqliteType.Text);
+            foreach (var (stored, configured) in plan.Rename)
+            {
+                from.Value = stored;
+                to.Value = configured;
+                rename.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            return plan.Remove;
+        }
+    }
+
+    /// <summary>Deletes rows by their stored name (exact match, as read from the table).</summary>
+    private static int DeleteSnapshotRows(SqliteConnection conn, SqliteTransaction tx, SnapshotKind kind, IReadOnlyList<string> storedNames)
+    {
+        if (storedNames.Count == 0)
+            return 0;
+
+        var (table, key) = SnapshotTable(kind);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"DELETE FROM {table} WHERE {key} = @name";
+        var name = cmd.Parameters.Add("@name", SqliteType.Text);
+        var removed = 0;
+        foreach (var stored in storedNames)
+        {
+            name.Value = stored;
+            removed += cmd.ExecuteNonQuery();
+        }
+        return removed;
     }
 
     public (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit)
