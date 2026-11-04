@@ -140,18 +140,27 @@ public class NotificationDeliveryTests
         attempts.Should().BeInRange(45, 60, "about every 30 minutes for 24 hours, then no more");
     }
 
-    [Fact]
-    public async Task OpenedNotice_NeverDelivered_ThenResolved_SendsTheResolvedNotice()
+    [Theory]
+    [InlineData(AlertSeverity.Warning)]
+    [InlineData(AlertSeverity.Critical)]
+    public async Task OpenedNotice_NeverDelivered_ThenResolved_SendsTheResolvedNotice(AlertSeverity severity)
     {
         var alerts = Alerts();
         _dispatcher.Failing.Add("ch1");
-        await Raise(alerts);
+        await alerts.RaiseAsync(Key, severity, "Disk Critical", Disk(), Ct);
         _dispatcher.Failing.Clear();
 
         await alerts.ResolveAsync(Key, ct: Ct);
-        _dispatcher.Sent.Should().ContainSingle("the channel just failed: it is tried again after its backoff");
-        _time.Advance(NotificationRetryPolicy.Backoff(1));
-        await alerts.ProcessPendingAsync(Ct);
+        if (severity == AlertSeverity.Critical)
+        {
+            _dispatcher.Sent.Should().HaveCount(2, "a critical recovery probes the backing-off channel at once");
+        }
+        else
+        {
+            _dispatcher.Sent.Should().ContainSingle("the channel just failed: it is tried again after its backoff");
+            _time.Advance(NotificationRetryPolicy.Backoff(1));
+            await alerts.ProcessPendingAsync(Ct);
+        }
 
         _dispatcher.Delivered.Should().ContainSingle().Which.Notification.Kind.Should().Be(AlertNotificationKind.Resolved,
             "operators never heard of the alert, so the resolution tells the whole story");

@@ -130,6 +130,28 @@ internal sealed class GatedPortalPublisher : WatchTower.Portal.IPortalEventPubli
     }
 }
 
+/// <summary>
+/// A clock whose wall time (<see cref="GetUtcNow"/>) can be moved independently of its monotonic
+/// time (<see cref="GetTimestamp"/>), both driven by <paramref name="inner"/>: <see cref="Skew"/>
+/// set back is a clock rollback, set ahead a jump forward; neither moves the monotonic clock.
+/// </summary>
+internal sealed class SkewedTimeProvider(Microsoft.Extensions.Time.Testing.FakeTimeProvider inner) : TimeProvider
+{
+    public TimeSpan Skew { get; set; }
+
+    public DateTime UtcNow => GetUtcNow().UtcDateTime;
+
+    public void Advance(TimeSpan delta) => inner.Advance(delta);
+
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow() + Skew;
+
+    public override long GetTimestamp() => inner.GetTimestamp();
+
+    public override long TimestampFrequency => inner.TimestampFrequency;
+
+    public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+}
+
 /// <summary>Maintenance window a test can open and close.</summary>
 internal sealed class TestMaintenance : IMaintenanceState
 {
@@ -157,6 +179,12 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
     /// <summary>Sends (channel, notification) that fail although the channel is not <see cref="Failing"/>.</summary>
     public Func<string, AlertNotification, bool>? Rejects { get; set; }
 
+    /// <summary>
+    /// Which channels take a notification (like a channel's <c>MinSeverity</c>); every configured
+    /// channel when null. A channel that does not take it is neither listed nor sent it.
+    /// </summary>
+    public Func<string, AlertNotification, bool>? Accepts { get; set; }
+
     /// <summary>Every channel send, successful or not.</summary>
     public IReadOnlyList<(string Channel, AlertNotification Notification)> Attempts
     {
@@ -168,7 +196,7 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
     }
 
     public IReadOnlyList<string> ChannelsFor(AlertNotification notification) =>
-        Enumerable.Range(1, Channels).Select(i => $"ch{i}").ToList();
+        Enumerable.Range(1, Channels).Select(i => $"ch{i}").Where(c => Accepts?.Invoke(c, notification) != false).ToList();
 
     /// <summary>Every dispatch call (whether or not any channel delivered it).</summary>
     public IReadOnlyList<AlertNotification> Sent
@@ -208,7 +236,7 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
             for (var i = 1; i <= Channels; i++)
             {
                 var name = $"ch{i}";
-                if (channels?.Contains(name) == false)
+                if (channels?.Contains(name) == false || Accepts?.Invoke(name, notification) == false)
                     continue;
                 _attempts.Add((name, notification));
                 var ok = !Failing.Contains(name) && Rejects?.Invoke(name, notification) != true;
@@ -312,7 +340,8 @@ internal static class TestAlerts
         AlertingOptions? options = null,
         IPortalEventPublisher? portal = null,
         IAlertStateStore? state = null,
-        IMaintenanceState? maintenance = null) =>
+        IMaintenanceState? maintenance = null,
+        NotificationOptions? notifications = null) =>
         new(
             state ?? new InMemoryAlertStateStore(),
             metricsStore,
@@ -322,7 +351,8 @@ internal static class TestAlerts
             time,
             NullLogger<AlertManager>.Instance,
             maintenance,
-            serverName: "TEST-SRV");
+            serverName: "TEST-SRV",
+            notificationOptions: notifications is null ? null : new TestOptionsMonitor<NotificationOptions>(notifications));
 
     /// <summary>An alert manager that delivers through the real email dispatcher (backed by mocks).</summary>
     public static AlertManager WithEmail(

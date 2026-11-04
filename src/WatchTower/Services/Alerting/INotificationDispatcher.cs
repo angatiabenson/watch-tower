@@ -6,7 +6,8 @@ public interface INotificationDispatcher
     /// <summary>
     /// Names of the channels <see cref="DispatchAsync"/> would send <paramref name="notification"/>
     /// to (enabled, available, and its severity meets their <c>MinSeverity</c>). Cheap and
-    /// synchronous: the alert manager asks it while deciding what to send.
+    /// synchronous: the alert manager asks it when a notification is created (its channel
+    /// obligations) and while scheduling (to skip obligations the configuration no longer allows).
     /// </summary>
     IReadOnlyList<string> ChannelsFor(AlertNotification notification);
 

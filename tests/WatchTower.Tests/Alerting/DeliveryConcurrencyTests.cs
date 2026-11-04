@@ -518,11 +518,12 @@ public class DeliveryConcurrencyTests
     [Fact]
     public async Task WindowStartingWhileRetriesAreSent_LeavesTheRemainingRetriesPending()
     {
+        // Warnings: a new critical opening would probe ch1 early.
         var alerts = Alerts();
-        var raising = alerts.RaiseAsync(AlertKey.Endpoint("a"), AlertSeverity.Critical, "a down", Down(), Ct);
+        var raising = alerts.RaiseAsync(AlertKey.Endpoint("a"), AlertSeverity.Warning, "a down", Down(), Ct);
         (await _dispatcher.NextAsync(Ct)).Fail("ch1");
         await raising.Bounded();
-        await alerts.RaiseAsync(AlertKey.Endpoint("b"), AlertSeverity.Critical, "b down", Down(), Ct).Bounded();
+        await alerts.RaiseAsync(AlertKey.Endpoint("b"), AlertSeverity.Warning, "b down", Down(), Ct).Bounded();
         _dispatcher.HasWaitingCall.Should().BeFalse("ch1 just failed: b's opening waits for its circuit's probe");
 
         _time.Advance(NotificationRetryPolicy.Backoff(1));

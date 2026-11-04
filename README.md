@@ -106,10 +106,10 @@ table `alert_state`, untouched by the daily report purge):
   sent one at a time: a new occurrence never replaces an earlier one's recovery, so every
   opening that may have reached operators gets its own resolved notice, before the next
   occurrence's opening. Each channel goes through the queue on its own: a notice goes to a
-  channel only once every earlier notice of the alert has reached that channel (or was given
-  up), so every channel gets them in order, also across a restart, while the channels that work
-  are never held back by one that fails. An opening that could not go out because its channels
-  keep failing still gets its resolved notice once they work again.
+  channel only once every earlier notice of the alert has reached that channel, was skipped
+  there or was given up, so every channel gets them in order, also across a restart, while the
+  channels that work are never held back by one that fails. An opening that could not go out
+  because its channels keep failing still gets its resolved notice once they work again.
 - **Flapping** — at most 5 notices are queued per alert. When an alert keeps opening and
   clearing faster than its notices can go out (a channel down, a maintenance window), the 3
   oldest are kept, the new notice is the alert's latest state, and everything in between is
@@ -135,20 +135,49 @@ default `Info`) the alert meets. Channels are sent in parallel with a short time
 (`Notifications:TimeoutSeconds`, default 10); a failing channel is logged by name and type
 — never its URL — and does not block the others.
 
-Delivery is tracked per channel (SQLite table `alert_delivery`, kept across restarts). A
-channel that failed is retried with backoff (1, 2, 4, 8, 16, then every 30 minutes), each
-notification on its own schedule — the channels that already have the notification never get
-it twice, and a new notification never makes a channel retry an earlier one sooner. Opened and
-reminder notices are retried while their alert stays open; resolved notices and one-shot events
-for up to 24 hours. An alert only counts as notified (`notifyCount`, `lastNotifiedAt`) once a
-notice actually reached a channel.
+Delivery is tracked per channel (SQLite table `alert_delivery`, kept across restarts). When a
+notification is created, the channels it is owed to are fixed and stored with it: the channels
+configured at that moment whose `MinSeverity` it meets. A configuration change never adds a
+channel to a queued notification — a channel added (or a filter lowered) later only gets
+notifications created after the change. A channel removed from the configuration, or whose
+`MinSeverity` now excludes a queued notification, is recorded as skipped for it (restoring the
+setting does not bring it back, because the alert's later notices may already have gone there).
 
-A failing channel is also backed off as a whole, across every alert: after a failure it is not
-attempted at all until its backoff has passed, then with a single probe; a success resumes
-normal delivery. A channel that is down therefore costs at most 9 attempts in its first hour
-and 2 an hour after that, however many alerts open, flap or wait for it (the backoff is kept
-in `agent_state` across restarts). A channel that works takes up to 20 notifications at once
-and one more every 2 seconds, so a backlog drains in order without flooding it.
+A channel that failed is retried with backoff (1, 2, 4, 8, 16, then every 30 minutes), each
+notification on its own schedule — the channels that already have the notification never get
+it twice. Opened and reminder notices are retried while their alert stays open; resolved notices
+and one-shot events for up to 24 hours after their first attempt. An alert only counts as
+notified (`notifyCount`, `lastNotifiedAt`) once a notice actually reached a channel.
+
+**Fair scheduling.** Every send — the first attempt of a new alert as much as a retry — goes
+through the same per-channel scheduler; a new alert never jumps the queue. When a channel can
+take an attempt, it gets the next notice it is owed that is allowed by the per-alert ordering
+above, choosing the highest priority first (critical, then warning, then info; a recovery
+counts as the severity of the alert it resolves, and a notice holding back a more severe one of
+the same alert counts as that one), then the oldest. A waiting notice gains one priority level
+every 5 minutes, so under a constant stream of critical alerts an info notice still goes out
+after at most 10 minutes (and then by age). A channel that works takes up to 20 notifications
+at once and one more every 2 seconds, with at most 4 in flight, so a backlog drains without
+flooding it — and a critical alert queued behind that backlog goes out with the next attempt
+the channel can take.
+
+**Failing channels.** A failing channel is also backed off as a whole, across every alert:
+after a failure it is not attempted at all until its backoff has passed, then with a single
+probe; a success resumes normal delivery. While a channel backs off, a *new* critical alert (or
+the recovery of one) may probe it early, at most once per `Notifications:CriticalProbeCooldownSeconds`
+(default 120, 60–3600) per channel; the probe carries the channel's next notice by the rules
+above, so the order is kept, and if it succeeds the channel drains at once instead of after up
+to 30 minutes. Worst case for a channel that stays down, however many alerts open, flap or wait
+for it: at most 9 attempts in its first hour and 2 an hour after that, plus at most one
+critical probe per cooldown (30 an hour at the default) and only while new critical alerts keep
+coming. The backoff is kept in `agent_state` across restarts.
+
+Backoffs and retry deadlines are measured on the monotonic clock while the agent runs, so
+changing the system clock neither shortens nor extends them. Their UTC times are persisted only
+for a restart, and on restore every one (each channel's backoff and each notification's retry)
+is clamped to now + its backoff (30 minutes at most): a clock set back while the agent was down
+cannot make it wait longer, and a clock that jumped ahead makes the retries due but the
+channel's single probe still paces them.
 
 | Channel | Configure (console: *Notification channels*) | Payload |
 |---|---|---|
@@ -487,6 +516,7 @@ All configuration lives in `appsettings.json`. Every value supports **hot-reload
     "Slack":   { "Url": "", "MinSeverity": "Info" },
     "Webhook": { "Url": "", "Secret": "", "MinSeverity": "Info" },
     "TimeoutSeconds": 10,
+    "CriticalProbeCooldownSeconds": 120,
     "Channels": []
   },
 

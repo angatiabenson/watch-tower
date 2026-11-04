@@ -34,8 +34,8 @@ public class ChannelOrderingTests
     private AlertManager Alerts(IAlertStateStore? state = null) =>
         TestAlerts.Create(_metrics.Object, _time, _recording, state: state);
 
-    private Task Raise(AlertManager alerts, string title, AlertKey? key = null) =>
-        alerts.RaiseAsync(key ?? Key, AlertSeverity.Critical, title, new Incident(Now, IncidentType.EndpointDown, title), Ct).Bounded();
+    private Task Raise(AlertManager alerts, string title, AlertKey? key = null, AlertSeverity severity = AlertSeverity.Critical) =>
+        alerts.RaiseAsync(key ?? Key, severity, title, new Incident(Now, IncidentType.EndpointDown, title), Ct).Bounded();
 
     private Task<bool> Resolve(AlertManager alerts, AlertKey? key = null) => alerts.ResolveAsync(key ?? Key, ct: Ct).Bounded();
 
@@ -85,15 +85,16 @@ public class ChannelOrderingTests
         Received("ch1").Should().Equal([(Opened, "A down"), (Resolved, "A down"), (Opened, "B down")],
             "the working channel is not held back");
         Received("ch2").Should().Equal([(Opened, "A down")], "B's opening waits behind A's recovery on ch2");
-        _recording.Attempts.Count(a => a is { Channel: "ch2", Notification.Kind: Resolved }).Should().Be(2,
-            "B's opening does not retry A's recovery before its deadline");
+        _recording.Attempts.Count(a => a is { Channel: "ch2", Notification.Kind: Resolved }).Should().Be(3,
+            "B's critical opening probes ch2 early once, with ch2's next notice in order: A's recovery");
+        _recording.Attempts.Should().NotContain(a => a.Channel == "ch2" && a.Notification.Title == "B down");
 
         if (restart)
         {
             var persisted = new SqliteAlertStateStore(path).LoadDeliveries();
             persisted.Select(d => (d.Notification.Kind, d.Notification.Title, d.DeliveredChannels.Single()))
                 .Should().Equal((Resolved, "A down", "ch1"), (Opened, "B down", "ch1"));
-            persisted[0].ChannelRetries.Should().ContainSingle().Which.Should().BeEquivalentTo(new { Channel = "ch2", Attempts = 2 });
+            persisted[0].ChannelRetries.Should().ContainSingle().Which.Should().BeEquivalentTo(new { Channel = "ch2", Attempts = 3 });
             persisted[1].ChannelRetries.Should().BeEmpty("B's opening was never attempted on ch2");
             alerts = Alerts(new SqliteAlertStateStore(path)); // a new process
         }
@@ -109,9 +110,11 @@ public class ChannelOrderingTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task FlapStormAgainstADeadChannel_AttemptsItOnlyOnItsBackoffSchedule(bool restart)
+    [InlineData(false, AlertSeverity.Warning)]
+    [InlineData(true, AlertSeverity.Warning)]
+    [InlineData(false, AlertSeverity.Critical)]
+    [InlineData(true, AlertSeverity.Critical)]
+    public async Task FlapStormAgainstADeadChannel_AttemptsItOnlyOnItsBackoffSchedule(bool restart, AlertSeverity severity)
     {
         // Probe 2: the channel is down; the alert opens and clears every second. Every new notice
         // used to retry the queue's head: 17,980 dispatches in one hour with 5 rows queued.
@@ -131,7 +134,7 @@ public class ChannelOrderingTests
             if (restart && second == 1800)
                 alerts = Alerts(new SqliteAlertStateStore(path)); // the circuit and the retries are persisted
             if (second / interval % 2 == 0)
-                await Raise(alerts, "storm");
+                await Raise(alerts, "storm", severity: severity);
             else
                 await Resolve(alerts);
             alerts.GetPendingDeliveries().Should().HaveCountLessThanOrEqualTo(AlertManager.MaxQueuedNotices);
@@ -140,10 +143,24 @@ public class ChannelOrderingTests
                 perHour.Add(AttemptsOn("ch1") - perHour.Sum());
         }
 
-        // Probes at 0, 1, 3, 7, 15 and 31 minutes, then every 30 minutes (61, 91 min).
-        perHour[0].Should().Be(6).And.BeLessThanOrEqualTo(ChannelRateLimiter.WorstCaseFirstHourAttempts);
-        if (!restart)
-            perHour[1].Should().Be(2, "one probe every 30 minutes once the backoff is at its bound");
+        if (severity == AlertSeverity.Critical)
+        {
+            // Every opening and recovery is a new critical notice: besides the backoff's probes,
+            // one critical early probe per cooldown (2 minutes) at most.
+            var criticalProbes = (int)(TimeSpan.FromHours(1) / AlertManager.DefaultCriticalProbeCooldown);
+            perHour.Should().OnlyContain(n => n > ChannelRateLimiter.WorstCaseFirstHourAttempts,
+                "critical notices keep coming, so the channel is probed early");
+            perHour[0].Should().BeLessThanOrEqualTo(ChannelRateLimiter.WorstCaseFirstHourAttempts + criticalProbes);
+            if (!restart)
+                perHour[1].Should().BeLessThanOrEqualTo(2 + criticalProbes);
+        }
+        else
+        {
+            // Probes at 0, 1, 3, 7, 15 and 31 minutes, then every 30 minutes (61, 91 min).
+            perHour[0].Should().Be(6).And.BeLessThanOrEqualTo(ChannelRateLimiter.WorstCaseFirstHourAttempts);
+            if (!restart)
+                perHour[1].Should().Be(2, "one probe every 30 minutes once the backoff is at its bound");
+        }
         _recording.Sent.Should().HaveCount(perHour.Sum(), "nothing is dispatched while no channel may be attempted");
         _recording.Delivered.Should().BeEmpty();
     }
@@ -188,15 +205,16 @@ public class ChannelOrderingTests
     [Fact]
     public async Task DeadChannelComingBack_DrainsEveryAlertInOrder_AfterOneProbe()
     {
+        // Warnings: a critical notice would probe ch2 early (see CriticalProbeTests).
         _recording.Channels = 2;
         _recording.Failing.Add("ch2");
         var alerts = Alerts();
         var keys = new[] { AlertKey.Endpoint("a"), AlertKey.Endpoint("b"), AlertKey.Endpoint("c") };
         foreach (var key in keys)
         {
-            await Raise(alerts, $"{key.Value} first", key);
+            await Raise(alerts, $"{key.Value} first", key, AlertSeverity.Warning);
             await Resolve(alerts, key);
-            await Raise(alerts, $"{key.Value} second", key);
+            await Raise(alerts, $"{key.Value} second", key, AlertSeverity.Warning);
         }
         foreach (var key in keys)
         {

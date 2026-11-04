@@ -260,9 +260,11 @@ public class AlertOccurrenceTests
         Received(_recording, "ch1").Should().Equal(
             [(Opened, "A down"), (Resolved, "A down"), (Opened, "B down")],
             "B's opening is not held back by a channel that keeps rejecting A's recovery");
+        // B's opening is a new critical notice: ch2 (backing off) is probed early, with its next
+        // notice in order — A's recovery, due again by now — never B's opening.
         _recording.Attempts.Where(a => a.Channel == "ch2").Select(a => (a.Notification.Kind, a.Notification.Title))
-            .Should().Equal([(Opened, "A down"), (Resolved, "A down"), (Resolved, "A down")],
-                "ch2 gets B's opening only after A's recovery, and B's opening retries nothing early");
+            .Should().Equal([(Opened, "A down"), (Resolved, "A down"), (Resolved, "A down"), (Resolved, "A down")],
+                "ch2 gets B's opening only after A's recovery");
         alerts.GetPendingDeliveries().Select(d => (d.Notification.Kind, d.Occurrence))
             .Should().Equal((Resolved, 1L), (Opened, 2L));
 
@@ -316,8 +318,10 @@ public class AlertOccurrenceTests
         notice.Notification.Description.Should().Contain("opened and cleared 8 times");
         queued.Where(d => d.ExplicitRecovery).Select(d => d.Notification.Title).Should().Equal(
             ["down #1"], "only the first opening was attempted");
-        _recording.Sent.Should().HaveCountLessThanOrEqualTo(ChannelRateLimiter.WorstCaseFirstHourAttempts,
-            "the failing channel is only probed on its backoff schedule, however often the alert flaps");
+        // 23 minutes: the backoff's probes, plus one critical early probe per 2-minute cooldown at most
+        // (each new critical opening or recovery may trigger one).
+        _recording.Sent.Should().HaveCountLessThanOrEqualTo(ChannelRateLimiter.WorstCaseFirstHourAttempts + 12,
+            "the failing channel is only probed on its backoff schedule and the critical cooldown, however often the alert flaps");
 
         _recording.Failing.Clear();
         for (var i = 0; i < 60; i++)

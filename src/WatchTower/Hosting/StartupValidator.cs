@@ -166,6 +166,11 @@ public static class StartupValidator
 
         if (notifications.TimeoutSeconds is < 1 or > 120)
             errors.Add($"Notifications:TimeoutSeconds must be between 1 and 120 (was {notifications.TimeoutSeconds}).");
+        if (notifications.CriticalProbeCooldownSeconds is < 60 or > 3600)
+        {
+            errors.Add("Notifications:CriticalProbeCooldownSeconds must be between 60 and 3600 " +
+                       $"(was {notifications.CriticalProbeCooldownSeconds}).");
+        }
 
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < notifications.Channels.Count; i++)

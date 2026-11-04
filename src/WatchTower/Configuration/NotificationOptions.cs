@@ -25,6 +25,13 @@ public class NotificationOptions
 
     /// <summary>Per-channel delivery timeout for webhook-style channels.</summary>
     public int TimeoutSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// While a channel is backing off after failures, a new critical alert (or its recovery) may
+    /// probe it early, at most once this often per channel (60–3600, default 120: at most 30 extra
+    /// attempts an hour to a channel that stays down, and only while critical alerts keep coming).
+    /// </summary>
+    public int CriticalProbeCooldownSeconds { get; set; } = 120;
 }
 
 public class EmailNotificationSettings

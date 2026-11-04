@@ -93,6 +93,13 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
         // empty list), and so is the row.
         if (AddColumnIfMissing(conn, tx, "alert_delivery", "channel_retries", "TEXT NOT NULL DEFAULT '[]'"))
             Execute(conn, tx, "UPDATE alert_delivery SET next_attempt_at = created_at WHERE next_attempt_at > created_at");
+
+        // Channel obligations, fixed when a notice is created. Rows written before them have none
+        // recorded (NULL): the alert manager derives them once, when it loads them, from the
+        // configuration of that start plus the channels already delivered (which stay delivered),
+        // and writes them back. Nothing was skipped before.
+        AddColumnIfMissing(conn, tx, "alert_delivery", "channels", "TEXT");
+        AddColumnIfMissing(conn, tx, "alert_delivery", "skipped_channels", "TEXT NOT NULL DEFAULT '[]'");
         tx.Commit();
     }
 
@@ -215,7 +222,7 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                 """
                 SELECT id, notification, created_at, delivered_channels, failed_attempts, first_attempt_at,
                        next_attempt_at, last_error, held, explicit_recovery, occurrence, seq, flap_count,
-                       channel_retries
+                       channel_retries, channels, skipped_channels
                 FROM alert_delivery
                 ORDER BY seq, id
                 """;
@@ -225,11 +232,15 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                 AlertNotification? notification;
                 List<string>? delivered;
                 List<ChannelRetry>? retries;
+                List<string>? channels;
+                List<string>? skipped;
                 try
                 {
                     notification = JsonSerializer.Deserialize<AlertNotification>(reader.GetString(1), JsonOptions);
                     delivered = JsonSerializer.Deserialize<List<string>>(reader.GetString(3), JsonOptions);
                     retries = JsonSerializer.Deserialize<List<ChannelRetry>>(reader.GetString(13), JsonOptions);
+                    channels = reader.IsDBNull(14) ? null : JsonSerializer.Deserialize<List<string>>(reader.GetString(14), JsonOptions);
+                    skipped = JsonSerializer.Deserialize<List<string>>(reader.GetString(15), JsonOptions);
                 }
                 catch (JsonException)
                 {
@@ -253,6 +264,8 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     reader.GetInt32(12))
                 {
                     ChannelRetries = retries?.Where(r => r is not null).ToList() ?? [],
+                    Channels = channels?.Where(c => c is not null).ToList(),
+                    SkippedChannels = skipped?.Where(c => c is not null).ToList() ?? [],
                 });
             }
         }
@@ -269,9 +282,10 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                 """
                 INSERT INTO alert_delivery (id, alert_key, kind, notification, created_at, delivered_channels,
                                             failed_attempts, first_attempt_at, next_attempt_at, last_error, held,
-                                            explicit_recovery, occurrence, seq, flap_count, channel_retries)
+                                            explicit_recovery, occurrence, seq, flap_count, channel_retries, channels,
+                                            skipped_channels)
                 VALUES (@id, @key, @kind, @notification, @created, @delivered, @failed, @first, @next, @error, @held,
-                        @explicit, @occurrence, @seq, @flaps, @retries)
+                        @explicit, @occurrence, @seq, @flaps, @retries, @channels, @skipped)
                 ON CONFLICT(id) DO UPDATE SET
                     notification = excluded.notification,
                     delivered_channels = excluded.delivered_channels,
@@ -284,7 +298,9 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
                     occurrence = excluded.occurrence,
                     seq = excluded.seq,
                     flap_count = excluded.flap_count,
-                    channel_retries = excluded.channel_retries
+                    channel_retries = excluded.channel_retries,
+                    channels = excluded.channels,
+                    skipped_channels = excluded.skipped_channels
                 """;
             cmd.Parameters.AddWithValue("@id", delivery.Id);
             cmd.Parameters.AddWithValue("@key", delivery.AlertKey);
@@ -302,6 +318,9 @@ public sealed class SqliteAlertStateStore : IAlertStateStore
             cmd.Parameters.AddWithValue("@seq", delivery.Sequence);
             cmd.Parameters.AddWithValue("@flaps", delivery.FlappingCount);
             cmd.Parameters.AddWithValue("@retries", JsonSerializer.Serialize(delivery.ChannelRetries, JsonOptions));
+            cmd.Parameters.AddWithValue("@channels",
+                delivery.Channels is { } channels ? JsonSerializer.Serialize(channels, JsonOptions) : DBNull.Value);
+            cmd.Parameters.AddWithValue("@skipped", JsonSerializer.Serialize(delivery.SkippedChannels, JsonOptions));
             cmd.ExecuteNonQuery();
         }
     }

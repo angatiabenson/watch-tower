@@ -174,6 +174,9 @@ public static class ConfigSchema
                 "When set, each request carries X-WatchTower-Signature: sha256=<HMAC-SHA256 of the body>."),
             new("Notifications:Webhook:MinSeverity", "Webhook: minimum severity", FieldType.Enum, Options: SeverityOptions),
             new("Notifications:TimeoutSeconds", "Webhook timeout (s)", FieldType.Int, null, 1, 120, Advanced: true),
+            new("Notifications:CriticalProbeCooldownSeconds", "Critical probe cooldown (s)", FieldType.Int,
+                "While a channel backs off after failures, a new critical alert may probe it this often at most.",
+                60, 3600, Advanced: true),
         ]),
 
         new("email", "Email alerts", "SMTP server and recipients for daily reports and emergency alerts.",

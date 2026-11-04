@@ -442,6 +442,22 @@ public class NotificationChannelTests
         errors.Should().NotContain(e => e.Contains("s3cr3t-token"));
     }
 
+    [Theory]
+    [InlineData("59", true)]
+    [InlineData("60", false)]
+    [InlineData("3600", false)]
+    [InlineData("3601", true)]
+    public void Validator_KeepsTheCriticalProbeCooldownWithinItsBounds(string seconds, bool rejected)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Notifications:CriticalProbeCooldownSeconds"] = seconds,
+        }).Build();
+
+        StartupValidator.Validate(config).Errors.Any(e => e.StartsWith("Notifications:CriticalProbeCooldownSeconds"))
+            .Should().Be(rejected);
+    }
+
     // ── Console API and portal action ──────────────────────────────────────
 
     [Fact]
