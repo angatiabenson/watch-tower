@@ -37,6 +37,7 @@ real agent, a code with `requireTls: true` and an `http://` URL is refused.
 | `outage` | Replays what an agent's outbox holds after the portal was unreachable for `--backlog-minutes` (default 120): one batch per 30 s with past timestamps, events first. Measures how fast your portal absorbs it. |
 | `portal-down` | Like `run` (default 10 minutes) but logs the outbox after every flush. Stop and restart your portal while it runs and watch the queue grow and drain. |
 | `endpoint-config` | Four batches for the endpoint check `shop-home`: a result `Up`; the check's configuration made invalid, so the entry keeps its last result and **timestamp** with status `ConfigurationError` and the error in `detail`; the first batch delivered again late; the check fixed, reporting a new result at once. Logs what a correct portal shows after each: `Up`, `ConfigurationError` (twice: an older batch must not bring `Up` back), `Up`. |
+| `stale-drive` | Five batches for drive `D:\`: read; not ready for 5 minutes (the same reading and **timestamp**, `isStale: false`); not ready for 15 minutes (still the same reading, now `isStale: true`, as the agent does once a reading is older than max(3 × poll interval, 10 min)); the second batch delivered again late; the drive ready again (a new reading, `isStale: false`). Logs what a correct portal shows after each: fresh, fresh, stale, stale (an older batch must not make it fresh again), fresh. Every batch from the simulator carries `isStale` on every snapshot entry, computed with the agent's own windows. |
 
 ## Commands
 

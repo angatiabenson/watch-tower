@@ -41,6 +41,7 @@
     <Compile Include="..\..\src\WatchTower\Portal\Contracts\MetricsBatchDto.cs" Link="Agent\MetricsBatchDto.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Contracts\RemoteAgentConfigDto.cs" Link="Agent\RemoteAgentConfigDto.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\EnrollmentCode.cs" Link="Agent\EnrollmentCode.cs" />
+    <Compile Include="..\..\src\WatchTower\Services\SnapshotFreshness.cs" Link="Agent\SnapshotFreshness.cs" />
   </ItemGroup>
 
 </Project>

@@ -12,6 +12,7 @@ using WatchTower.Models;
 using WatchTower.Portal.Actions;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
+using WatchTower.Services;
 
 namespace WatchTower.Samples.AgentSimulator;
 
@@ -85,6 +86,8 @@ public sealed partial class SimulatedAgent(
     private readonly List<PendingResult> _unsentResults = [];
     private EndpointStatusDto? _lastEndpoint;
     private string? _endpointConfigError;
+    private DiskMetricDto? _lastDriveD;
+    private bool _driveDReady = true;
     private long _nextId;
     private double _cpuLevel = 18, _ramLevel = 55;
 
@@ -127,6 +130,13 @@ public sealed partial class SimulatedAgent(
         _ram.RemoveRange(0, ram.Count);
 
         var snap = Stamp(at.AddSeconds(-1));
+        // D:\ while not ready keeps its last reading, like the agent; every snapshot entry gets
+        // isStale from the agent's own windows (SnapshotFreshness, with the default intervals).
+        if (_driveDReady || _lastDriveD is null)
+            _lastDriveD = new DiskMetricDto(snap, @"D:\", 512, 301.7, 41.1);
+        var polled = SnapshotFreshness.PolledWindow(60);   // Monitoring:Disk:PollIntervalSeconds
+        var polled30 = SnapshotFreshness.PolledWindow(30); // network, services, pools
+        bool Stale(string timestamp, TimeSpan window) => SnapshotFreshness.IsStale(ParseStamp(timestamp), at, window);
         return new MetricsBatchDto(
             options.AgentId,
             Guid.NewGuid().ToString(),
@@ -134,16 +144,25 @@ public sealed partial class SimulatedAgent(
             cpu,
             ram,
             [
-                new DiskMetricDto(snap, @"C:\", 126.4, 40.2, 68.2),
-                new DiskMetricDto(snap, @"D:\", 512, 301.7, 41.1),
+                new DiskMetricDto(snap, @"C:\", 126.4, 40.2, 68.2, Stale(snap, polled)),
+                _lastDriveD with { IsStale = Stale(_lastDriveD.Timestamp, polled) },
             ],
-            [new DiskQueueMetricDto(snap, "0 C:", Math.Round(_rng.NextDouble(), 2))],
-            [new NetworkMetricDto(snap, "Intel[R] 82574L Gigabit Network Connection", 0)],
-            _services.Select(s => new ServiceStatusDto(snap, s.Key, DisplayName(s.Key), s.Value.Status, s.Value.Running)).ToList(),
-            _pools.Select(p => new ApplicationPoolStatusDto(snap, p.Key, p.Value.Status, p.Value.Running)).ToList(),
+            [new DiskQueueMetricDto(snap, "0 C:", Math.Round(_rng.NextDouble(), 2), Stale(snap, polled))],
+            [new NetworkMetricDto(snap, "Intel[R] 82574L Gigabit Network Connection", 0, Stale(snap, polled30))],
+            _services.Select(s => new ServiceStatusDto(snap, s.Key, DisplayName(s.Key), s.Value.Status, s.Value.Running, Stale(snap, polled30))).ToList(),
+            _pools.Select(p => new ApplicationPoolStatusDto(snap, p.Key, p.Value.Status, p.Value.Running, Stale(snap, polled30))).ToList(),
             Telemetry(at),
-            Endpoints(snap));
+            Endpoints(snap)?.Select(e => e with { IsStale = Stale(e.Timestamp, SnapshotFreshness.EndpointWindow(60, 10)) }).ToList());
     }
+
+    /// <summary>
+    /// Makes the simulated fixed drive D:\ not ready (false) or ready again (true). While it is not
+    /// ready it stays listed with its last reading and timestamp, and turns stale after 10 minutes.
+    /// </summary>
+    public void SetDriveDReady(bool ready) => _driveDReady = ready;
+
+    private static DateTime ParseStamp(string stamp) =>
+        DateTime.Parse(stamp, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
 
     /// <summary>
     /// The simulated endpoint check "shop-home". While its configuration is invalid it does not

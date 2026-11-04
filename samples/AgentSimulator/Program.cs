@@ -26,7 +26,7 @@ public static class Program
         Usage: AgentSimulator --code <WT1.enrollment code> [options]
 
           --code <code>              Enrollment code from the portal (or env WATCHTOWER_ENROLLMENT_CODE).
-          --scenario <name>          smoke (default) | run | alerts | duplicate | outage | portal-down | endpoint-config
+          --scenario <name>          smoke (default) | run | alerts | duplicate | outage | portal-down | endpoint-config | stale-drive
           --duration <seconds>       How long run / portal-down last (default 120 / 600; 0 = until Ctrl+C).
           --interval <seconds>       Outbox flush and command poll interval (agent default 30; here 10).
           --config-interval <sec>    Remote config poll interval (agent default 300; here 30).
@@ -51,6 +51,8 @@ public static class Program
           portal-down  Like run, but reports the outbox; stop and start the portal meanwhile.
           endpoint-config  An endpoint check whose configuration becomes invalid (ConfigurationError),
                        a late re-delivery of an older batch, then the check fixed.
+          stale-drive  A fixed drive that goes not ready: kept with its last reading, sent with
+                       isStale true after 10 minutes, a late older batch, then the drive ready again.
         """;
 
     public static async Task<int> Main(string[] args)
@@ -135,6 +137,7 @@ public static class Program
                 "duplicate" => await scenario.DuplicateAsync(cts.Token),
                 "outage" => await scenario.OutageAsync(TimeSpan.FromMinutes(opts.Int("backlog-minutes", 120)), cts.Token),
                 "endpoint-config" => await scenario.EndpointConfigurationErrorAsync(cts.Token),
+                "stale-drive" => await scenario.StaleDriveAsync(cts.Token),
                 var other => Fail($"unknown scenario '{other}'"),
             };
         }
@@ -620,6 +623,49 @@ internal sealed class Scenarios(
         agent.SetEndpointConfigurationError(null);
         agent.Sample(start.AddMinutes(2));
         await SendAsync(agent.BuildBatch(start.AddMinutes(2)), "4. Configuration fixed, check runs at once", "Up with a new timestamp");
+
+        return ok ? 0 : 1;
+    }
+
+    // ── stale-drive ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A fixed drive that goes not ready: still listed, so it keeps its last reading and
+    /// timestamp, and is sent with isStale true once that reading is older than its window
+    /// (max(3 x 60 s, 10 min)). A late re-delivery of an earlier batch must not make it fresh
+    /// again; when the drive is ready again it is read at once and is fresh.
+    /// </summary>
+    public async Task<int> StaleDriveAsync(CancellationToken ct)
+    {
+        var start = Now.AddMinutes(-20);
+        var ok = true;
+
+        async Task SendAsync(MetricsBatchDto batch, string label, string expect)
+        {
+            var accepted = await portal.SendMetricsBatchAsync(batch, ct);
+            var d = batch.DiskMetrics.Single(m => m.DriveName == @"D:\");
+            log.LogInformation("{Label}: D:\\ timestamp {Timestamp}, isStale {IsStale}, batch {BatchId}: {Result}. Expected in the portal: {Expect}",
+                label, d.Timestamp, d.IsStale, batch.BatchId, accepted ? "2xx" : "FAILED", expect);
+            ok &= accepted;
+        }
+
+        agent.Sample(start);
+        await SendAsync(agent.BuildBatch(start), "1. Drive read", "fresh");
+
+        agent.SetDriveDReady(false);
+        agent.Sample(start.AddMinutes(5));
+        var early = agent.BuildBatch(start.AddMinutes(5));
+        await SendAsync(early, "2. Not ready for 5 min", "fresh: the same reading, still inside its 10 min window");
+
+        agent.Sample(start.AddMinutes(15));
+        await SendAsync(agent.BuildBatch(start.AddMinutes(15)), "3. Not ready for 15 min",
+            "stale (no reading since step 1), with the last reading unchanged");
+
+        await SendAsync(early, "4. Batch 2 delivered again (late)", "still stale: batch 2 is older (batchedAt)");
+
+        agent.SetDriveDReady(true);
+        agent.Sample(start.AddMinutes(16));
+        await SendAsync(agent.BuildBatch(start.AddMinutes(16)), "5. Drive ready again", "fresh, with a new timestamp");
 
         return ok ? 0 : 1;
     }
