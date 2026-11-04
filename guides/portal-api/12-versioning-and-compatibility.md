@@ -157,8 +157,10 @@ Differences from the JSON API:
   on their old portal, with its credentials). The metadata, the `AgentIdentity` and the
   destination of a call always come from one snapshot of the settings, and the credentials are
   only sent to that snapshot's BaseUrl origin (scheme, host and port). If the new settings can't
-  be connected with (for example `http://` under `RequireTls`), calls fail unsent and are retried
-  until they're fixed; the agent never falls back to the old channel. Up to 1.0.20 the channel
+  be connected with (for example `http://` under `RequireTls`), calls fail unsent and then follow
+  each operation's normal retry policy and limits (batches and events retry with backoff up to
+  their attempt limit, command results with their own backoff, config acknowledgements on each config cycle while
+  that version is current, command acknowledgements not at all); the agent never falls back to the old channel. Up to 1.0.20 the channel
   was built once at startup, so after a BaseUrl change calls kept going to the old portal, with
   the new token.
 - **Compression** (after 1.0.20): with `CompressRequests=Gzip`, `SendMetricsBatch` and `SendEvent`
