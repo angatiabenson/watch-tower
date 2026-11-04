@@ -413,9 +413,12 @@ public sealed class UpdateService
             PackageValidator(staged, manifest.Version);
             File.Delete(zipPath);
 
+            // Persist the staged package before announcing it: once ReadyToInstall is visible
+            // (to the console, the portal or a restart), a restarted agent must find it too.
+            lock (_lock) _stagedDirectory = staged;
+            PersistState();
             lock (_lock)
             {
-                _stagedDirectory = staged;
                 _phase = UpdatePhase.ReadyToInstall;
                 _progress = 1;
                 if (countdown) StartCountdownLocked();
