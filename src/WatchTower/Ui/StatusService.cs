@@ -149,7 +149,8 @@ public sealed class StatusService(
                     readAt = Utc(p.Timestamp),
                     isStale = freshness.IsStale(SnapshotKind.ApplicationPool, p.ApplicationPoolName, p.Timestamp, nowUtc),
                 }),
-                // Read-only: endpoints are configured with `WatchTower config import` (Monitoring:Endpoints).
+                // Check results only: the checks themselves (Monitoring:Endpoints) are edited in the
+                // console's "Endpoint checks" settings section or imported with `WatchTower config import`.
                 endpoints = metrics.GetLatestEndpointStatuses().OrderBy(e => e.Name).Select(e => new
                 {
                     name = e.Name,

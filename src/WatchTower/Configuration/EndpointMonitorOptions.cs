@@ -2,9 +2,9 @@ namespace WatchTower.Configuration;
 
 /// <summary>
 /// Endpoint checks: <c>Monitoring:Endpoints</c> is a list of <see cref="EndpointCheckOptions"/>.
-/// Bound from the <c>Monitoring</c> section (only the <c>Endpoints</c> key is read). The web
-/// console has no list-of-objects editor, so the list is set with <c>WatchTower config import</c>
-/// and shown read-only in the console status.
+/// Bound from the <c>Monitoring</c> section (only the <c>Endpoints</c> key is read). The list is
+/// edited in the web console's "Endpoint checks" settings section (or imported with
+/// <c>WatchTower config import</c>); the results are shown in the console status.
 /// </summary>
 public class EndpointMonitorOptions
 {
