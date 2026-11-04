@@ -105,6 +105,30 @@ public class SqliteCommandStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task TryRejectUnclaimed_RejectsOnlyACommandThatIsStillWaiting()
+    {
+        await _store.SaveCommandAsync(Command("waiting"));
+        await _store.SaveCommandAsync(Command("claimed"));
+        await _store.TryBeginExecutionAsync("claimed");
+
+        var result = await _store.TryRejectUnclaimedAsync("waiting", "Rejected: too old");
+        result.Should().NotBeNull();
+        result!.Success.Should().BeFalse();
+        result.Message.Should().Be("Rejected: too old");
+        (await _store.TryRejectUnclaimedAsync("waiting", "Rejected: again")).Should().BeNull();
+        (await _store.TryRejectUnclaimedAsync("claimed", "Rejected: too old")).Should().BeNull();
+        (await _store.TryRejectUnclaimedAsync("unknown", "Rejected: too old")).Should().BeNull();
+
+        (await _store.TryBeginExecutionAsync("waiting")).Should().BeFalse();
+        (await _store.SaveCommandAsync(Command("waiting"))).Should().BeFalse("a re-delivery must not run it");
+        (await _store.GetPendingCommandsAsync()).Should().BeEmpty();
+        (await _store.GetUnsentResultsAsync()).Should().ContainSingle(r => r.CommandId == "waiting" && r.Status == "Failed");
+        _store.GetCommandIdOutcome("waiting").Should().Be("Rejected");
+        _store.GetCommandIdOutcome("claimed").Should().Be("Executing");
+        _store.CountRejections().Should().Be(1);
+    }
+
+    [Fact]
     public async Task FailInterruptedCommands_FailsOnlyExecutingRows_AndQueuesTheirResults()
     {
         await _store.SaveCommandAsync(Command("stuck"));

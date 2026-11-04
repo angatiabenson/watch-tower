@@ -237,6 +237,34 @@ public class SqliteCommandStore : ICommandStore, IDisposable
         }
     }
 
+    public Task<CommandResultDto?> TryRejectUnclaimedAsync(string commandId, string message)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            var now = DateTime.UtcNow.ToString("O");
+            var result = new CommandResultDto(commandId, false, message, now);
+
+            // Only a command nobody claimed: one already executing or finished keeps its outcome.
+            using var update = conn.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText =
+                $@"UPDATE agent_commands
+                   SET status = 'Failed', executed_at = @now, result_json = @result, rejected = 1, {ResetResultRetry}
+                   WHERE command_id = @id AND status IN ('Received', 'Acknowledged')";
+            update.Parameters.AddWithValue("@now", now);
+            update.Parameters.AddWithValue("@result", JsonSerializer.Serialize(result));
+            update.Parameters.AddWithValue("@id", commandId);
+            if (update.ExecuteNonQuery() == 0)
+                return Task.FromResult<CommandResultDto?>(null);
+
+            SetOutcome(conn, tx, commandId, "Rejected");
+            tx.Commit();
+            return Task.FromResult<CommandResultDto?>(result);
+        }
+    }
+
     private static string? NormalizeUtc(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return value;

@@ -27,7 +27,20 @@ public interface ICommandStore
     /// limit). Ids whose command row still exists are kept. Returns the number forgotten.
     /// </summary>
     Task<int> PruneCommandIdsAsync(DateTime? seenBeforeUtc, int maxCount);
+
+    /// <summary>
+    /// Commands stored but not claimed for execution yet ('Received'/'Acknowledged'), oldest
+    /// first: deferred ones, and ones a previous process saved but stopped before claiming.
+    /// </summary>
     Task<IReadOnlyList<AgentCommandRecord>> GetPendingCommandsAsync();
+
+    /// <summary>
+    /// Refuses a stored command that was never claimed: it becomes 'Failed' and rejected (its id
+    /// outcome 'Rejected'), with an unsent result carrying <paramref name="message"/> that is
+    /// reported and retried like any other rejection. Returns that result, or <c>null</c> without
+    /// changing anything when the command is no longer waiting (claimed, finished or unknown).
+    /// </summary>
+    Task<CommandResultDto?> TryRejectUnclaimedAsync(string commandId, string message);
     /// <summary>
     /// Atomically transitions a command from Received/Acknowledged to Executing.
     /// Returns <c>true</c> only if this caller won the claim; <c>false</c> if the command

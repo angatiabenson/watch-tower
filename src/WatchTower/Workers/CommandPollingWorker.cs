@@ -27,7 +27,11 @@ public class CommandPollingWorker : BackgroundService
     internal static readonly TimeSpan PurgeInterval = TimeSpan.FromHours(1);
 
     internal const string InterruptedMessage =
-        "Agent stopped while the command was executing; its outcome is unknown";
+        "Interrupted: the agent stopped while this command was running; its outcome is unknown";
+
+    /// <summary>Result of a stored command that waited too long to be run (see <see cref="ResumeUnclaimedCommandsAsync"/>).</summary>
+    internal const string ExpiredBeforeRunMessage =
+        RejectedPrefix + "command expired before it could run (agent restarted)";
 
     private bool _interruptedRecovered;
     private DateTime _lastPurge = DateTime.MinValue;
@@ -96,6 +100,7 @@ public class CommandPollingWorker : BackgroundService
             _interruptedRecovered = true;
         }
 
+        await ResumeUnclaimedCommandsAsync(opts, ct);
         await PollAndExecuteCommandsAsync(opts, ct);
         await ExecuteDueScheduledCommandsAsync(opts, ct);
         await RetryUnsentResultsAsync(ct);
@@ -184,6 +189,139 @@ public class CommandPollingWorker : BackgroundService
                 "Command {CommandId} was still executing when the agent stopped; marked failed", result.CommandId);
             await ReportResultAsync(result, ct);
         }
+    }
+
+    /// <summary>
+    /// Runs the commands that were stored ('Received') but never claimed: the agent stopped
+    /// between saving and claiming one (crash, kill, reboot), or claiming it failed. Nothing
+    /// else would run them: the portal may never re-deliver them, and a stale re-delivery is
+    /// ignored because the id is known. Each goes through the normal path (freshness, then
+    /// claim, execute and report), so it runs at most once; one too old to run now is rejected
+    /// with <see cref="ExpiredBeforeRunMessage"/>. Deferred commands (with a ScheduledAt) are
+    /// left to <see cref="ExecuteDueScheduledCommandsAsync"/>. Commands left 'Executing' are not
+    /// here: they may have had effects and are failed by <see cref="RecoverInterruptedCommandsAsync"/>.
+    /// Runs every cycle, before the poll; at that point no command of this process sits between
+    /// being saved and being claimed.
+    /// </summary>
+    private async Task ResumeUnclaimedCommandsAsync(PortalOptions opts, CancellationToken ct)
+    {
+        IReadOnlyList<AgentCommandRecord> pending;
+        try
+        {
+            pending = await _commandStore.GetPendingCommandsAsync() ?? [];
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read the stored commands that were never run");
+            return;
+        }
+
+        foreach (var record in pending)
+        {
+            if (ct.IsCancellationRequested) break;
+            if (TryParseUtc(record.ScheduledAt, out _))
+                continue;
+
+            // Isolated per command, like the poll path; one that fails is tried again next cycle.
+            try
+            {
+                await ResumeUnclaimedCommandAsync(record, opts, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to run stored command {CommandId} (ActionType={ActionType})",
+                    record.CommandId, record.ActionType);
+            }
+        }
+    }
+
+    private async Task ResumeUnclaimedCommandAsync(AgentCommandRecord record, PortalOptions opts, CancellationToken ct)
+    {
+        if (!MayStillRun(record, opts, out var rejection))
+        {
+            var rejected = await _commandStore.TryRejectUnclaimedAsync(record.CommandId, rejection);
+            if (rejected is null)
+                return; // claimed or finished meanwhile
+
+            _logger.LogWarning(
+                "Rejecting stored command {CommandId} (ActionType={ActionType}, received {ReceivedAt}) that was never run: {Reason}",
+                record.CommandId, record.ActionType, record.ReceivedAt, rejection);
+            await ReportResultAsync(rejected, ct);
+            return;
+        }
+
+        if (!TryReadCommand(record, out var command))
+        {
+            await FailCommandAsync(command, "Stored command parameters are unreadable", ct);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Running command {CommandId} (ActionType={ActionType}): received {ReceivedAt} but not run before the agent stopped",
+            record.CommandId, record.ActionType, record.ReceivedAt);
+        await ExecuteCommandAsync(command, opts, ct);
+    }
+
+    /// <summary>
+    /// The receipt freshness check (<see cref="IsFresh"/>), applied again now to a stored command
+    /// that was never run. One without issuedAt is aged from when it was received, with the same
+    /// limit (MaxCommandAgeSeconds + ClockSkewSeconds; none when MaxCommandAgeSeconds is 0).
+    /// </summary>
+    private bool MayStillRun(AgentCommandRecord record, PortalOptions opts, out string rejection)
+    {
+        rejection = string.Empty;
+        var stored = new AgentCommandDto(record.CommandId, record.ActionType, new Dictionary<string, string>(),
+            record.ScheduledAt, record.IssuedAt!);
+        if (!IsFresh(stored, opts, out var reason, out var stale))
+        {
+            rejection = stale ? ExpiredBeforeRunMessage : $"{RejectedPrefix}{reason}";
+            return false;
+        }
+
+        var maxAge = opts.CommandPoll.MaxCommandAgeSeconds;
+        if (maxAge > 0 && string.IsNullOrWhiteSpace(record.IssuedAt) && TryParseUtc(record.ReceivedAt, out var received) &&
+            UtcNow - received > TimeSpan.FromSeconds(maxAge) + TimeSpan.FromSeconds(opts.CommandPoll.ClockSkewSeconds))
+        {
+            rejection = ExpiredBeforeRunMessage;
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Rebuilds a stored command; <c>false</c> (with empty parameters) when its parameters are unreadable.</summary>
+    private bool TryReadCommand(AgentCommandRecord record, out AgentCommandDto command)
+    {
+        Dictionary<string, string>? parameters = null;
+        var readable = true;
+        try
+        {
+            parameters = JsonSerializer.Deserialize<Dictionary<string, string>>(record.ParamsJson);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "Stored command {CommandId} has unreadable parameters", record.CommandId);
+            readable = false;
+        }
+
+        command = new AgentCommandDto(
+            record.CommandId,
+            record.ActionType,
+            parameters ?? new Dictionary<string, string>(),
+            record.ScheduledAt,
+            record.IssuedAt ?? record.ReceivedAt);
+        return readable;
+    }
+
+    private static bool TryParseUtc(string? value, out DateTime utc)
+    {
+        utc = default;
+        return !string.IsNullOrWhiteSpace(value) &&
+               DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                   DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out utc);
     }
 
     private async Task PurgeFinishedCommandsAsync(PortalOptions opts)
@@ -283,7 +421,7 @@ public class CommandPollingWorker : BackgroundService
         // Validated on IssuedAt, not ScheduledAt, so legitimately deferred commands
         // (recent IssuedAt, future ScheduledAt) still pass. A missing IssuedAt is accepted unless
         // VisibilityPortal:RequireCommandIssuedAt is set.
-        if (!IsFresh(command, opts, out var freshnessReason))
+        if (!IsFresh(command, opts, out var freshnessReason, out _))
         {
             await RejectAsync(command, freshnessReason, ct);
             return;
@@ -422,26 +560,11 @@ public class CommandPollingWorker : BackgroundService
                 // Isolated per command, like the poll path: one bad record must not block the rest.
                 try
                 {
-                    Dictionary<string, string>? parameters;
-                    try
+                    if (!TryReadCommand(record, out var command))
                     {
-                        parameters = JsonSerializer.Deserialize<Dictionary<string, string>>(record.ParamsJson);
-                    }
-                    catch (JsonException ex)
-                    {
-                        _logger.LogError(ex, "Scheduled command {CommandId} has unreadable parameters", record.CommandId);
-                        var unreadable = new AgentCommandDto(record.CommandId, record.ActionType,
-                            new Dictionary<string, string>(), record.ScheduledAt, record.IssuedAt ?? record.ReceivedAt);
-                        await FailCommandAsync(unreadable, "Stored command parameters are unreadable", ct);
+                        await FailCommandAsync(command, "Stored command parameters are unreadable", ct);
                         continue;
                     }
-
-                    var command = new AgentCommandDto(
-                        record.CommandId,
-                        record.ActionType,
-                        parameters ?? new Dictionary<string, string>(),
-                        record.ScheduledAt,
-                        record.IssuedAt ?? record.ReceivedAt);
 
                     await ExecuteCommandAsync(command, opts, ct);
                 }
@@ -497,9 +620,11 @@ public class CommandPollingWorker : BackgroundService
 
     internal const string IssuedAtRequiredReason = "issuedAt is required";
 
-    private bool IsFresh(AgentCommandDto command, PortalOptions opts, out string reason)
+    /// <param name="stale"><c>true</c> when the command was refused only for being too old.</param>
+    private bool IsFresh(AgentCommandDto command, PortalOptions opts, out string reason, out bool stale)
     {
         reason = string.Empty;
+        stale = false;
         if (opts.RequireCommandIssuedAt && string.IsNullOrWhiteSpace(command.IssuedAt))
         {
             reason = IssuedAtRequiredReason;
@@ -524,8 +649,7 @@ public class CommandPollingWorker : BackgroundService
             return true;
         }
 
-        if (!DateTime.TryParse(command.IssuedAt, CultureInfo.InvariantCulture,
-                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var issued))
+        if (!TryParseUtc(command.IssuedAt, out var issued))
         {
             reason = $"unparseable issuedAt '{command.IssuedAt}'";
             return false;
@@ -544,6 +668,7 @@ public class CommandPollingWorker : BackgroundService
         {
             reason = $"command is stale: issuedAt {issued:O} is more than {maxAge + skewSeconds}s old " +
                      $"(max age {maxAge}s + {skewSeconds}s clock skew; agent time {now:O})";
+            stale = true;
             return false;
         }
         return true;

@@ -691,6 +691,7 @@ public class CommandPollingWorkerTests
         public Task<bool> TryRecordRejectedAsync(AgentCommandDto command, string message) => inner.TryRecordRejectedAsync(command, message);
         public Task<int> PruneCommandIdsAsync(DateTime? seenBeforeUtc, int maxCount) => inner.PruneCommandIdsAsync(seenBeforeUtc, maxCount);
         public Task<IReadOnlyList<AgentCommandRecord>> GetPendingCommandsAsync() => inner.GetPendingCommandsAsync();
+        public Task<CommandResultDto?> TryRejectUnclaimedAsync(string commandId, string message) => inner.TryRejectUnclaimedAsync(commandId, message);
         public Task<bool> TryBeginExecutionAsync(string commandId) => Then(nameof(TryBeginExecutionAsync), inner.TryBeginExecutionAsync(commandId));
         public Task MarkCompletedAsync(string commandId, CommandResultDto result) => inner.MarkCompletedAsync(commandId, result);
         public Task MarkFailedAsync(string commandId, string error) => inner.MarkFailedAsync(commandId, error);
@@ -734,5 +735,131 @@ public class CommandPollingWorkerTests
         await RealStoreWorker(new SqliteCommandStore(db.Path)).RunCycleAsync(CancellationToken.None);
         Executions().Should().Be(expectedExecutions, because);
         store.GetCommandIdOutcome("c1").Should().Be(expectedExecutions == 0 ? "Failed" : "Completed");
+    }
+
+    /// <summary>A first process receives <paramref name="command"/> and "crashes" right after <paramref name="crashAfter"/>.</summary>
+    private async Task ReceiveThenCrashAsync(TempDb db, string crashAfter, AgentCommandDto command)
+    {
+        Poll(command);
+        var crashing = new CrashingStore(new SqliteCommandStore(db.Path)) { CrashAfter = crashAfter };
+        await RealStoreWorker(crashing).RunCycleAsync(CancellationToken.None);
+        Executions().Should().Be(0);
+        _portal.Invocations.Clear();
+    }
+
+    private List<CommandResultDto> Reported(string commandId) => _portal.Invocations
+        .Where(i => i.Method.Name == nameof(IPortalClient.ReportCommandResultAsync))
+        .Select(i => i.Arguments[0])
+        .OfType<CommandResultDto>()
+        .Where(r => r.CommandId == commandId)
+        .ToList();
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RealStore_SavedButNeverClaimed_RunsExactlyOnceAfterRestart_WithoutRedelivery(bool withIssuedAt)
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow);
+        ResultAccepted(true);
+        var command = withIssuedAt ? Command("c1") : Command("c1") with { IssuedAt = null! };
+        await ReceiveThenCrashAsync(db, nameof(ICommandStore.SaveCommandAsync), command);
+
+        // Restarted a few minutes later; the portal does not send the command again.
+        _time.Advance(TimeSpan.FromMinutes(5));
+        Poll();
+        var store = new SqliteCommandStore(db.Path);
+        var restarted = RealStoreWorker(store);
+        await restarted.RunCycleAsync(CancellationToken.None);
+
+        Executions().Should().Be(1);
+        Reported("c1").Should().ContainSingle().Which.Success.Should().BeTrue();
+
+        // Never again: later cycles, a re-delivery, another restart.
+        await restarted.RunCycleAsync(CancellationToken.None);
+        Poll(command);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        await RealStoreWorker(new SqliteCommandStore(db.Path)).RunCycleAsync(CancellationToken.None);
+
+        Executions().Should().Be(1);
+        Reported("c1").Should().ContainSingle();
+        store.GetCommandIdOutcome("c1").Should().Be("Completed");
+        (await store.GetPendingCommandsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RealStore_CrashWhileExecuting_IsReportedInterrupted_AndNeverRunAgain()
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow);
+        ResultAccepted(true);
+        var command = Command("c1");
+        // Claimed ('Executing'), then the process died: the action may or may not have run.
+        await ReceiveThenCrashAsync(db, nameof(ICommandStore.TryBeginExecutionAsync), command);
+
+        Poll();
+        var store = new SqliteCommandStore(db.Path);
+        var restarted = RealStoreWorker(store);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        Poll(command);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        await RealStoreWorker(new SqliteCommandStore(db.Path)).RunCycleAsync(CancellationToken.None);
+
+        Executions().Should().Be(0, "it may have had side effects before the agent stopped");
+        var result = Reported("c1").Should().ContainSingle().Subject;
+        result.Success.Should().BeFalse();
+        result.Message.Should().Be("Interrupted: the agent stopped while this command was running; its outcome is unknown");
+        store.GetCommandIdOutcome("c1").Should().Be("Failed");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RealStore_SavedButNeverClaimed_TooOldAfterRestart_IsRejected(bool withIssuedAt)
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow);
+        var command = withIssuedAt ? Command("c1") : Command("c1") with { IssuedAt = null! };
+        await ReceiveThenCrashAsync(db, nameof(ICommandStore.SaveCommandAsync), command);
+
+        // Down for longer than MaxCommandAgeSeconds (3600) + ClockSkewSeconds (300 by default).
+        _time.Advance(TimeSpan.FromSeconds(3600 + 300 + 60));
+        Poll();
+        ResultAccepted(false);
+        var store = new SqliteCommandStore(db.Path);
+        var restarted = RealStoreWorker(store);
+        await restarted.RunCycleAsync(CancellationToken.None);
+
+        // Reported, and retried until accepted, like any other rejection.
+        _time.Advance(TimeSpan.FromMinutes(1));
+        ResultAccepted(true);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        await restarted.RunCycleAsync(CancellationToken.None);
+
+        Executions().Should().Be(0);
+        var results = Reported("c1");
+        results.Should().HaveCount(2).And.OnlyContain(r => !r.Success &&
+            r.Message == "Rejected: command expired before it could run (agent restarted)");
+        (await store.GetUnsentResultsAsync()).Should().BeEmpty("the second attempt was accepted");
+        store.GetCommandIdOutcome("c1").Should().Be("Rejected");
+        store.CountRejections().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task RealStore_DeferredCommand_IsNotRunBeforeItIsDue()
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow);
+        ResultAccepted(true);
+        Poll(Command("later") with { ScheduledAt = DateTime.UtcNow.AddHours(1).ToString("O") });
+        var store = new SqliteCommandStore(db.Path);
+        await RealStoreWorker(store).RunCycleAsync(CancellationToken.None);
+
+        Poll();
+        await RealStoreWorker(new SqliteCommandStore(db.Path)).RunCycleAsync(CancellationToken.None);
+
+        Executions().Should().Be(0);
+        (await store.GetPendingCommandsAsync()).Select(r => r.CommandId).Should().Equal("later");
     }
 }
