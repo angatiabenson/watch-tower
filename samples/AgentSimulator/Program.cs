@@ -40,7 +40,9 @@ public static class Program
           --verbose                  Log every HTTP request.
 
         Scenarios:
-          smoke        Conformance check of every endpoint; exit code 0 when everything passed.
+          smoke        Conformance check of every endpoint (real status codes). Queue a command and push
+                       a configuration first, or those checks are skipped. Exit code 0 = all passed,
+                       1 = a check failed, 3 = incomplete (nothing failed, but checks were skipped).
           run          Behave like an agent: metrics, commands, config and occasional incidents.
           alerts       Send one example of every incident type and alert lifecycle, then exit.
           duplicate    Send batches, events and results more than once and out of order.
@@ -184,89 +186,254 @@ internal sealed class Scenarios(
 
     // ── smoke ───────────────────────────────────────────────────────────────
 
+    private enum Outcome { Pass, Fail, Skip }
+
+    /// <summary>The agent's wire options (HttpsPortalClient): camelCase, nulls omitted, case-sensitive reads.</summary>
+    private static readonly JsonSerializerOptions WireJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    private sealed record ConfigFetchResponse(RemoteAgentConfigDto? Config, string? Version);
+
+    /// <summary>An HTTP exchange: the status code (0 when no response arrived) and the body or error.</summary>
+    private sealed record Exchange(int Status, string Body)
+    {
+        public bool Is2xx => Status is >= 200 and < 300;
+
+        public override string ToString() => Status == 0 ? $"no response ({Body})" : $"HTTP {Status}";
+    }
+
+    /// <summary>
+    /// Conformance check of every operation. Unlike the agent's client (which only reports
+    /// success or failure), every request here is sent through the same authenticated
+    /// HttpClient pipeline and its real status code is checked. Operations that need data from
+    /// the portal (a pending command, a pushed configuration) are reported as SKIP when there is
+    /// none, and the run is then INCOMPLETE (exit code 3) instead of passing.
+    /// </summary>
     public async Task<int> SmokeAsync(CancellationToken ct)
     {
-        var checks = new List<(string Name, bool Ok, string Note)>();
-        void Check(string name, bool ok, string note = "") => checks.Add((name, ok, note));
+        var checks = new List<(string Name, Outcome Outcome, string Note)>();
+        void Check(string name, bool ok, string note) => checks.Add((name, ok ? Outcome.Pass : Outcome.Fail, note));
+        void Skip(string name, string why) => checks.Add((name, Outcome.Skip, why));
+        void Expect2xx(string name, Exchange e) => Check(name, e.Is2xx, e.ToString());
 
+        // Telemetry
         agent.Sample(Now.AddSeconds(-5));
         agent.Sample(Now);
         var batch = agent.BuildBatch(Now);
-        Check("POST metrics/batch accepted (2xx)", await portal.SendMetricsBatchAsync(batch, ct));
-        Check("Same batchId again answered 2xx (deduplicate, do not reject)", await portal.SendMetricsBatchAsync(batch, ct));
-
+        Expect2xx("POST metrics/batch accepted (2xx)", await PostAsync("metrics/batch", batch, ct));
+        Expect2xx("Same batchId again answered 2xx (deduplicate, do not reject)", await PostAsync("metrics/batch", batch, ct));
         var legacy = batch with { BatchId = null!, Agent = null, EndpointStatuses = null };
-        Check("Batch from a 1.0.x agent (no batchId, agent, endpointStatuses) accepted",
-            await portal.SendMetricsBatchAsync(legacy, ct));
-
-        Check("Unknown JSON properties ignored (forward compatibility)", await PostWithExtraFieldAsync(batch with { BatchId = Guid.NewGuid().ToString() }, ct));
+        Expect2xx("Batch from a 1.0.x agent (no batchId, agent, endpointStatuses) accepted", await PostAsync("metrics/batch", legacy, ct));
+        var future = JsonSerializer.SerializeToNode(batch with { BatchId = Guid.NewGuid().ToString() }, WireJson)!.AsObject();
+        future["fieldFromTheFuture"] = new JsonObject { ["value"] = 42 };
+        future["agent"]!["capabilityFromTheFuture"] = true;
+        future["serviceStatuses"]!.AsArray().Add(new JsonObject
+        {
+            ["timestamp"] = SimulatedAgent.Stamp(Now),
+            ["serviceName"] = "FutureSvc",
+            ["displayName"] = "Future service",
+            ["status"] = "StatusFromTheFuture",
+            ["isRunning"] = false,
+        });
+        Expect2xx("Unknown properties and enum values ignored (forward compatibility)", await PostAsync("metrics/batch", future, ct));
 
         var opened = new AgentEventDto(Guid.NewGuid().ToString(), SimulatedAgent.Stamp(Now), (int)IncidentType.CpuThresholdBreached,
             "CPU at 99.6% for over 300s", agent.TopProcesses(), "cpu", false);
-        Check("POST events accepted (alert opened)", await portal.SendEventAsync(opened, ct));
-        Check("Same eventId again answered 2xx", await portal.SendEventAsync(opened, ct));
-        Check("Alert resolved event accepted", await portal.SendEventAsync(new AgentEventDto(Guid.NewGuid().ToString(),
+        Expect2xx("POST events accepted (alert opened)", await PostAsync("events", opened, ct));
+        Expect2xx("Same eventId again answered 2xx", await PostAsync("events", opened, ct));
+        Expect2xx("Alert resolved event accepted", await PostAsync("events", new AgentEventDto(Guid.NewGuid().ToString(),
             SimulatedAgent.Stamp(Now.AddSeconds(1)), (int)IncidentType.CpuThresholdBreached,
             "Resolved after 0s: CPU at 99.6% for over 300s", null, "cpu", true), ct));
-        Check("One-shot event accepted (alertKey reboot, no resolved)", await portal.SendEventAsync(new AgentEventDto(
+        Expect2xx("One-shot event accepted (alertKey reboot, no resolved)", await PostAsync("events", new AgentEventDto(
             Guid.NewGuid().ToString(), SimulatedAgent.Stamp(Now), (int)IncidentType.ServerRestarted,
             "The server restarted at 2026-11-03 05:58 UTC. WatchTower was stopped cleanly beforehand (orderly shutdown or reboot).",
             null, "reboot", null), ct));
-        Check("Incident without alert accepted (no alertKey)", await portal.SendEventAsync(new AgentEventDto(
+        Expect2xx("Incident without alert accepted (no alertKey)", await PostAsync("events", new AgentEventDto(
             Guid.NewGuid().ToString(), SimulatedAgent.Stamp(Now), (int)IncidentType.CpuSpikeDetected,
             "CPU hit 97.2% (threshold: 95%)", agent.TopProcesses(), null, null), ct));
+        Expect2xx("Unknown incident type accepted", await PostAsync("events", new AgentEventDto(
+            Guid.NewGuid().ToString(), SimulatedAgent.Stamp(Now), 999, "An incident type from a later agent", null, null, null), ct));
 
-        var count = await agent.PollCommandsAsync(ct);
-        Check("GET commands/pending answered (200 array or 204)", true, $"{count} command(s) received and handled");
-        Check("Command results accepted", agent.UnsentResults == 0, agent.UnsentResults == 0 ? "" : $"{agent.UnsentResults} result(s) not accepted");
+        await SmokeCommandsAsync(Check, Skip, Expect2xx, ct);
+        await SmokeConfigAsync(Check, Skip, Expect2xx, ct);
 
-        var applied = await agent.SyncConfigAsync(ct);
-        Check("GET config answered (200 or 204)", true, applied ? $"applied version {agent.ConfigVersion}" : "no new configuration");
-        if (applied)
-            Check("POST config/acknowledge accepted", agent.UnacknowledgedConfigVersion is null);
-        if (agent.ConfigVersion is not null)
-        {
-            var (again, _, _) = await portal.FetchConfigurationAsync(agent.ConfigVersion, ct);
-            Check("GET config?version=<current> answered 204", !again, again ? "the same version was sent again (harmless, but rewrites the agent's config file every poll)" : "");
-        }
-
-        Check("Wrong token rejected", !await SendWithWrongTokenAsync(batch, ct));
+        var wrongToken = await PostAsync("metrics/batch", batch with { BatchId = Guid.NewGuid().ToString() }, ct, token: "not-the-right-token");
+        Check("Wrong token answered exactly 401", wrongToken.Status == 401, wrongToken.ToString());
 
         Console.WriteLine();
-        foreach (var (name, ok, note) in checks)
-            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(note.Length > 0 ? $" - {note}" : "")}");
-        var failed = checks.Count(c => !c.Ok);
-        Console.WriteLine(failed == 0 ? "\nAll checks passed." : $"\n{failed} check(s) failed.");
-        return failed == 0 ? 0 : 1;
+        foreach (var (name, outcome, note) in checks)
+            Console.WriteLine($"  [{outcome.ToString().ToUpperInvariant()}] {name}{(note.Length > 0 ? $" - {note}" : "")}");
+        var failed = checks.Count(c => c.Outcome == Outcome.Fail);
+        var skipped = checks.Count(c => c.Outcome == Outcome.Skip);
+        if (failed > 0)
+        {
+            Console.WriteLine($"\nFAILED: {failed} check(s) failed{(skipped > 0 ? $", {skipped} skipped" : "")}.");
+            return 1;
+        }
+        if (skipped > 0)
+        {
+            Console.WriteLine($"\nINCOMPLETE: no failures, but {skipped} check(s) were skipped (each SKIP names the fixture it needs).");
+            return 3;
+        }
+        Console.WriteLine("\nAll checks passed.");
+        return 0;
     }
 
-    private async Task<bool> PostWithExtraFieldAsync(MetricsBatchDto batch, CancellationToken ct)
+    private async Task SmokeCommandsAsync(
+        Action<string, bool, string> check, Action<string, string> skip, Action<string, Exchange> expect2xx, CancellationToken ct)
     {
-        var json = JsonSerializer.SerializeToNode(batch, new JsonSerializerOptions
+        const string Fixture = "queue a command for this agent first (e.g. ForceMetricSnapshot, actionType 301) and run smoke again";
+        var poll = await SendAsync(HttpMethod.Get, "commands/pending", null, ct);
+        List<AgentCommandDto>? commands = null;
+        var parseError = "";
+        if (poll.Status == 200)
         {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-        })!.AsObject();
-        json["fieldFromTheFuture"] = new JsonObject { ["value"] = 42 };
-        json["agent"]!["capabilityFromTheFuture"] = true;
-        var http = services.GetRequiredService<IHttpClientFactory>().CreateClient("PortalClient");
-        using var response = await http.PostAsJsonAsync($"{options.BaseUrl.TrimEnd('/')}/api/v1/agent/metrics/batch", json, ct);
-        return response.IsSuccessStatusCode;
+            try
+            {
+                // Parsed like the agent does: the whole array at once, case-sensitive camelCase.
+                commands = JsonSerializer.Deserialize<List<AgentCommandDto>>(poll.Body, WireJson) ?? [];
+            }
+            catch (JsonException ex)
+            {
+                parseError = ex.Message;
+            }
+        }
+        else if (poll.Status == 204)
+        {
+            commands = [];
+        }
+
+        check("GET commands/pending answered 200 (JSON array) or 204", commands is not null,
+            commands is null
+                ? parseError.Length > 0 ? $"HTTP 200, but the agent cannot parse it: {parseError}" : poll.ToString()
+                : $"{poll}, {commands.Count} command(s)");
+
+        var command = commands?.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.CommandId));
+        if (commands is { Count: > 0 } && command is null)
+            check("Pending commands have a commandId", false, "none has one (property names are case-sensitive camelCase)");
+        if (command is null)
+        {
+            skip("POST commands/{id}/acknowledge accepted", Fixture);
+            skip("POST commands/{id}/result accepted", Fixture);
+            skip("Same result again answered 2xx", Fixture);
+            return;
+        }
+
+        command = command.Parameters is null ? command with { Parameters = [] } : command;
+        var fresh = agent.IsFresh(command, out var reason);
+        if (string.IsNullOrWhiteSpace(command.IssuedAt))
+            check("Pending command carries issuedAt", false, "accepted without it, but issuedAt SHOULD be sent (REQUIRED in v2)");
+        else
+            check("Pending command is fresh (issuedAt)", fresh, fresh ? command.IssuedAt : $"the agent refuses it: {reason}");
+
+        var id = Uri.EscapeDataString(command.CommandId);
+        expect2xx("POST commands/{id}/acknowledge accepted", await SendAsync(HttpMethod.Post, $"commands/{id}/acknowledge",
+            new AcknowledgeCommandDto(command.CommandId, SimulatedAgent.Stamp(Now)), ct));
+
+        var result = fresh
+            ? agent.Run(command)
+            : new CommandResultDto(command.CommandId, false, $"Rejected: {reason}", SimulatedAgent.Stamp(Now));
+        expect2xx("POST commands/{id}/result accepted", await SendAsync(HttpMethod.Post, $"commands/{id}/result", result, ct));
+        expect2xx("Same result again answered 2xx", await SendAsync(HttpMethod.Post, $"commands/{id}/result", result, ct));
     }
 
-    private async Task<bool> SendWithWrongTokenAsync(MetricsBatchDto batch, CancellationToken ct)
+    private async Task SmokeConfigAsync(
+        Action<string, bool, string> check, Action<string, string> skip, Action<string, Exchange> expect2xx, CancellationToken ct)
     {
-        var wrong = new PortalOptions
+        const string Fixture = "push a configuration for this agent first and run smoke again";
+        var fetch = await SendAsync(HttpMethod.Get, "config", null, ct);
+        ConfigFetchResponse? response = null;
+        var problem = fetch.ToString();
+        if (fetch.Status == 200)
         {
-            Enabled = true,
-            BaseUrl = options.BaseUrl,
-            AgentId = options.AgentId,
-            AgentToken = "not-the-right-token",
-            Tls = options.Tls,
-        };
-        await using var other = Program.BuildServices(wrong, verbose: false);
-        return await other.GetRequiredService<IPortalClient>()
-            .SendMetricsBatchAsync(batch with { BatchId = Guid.NewGuid().ToString() }, ct);
+            try
+            {
+                response = JsonSerializer.Deserialize<ConfigFetchResponse>(fetch.Body, WireJson);
+                if (response?.Config is null || string.IsNullOrEmpty(response.Version))
+                {
+                    problem = "HTTP 200 needs both config and version (the agent treats this as no change)";
+                    response = null;
+                }
+            }
+            catch (JsonException ex)
+            {
+                problem = $"HTTP 200, but the agent cannot parse it: {ex.Message}";
+            }
+        }
+
+        check("GET config answered 200 ({config, version}) or 204", fetch.Status == 204 || response is not null,
+            response is not null ? $"{fetch}, version {response.Version}" : problem);
+        if (response is null)
+        {
+            skip("Configuration passes the agent's validation", Fixture);
+            skip("POST config/acknowledge accepted", Fixture);
+            skip("GET config?version=<current> answered 204", Fixture);
+            return;
+        }
+
+        var valid = agent.TryApply(response.Config!, response.Version!, out var error);
+        check("Configuration passes the agent's validation", valid, valid ? "" : $"the agent would neither apply nor acknowledge it: {error}");
+        if (!valid)
+        {
+            skip("POST config/acknowledge accepted", "the agent does not acknowledge a configuration it rejects");
+            skip("GET config?version=<current> answered 204", "no valid configuration was applied");
+            return;
+        }
+
+        var ack = await SendAsync(HttpMethod.Post, "config/acknowledge", new { version = response.Version }, ct);
+        expect2xx("POST config/acknowledge accepted", ack);
+        if (ack.Is2xx)
+            agent.MarkConfigAcknowledged(response.Version!);
+
+        var again = await SendAsync(HttpMethod.Get, $"config?version={Uri.EscapeDataString(response.Version!)}", null, ct);
+        check("GET config?version=<current> answered 204", again.Status == 204,
+            again.Status == 200 ? "HTTP 200: the same version again (works, but rewrites the agent's config file every poll)" : again.ToString());
+    }
+
+    private Task<Exchange> PostAsync(string path, object body, CancellationToken ct, string? token = null) =>
+        SendAsync(HttpMethod.Post, path, body, ct, token);
+
+    /// <summary>
+    /// Sends one request to <c>{BaseUrl}/api/v1/agent/{path}</c> through the agent's HttpClient
+    /// pipeline (auth headers, TLS policy, 30 s timeout), serialized like the agent does.
+    /// </summary>
+    private async Task<Exchange> SendAsync(HttpMethod method, string path, object? body, CancellationToken ct, string? token = null)
+    {
+        ServiceProvider? other = null;
+        try
+        {
+            var provider = services;
+            if (token is not null)
+            {
+                other = Program.BuildServices(new PortalOptions
+                {
+                    Enabled = true,
+                    BaseUrl = options.BaseUrl,
+                    AgentId = options.AgentId,
+                    AgentToken = token,
+                    Tls = options.Tls,
+                }, verbose: false);
+                provider = other;
+            }
+            var http = provider.GetRequiredService<IHttpClientFactory>().CreateClient("PortalClient");
+            using var request = new HttpRequestMessage(method, $"{options.BaseUrl.TrimEnd('/')}/api/v1/agent/{path}");
+            if (body is not null)
+                request.Content = JsonContent.Create(body, body.GetType(), options: WireJson);
+            using var response = await http.SendAsync(request, ct);
+            return new Exchange((int)response.StatusCode, await response.Content.ReadAsStringAsync(ct));
+        }
+        catch (Exception ex) when (ex is HttpRequestException || (ex is TaskCanceledException && !ct.IsCancellationRequested))
+        {
+            return new Exchange(0, ex.Message);
+        }
+        finally
+        {
+            if (other is not null)
+                await other.DisposeAsync();
+        }
     }
 
     // ── run / portal-down ───────────────────────────────────────────────────

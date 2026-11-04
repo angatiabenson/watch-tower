@@ -64,6 +64,7 @@ public sealed partial class SimulatedAgent(
     private readonly Dictionary<string, (string Status, bool Running)> _pools =
         settings.WatchedPools.ToDictionary(p => p, _ => ("Started", true), StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _seenCommands = new(StringComparer.Ordinal);
+    private bool _warnedMissingIssuedAt;
     private readonly List<AgentCommandDto> _scheduled = [];
     private readonly List<CommandResultDto> _unsentResults = [];
     private long _nextId;
@@ -242,8 +243,10 @@ public sealed partial class SimulatedAgent(
 
             if (!IsFresh(command, out var reason))
             {
-                // Like the agent: no acknowledgement and no result. The portal must expire it.
+                // Like the agent: not executed, answered with a failed result giving the reason.
                 log.LogWarning("Rejecting command {CommandId}: {Reason}", command.CommandId, reason);
+                if (_seenCommands.Add(command.CommandId))
+                    await ReportAsync(new CommandResultDto(command.CommandId, false, $"Rejected: {reason}", Stamp(UtcNow)), ct);
                 continue;
             }
 
@@ -280,17 +283,24 @@ public sealed partial class SimulatedAgent(
 
     public int UnsentResults => _unsentResults.Count;
 
-    private async Task ExecuteAsync(AgentCommandDto command, CancellationToken ct)
+    private async Task ExecuteAsync(AgentCommandDto command, CancellationToken ct) =>
+        await ReportAsync(Run(command), ct);
+
+    private async Task ReportAsync(CommandResultDto result, CancellationToken ct)
+    {
+        if (!await portal.ReportCommandResultAsync(result, ct))
+            _unsentResults.Add(result); // retried on every poll until the portal answers 2xx
+    }
+
+    /// <summary>Authorizes and executes a command; returns the result to report.</summary>
+    public CommandResultDto Run(AgentCommandDto command)
     {
         var executedAt = Stamp(UtcNow);
         var (success, message) = Authorize(command) is { } refusal ? (false, $"Not authorized: {refusal}") : Execute(command);
         log.LogInformation("Command {CommandId} ({Action}) {Outcome}: {Message}", command.CommandId,
             Enum.IsDefined(typeof(ActionType), command.ActionType) ? ((ActionType)command.ActionType).ToString() : command.ActionType.ToString(CultureInfo.InvariantCulture),
             success ? "succeeded" : "failed", message);
-
-        var result = new CommandResultDto(command.CommandId, success, message, executedAt);
-        if (!await portal.ReportCommandResultAsync(result, ct))
-            _unsentResults.Add(result); // retried on every poll until the portal answers 2xx
+        return new CommandResultDto(command.CommandId, success, message, executedAt);
     }
 
     /// <summary>The agent's allow-list check: service/pool commands only for locally watched names.</summary>
@@ -408,23 +418,39 @@ public sealed partial class SimulatedAgent(
         }
     }
 
-    private bool IsFresh(AgentCommandDto command, out string reason)
+    /// <summary>
+    /// The agent's replay protection. A command without IssuedAt is accepted with a warning; with
+    /// IssuedAt it must be at most MaxCommandAgeSeconds + ClockSkewSeconds old and at most
+    /// ClockSkewSeconds in the future.
+    /// </summary>
+    public bool IsFresh(AgentCommandDto command, out string reason)
     {
         reason = string.Empty;
         if (settings.MaxCommandAgeSeconds <= 0)
             return true;
+        if (string.IsNullOrWhiteSpace(command.IssuedAt))
+        {
+            if (!_warnedMissingIssuedAt)
+            {
+                _warnedMissingIssuedAt = true;
+                log.LogWarning("Portal sends commands without issuedAt; replay protection is reduced. Update the portal.");
+            }
+            return true;
+        }
         if (!TryParseUtc(command.IssuedAt, out var issued))
         {
-            reason = string.IsNullOrWhiteSpace(command.IssuedAt)
-                ? "missing IssuedAt (required while MaxCommandAgeSeconds > 0)"
-                : $"unparseable IssuedAt '{command.IssuedAt}'";
+            reason = $"unparseable issuedAt '{command.IssuedAt}'";
             return false;
         }
-        var skew = TimeSpan.FromSeconds(settings.ClockSkewSeconds);
-        if (issued > UtcNow + skew)
-            reason = $"IssuedAt is in the future ({issued:O})";
-        else if (UtcNow - issued > TimeSpan.FromSeconds(settings.MaxCommandAgeSeconds) + skew)
-            reason = $"command is stale (issued {issued:O}, max age {settings.MaxCommandAgeSeconds}s)";
+        // The agent's wording (CommandPollingWorker.IsFresh); the exact limits are accepted.
+        var now = UtcNow;
+        var skewSeconds = settings.ClockSkewSeconds;
+        var maxAge = settings.MaxCommandAgeSeconds;
+        if (issued > now.AddSeconds(skewSeconds))
+            reason = $"issuedAt {issued:O} is more than {skewSeconds}s in the future (agent time {now:O})";
+        else if (now - issued > TimeSpan.FromSeconds(maxAge + skewSeconds))
+            reason = $"command is stale: issuedAt {issued:O} is more than {maxAge + skewSeconds}s old " +
+                     $"(max age {maxAge}s + {skewSeconds}s clock skew; agent time {now:O})";
         return reason.Length == 0;
     }
 
@@ -454,6 +480,21 @@ public sealed partial class SimulatedAgent(
         if (UnacknowledgedConfigVersion is { } pending && await portal.AcknowledgeConfigAsync(pending, ct))
             UnacknowledgedConfigVersion = null;
         return applied;
+    }
+
+    /// <summary>Validates with the agent's rules and applies; the version then awaits acknowledgement.</summary>
+    public bool TryApply(RemoteAgentConfigDto config, string version, out string error)
+    {
+        if (!RemoteConfigValidator.Validate(config, out error))
+            return false;
+        Apply(config, version);
+        return true;
+    }
+
+    public void MarkConfigAcknowledged(string version)
+    {
+        if (UnacknowledgedConfigVersion == version)
+            UnacknowledgedConfigVersion = null;
     }
 
     private (bool, string) ApplyConfigurationCommand(Dictionary<string, string> p)

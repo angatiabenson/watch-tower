@@ -30,7 +30,7 @@ real agent, a code with `requireTls: true` and an `http://` URL is refused.
 
 | Scenario | What it does |
 | --- | --- |
-| `smoke` (default) | A conformance check of every endpoint: batch, duplicate batch, 1.0.x-style batch, unknown fields, events (open, duplicate, resolve, one-shot, no alert), command poll and execution, config fetch, apply and acknowledge, 204 for the current version, and a wrong token that MUST be refused. Prints PASS/FAIL per check; exit code 0 when all pass. |
+| `smoke` (default) | A conformance check of every operation, sent through the agent's own authenticated HttpClient pipeline with the real status code checked: batch, duplicate batch, 1.0.x-style batch, unknown fields and enum values, events (open, duplicate, resolve, one-shot, no alert, unknown type), command poll (200 array the agent can parse, or 204), acknowledgement, result and a repeated result, config fetch (200 with both `config` and `version`, or 204), the agent's validation, acknowledgement and 204 for the current version, and a wrong token that must get exactly 401. Prints PASS, FAIL or SKIP per check. Checks that need a fixture are SKIPped when it is missing: queue a command (e.g. 301) and push a configuration for the agent before the run. Exit code 0 when everything passed, 1 when a check failed, 3 (INCOMPLETE) when nothing failed but checks were skipped. |
 | `run` | Behaves like an agent for `--duration` seconds: samples CPU/RAM every 5 s, flushes a batch every `--interval`, polls commands, polls config every `--config-interval`, and now and then plays a CPU alert or a service outage. |
 | `alerts` | Sends one example of every incident type (0 to 16) and every alert lifecycle shape: opened, resolved, recovery types, retirement, one-shot, no alert key. |
 | `duplicate` | Sends the same batch three times and an alert's close before its open, then the open twice. A correct portal stores one batch, two events and ends with the alert closed. |
@@ -55,8 +55,9 @@ executes (simulated) and reports them with the agent's own result messages:
 - 401 validates `ConfigJson` with the agent's validator and acknowledges its `Version`.
 - 501 succeeds for no `Channel` or `Channel=Email`, otherwise fails like an agent without that
   channel.
-- Commands whose `issuedAt` is missing, unparseable, too old or in the future are dropped without
-  an acknowledgement, exactly like the agent does.
+- Like the agent, a command without `issuedAt` is accepted with a warning that replay protection is
+  reduced; one whose `issuedAt` is unparseable, older than 3600 + 300 s or more than 300 s in the
+  future is not executed and is answered with a failed result giving the reason.
 
 ## Options
 
