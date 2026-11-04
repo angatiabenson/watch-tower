@@ -106,6 +106,17 @@ public class ApplicationPoolMonitorWorker : BackgroundService
             _logger.LogError(ex, "Could not retire alerts of application pools that are no longer watched");
         }
 
+        // Their last status would otherwise be repeated in every metrics batch forever.
+        try
+        {
+            foreach (var removed in _metricsStore.RemoveSnapshotsExcept(SnapshotKind.ApplicationPool, opts.WatchedApplicationPools))
+                _logger.LogInformation("Stopped reporting application pool {ApplicationPoolName} to the portal: {Reason}", removed, RemovedReason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not remove the snapshots of application pools that are no longer watched");
+        }
+
         if (opts.WatchedApplicationPools.Count == 0)
         {
             _logger.LogDebug("No IIS application pools configured for monitoring");

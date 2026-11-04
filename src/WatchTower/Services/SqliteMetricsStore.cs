@@ -611,6 +611,92 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
+    /// <summary>Table and key column of a snapshot kind (fixed identifiers, never user input).</summary>
+    private static (string Table, string Key) SnapshotTable(SnapshotKind kind) => kind switch
+    {
+        SnapshotKind.Disk => ("disk_metrics", "drive_name"),
+        SnapshotKind.DiskQueue => ("disk_queue_metrics", "instance_name"),
+        SnapshotKind.Network => ("network_metrics", "interface_name"),
+        SnapshotKind.Service => ("service_statuses", "service_name"),
+        SnapshotKind.ApplicationPool => ("application_pool_statuses", "app_pool_name"),
+        SnapshotKind.Endpoint => ("endpoint_status", "name"),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
+
+    public IReadOnlyList<string> GetSnapshotNames(SnapshotKind kind)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            return ReadSnapshotNames(conn, null, kind);
+        }
+    }
+
+    private static List<string> ReadSnapshotNames(SqliteConnection conn, SqliteTransaction? tx, SnapshotKind kind)
+    {
+        var (table, key) = SnapshotTable(kind);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"SELECT {key} FROM {table}";
+        var names = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    public int RemoveSnapshots(SnapshotKind kind, IEnumerable<string> names)
+    {
+        var wanted = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (wanted.Count == 0)
+            return 0;
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            var removed = DeleteSnapshotRows(conn, tx, kind,
+                ReadSnapshotNames(conn, tx, kind).Where(wanted.Contains).ToList());
+            tx.Commit();
+            return removed;
+        }
+    }
+
+    public IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep)
+    {
+        var kept = keep.ToHashSet(StringComparer.Ordinal);
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            var stale = ReadSnapshotNames(conn, tx, kind).Where(n => !kept.Contains(n)).ToList();
+            DeleteSnapshotRows(conn, tx, kind, stale);
+            tx.Commit();
+            return stale;
+        }
+    }
+
+    /// <summary>Deletes rows by their stored name (exact match, as read from the table).</summary>
+    private static int DeleteSnapshotRows(SqliteConnection conn, SqliteTransaction tx, SnapshotKind kind, IReadOnlyList<string> storedNames)
+    {
+        if (storedNames.Count == 0)
+            return 0;
+
+        var (table, key) = SnapshotTable(kind);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"DELETE FROM {table} WHERE {key} = @name";
+        var name = cmd.Parameters.Add("@name", SqliteType.Text);
+        var removed = 0;
+        foreach (var stored in storedNames)
+        {
+            name.Value = stored;
+            removed += cmd.ExecuteNonQuery();
+        }
+        return removed;
+    }
+
     public (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit)
     {
         var results = new List<CpuMetric>();

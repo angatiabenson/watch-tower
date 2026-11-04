@@ -128,4 +128,38 @@ public class MetricsStore : IMetricsStore
         var lastRowId = afterRowId + slice.Count;
         return (lastRowId, slice);
     }
+
+    private System.Collections.IDictionary Snapshot(SnapshotKind kind) => kind switch
+    {
+        SnapshotKind.Disk => _diskMetrics,
+        SnapshotKind.DiskQueue => _diskQueueMetrics,
+        SnapshotKind.Network => _networkMetrics,
+        SnapshotKind.Service => _serviceStatuses,
+        SnapshotKind.ApplicationPool => _applicationPoolStatuses,
+        SnapshotKind.Endpoint => _endpointStatuses,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
+
+    public IReadOnlyList<string> GetSnapshotNames(SnapshotKind kind) => Snapshot(kind).Keys.Cast<string>().ToList();
+
+    public int RemoveSnapshots(SnapshotKind kind, IEnumerable<string> names)
+    {
+        var wanted = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return RemoveWhere(kind, wanted.Contains).Count;
+    }
+
+    public IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep)
+    {
+        var kept = keep.ToHashSet(StringComparer.Ordinal);
+        return RemoveWhere(kind, n => !kept.Contains(n));
+    }
+
+    private List<string> RemoveWhere(SnapshotKind kind, Func<string, bool> predicate)
+    {
+        var snapshot = Snapshot(kind);
+        var removed = snapshot.Keys.Cast<string>().Where(predicate).ToList();
+        foreach (var name in removed)
+            snapshot.Remove(name);
+        return removed;
+    }
 }

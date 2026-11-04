@@ -136,6 +136,17 @@ public sealed class EndpointMonitorWorker(
         {
             logger.LogError(ex, "Could not retire alerts of endpoint checks that are no longer configured");
         }
+
+        // Their last result would otherwise be repeated in every metrics batch forever.
+        try
+        {
+            foreach (var removed in metricsStore.RemoveSnapshotsExcept(SnapshotKind.Endpoint, configured))
+                logger.LogInformation("Stopped reporting endpoint check {Endpoint} to the portal: {Reason}", removed, RemovedReason);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not remove the snapshots of endpoint checks that are no longer configured");
+        }
     }
 
     private async Task RunAsync(EndpointCheck check, CancellationToken ct)

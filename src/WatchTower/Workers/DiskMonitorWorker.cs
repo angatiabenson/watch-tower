@@ -41,11 +41,14 @@ public class DiskMonitorWorker : BackgroundService
         _health = workerHealth;
 
         // A host always has a system drive (and its physical disk): an empty listing is a broken
-        // read, never a reason to retire every disk alert.
+        // read, never a reason to retire every disk alert. Removed drives and disks also lose
+        // their snapshot row, so the portal stops receiving their last reading.
         _removedDisks = new AbsentResourceTracker(AlertKey.DiskPrefix, "drives",
-            drive => $"Disk {drive.TrimEnd('\\')} is no longer present", emptyIsSuspicious: true, logger);
+            drive => $"Disk {drive.TrimEnd('\\')} is no longer present", emptyIsSuspicious: true, logger,
+            metricsStore, SnapshotKind.Disk);
         _removedQueues = new AbsentResourceTracker(AlertKey.DiskQueuePrefix, "physical disks",
-            disk => $"Physical disk {disk} is no longer present", emptyIsSuspicious: true, logger);
+            disk => $"Physical disk {disk} is no longer present", emptyIsSuspicious: true, logger,
+            metricsStore, SnapshotKind.DiskQueue);
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -159,7 +162,7 @@ public class DiskMonitorWorker : BackgroundService
     }
 
     /// <summary>
-    /// Retires the alerts of drives or physical disks that are gone (see
+    /// Retires the alerts and snapshot rows of drives or physical disks that are gone (see
     /// <see cref="AbsentResourceTracker"/>); only reached after the metrics read succeeded.
     /// </summary>
     private async Task RetireRemovedAsync(AbsentResourceTracker tracker, Func<ResourceInventory?> inventory, CancellationToken ct)
@@ -170,7 +173,7 @@ public class DiskMonitorWorker : BackgroundService
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Could not retire alerts of removed disks");
+            _logger.LogError(ex, "Could not retire alerts or snapshots of removed disks");
         }
     }
 

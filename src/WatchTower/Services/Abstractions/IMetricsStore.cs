@@ -40,6 +40,35 @@ public interface IMetricsStore
 
     (long LastRowId, IReadOnlyList<CpuMetric> Metrics) GetCpuMetricsSince(long afterRowId, int limit);
     (long LastRowId, IReadOnlyList<RamMetric> Metrics) GetRamMetricsSince(long afterRowId, int limit);
+
+    /// <summary>Names of the resources that have a latest-state row of <paramref name="kind"/>.</summary>
+    IReadOnlyList<string> GetSnapshotNames(SnapshotKind kind);
+
+    /// <summary>
+    /// Deletes the latest-state rows of <paramref name="kind"/> for <paramref name="names"/>
+    /// (case-insensitive), so resources that are gone stop being reported. Returns the number
+    /// of rows deleted. A later reading of the same resource adds its row again.
+    /// </summary>
+    int RemoveSnapshots(SnapshotKind kind, IEnumerable<string> names);
+
+    /// <summary>
+    /// Deletes every latest-state row of <paramref name="kind"/> whose name is not in
+    /// <paramref name="keep"/>, for resources that are configured rather than discovered.
+    /// Names match exactly: rows are written with the configured name, so a name whose case
+    /// changed in the configuration replaces its old row. Returns the names deleted.
+    /// </summary>
+    IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep);
+}
+
+/// <summary>The latest-state ("snapshot") tables repeated in every metrics batch.</summary>
+public enum SnapshotKind
+{
+    Disk,
+    DiskQueue,
+    Network,
+    Service,
+    ApplicationPool,
+    Endpoint,
 }
 
 /// <summary>Outcome of <see cref="IMetricsStore.PurgeReportedData"/>.</summary>

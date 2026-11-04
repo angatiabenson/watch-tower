@@ -1,13 +1,18 @@
 using WatchTower.Models;
+using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Services.Alerting;
 
 /// <summary>
 /// Retires the open alerts of discovered resources (disks, disk queues, network adapters) that
-/// have disappeared. Unlike services or endpoints these are not configured, so nothing else
-/// would ever close an alert whose drive was removed; it would stay open (and remind) forever.
+/// have disappeared, and deletes their latest-state snapshot rows. Unlike services or endpoints
+/// these are not configured, so nothing else would ever close an alert whose drive was removed
+/// (it would stay open and remind forever) or stop reporting the drive's last reading to the portal.
 /// </summary>
 /// <remarks>
+/// <para>Tracked are the resources with an open alert of this kind and, when
+/// <c>snapshots</c> is given, the resources with a snapshot row of <c>snapshotKind</c>. Both are
+/// retired by the same grace logic below; a resource that is read again later gets a new row.</para>
 /// <para>A resource is only treated as gone after a grace period, so a removable or USB disk
 /// that is re-plugged or a network adapter that blips keeps its alert: it must be missing from
 /// <see cref="MissedPolls"/> consecutive successful inventory reads <b>and</b> for at least
@@ -24,18 +29,24 @@ namespace WatchTower.Services.Alerting;
 /// <param name="what">Kind of resource for logs, e.g. "drives".</param>
 /// <param name="reason">Retirement reason for a resource name, e.g. "Disk D: is no longer present".</param>
 /// <param name="emptyIsSuspicious">Whether an empty inventory is taken as a broken read.</param>
+/// <param name="logger">Logger.</param>
+/// <param name="snapshots">Store whose snapshot rows of <paramref name="snapshotKind"/> are pruned too; null for alerts only.</param>
+/// <param name="snapshotKind">Snapshot table of this resource kind.</param>
 public sealed class AbsentResourceTracker(
-    string keyPrefix, string what, Func<string, string> reason, bool emptyIsSuspicious, ILogger logger)
+    string keyPrefix, string what, Func<string, string> reason, bool emptyIsSuspicious, ILogger logger,
+    IMetricsStore? snapshots = null, SnapshotKind snapshotKind = default)
 {
     public const int MissedPolls = 3;
 
     public static readonly TimeSpan GracePeriod = TimeSpan.FromMinutes(10);
 
+    /// <summary>Missing resources by name (not alert key).</summary>
     private readonly Dictionary<string, (int Polls, DateTime Since)> _missing = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Reads the inventory and retires the open alerts of this kind whose resource has been
-    /// missing for long enough. Never throws for a failed read (logged, nothing retired).
+    /// Reads the inventory and retires the open alerts and snapshot rows of this kind whose
+    /// resource has been missing for long enough. Never throws for a failed read (logged,
+    /// nothing retired).
     /// </summary>
     public async Task ReconcileAsync(IAlertManager alerts, Func<ResourceInventory?> readInventory, DateTime nowUtc, CancellationToken ct)
     {
@@ -57,29 +68,48 @@ public sealed class AbsentResourceTracker(
             return;
         }
 
-        var present = inventory.Names.Select(n => keyPrefix + n).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var open = alerts.GetOpenAlerts()
-            .Select(a => a.Key)
-            .Where(k => k.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var present = inventory.Names.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        // Back, or no longer alerting: forget it.
-        foreach (var key in _missing.Keys.Where(k => present.Contains(k) || !open.Contains(k)).ToList())
-            _missing.Remove(key);
-
-        foreach (var key in open.Where(k => !present.Contains(k)))
+        // Resource name -> open alert key / stored snapshot name, as stored.
+        var alerting = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in alerts.GetOpenAlerts().Select(a => a.Key))
         {
-            var (polls, since) = _missing.TryGetValue(key, out var seen) ? seen : (0, nowUtc);
+            if (key.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase))
+                alerting.TryAdd(key[keyPrefix.Length..], key);
+        }
+        var reported = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in snapshots?.GetSnapshotNames(snapshotKind) ?? [])
+            reported.TryAdd(name, name);
+
+        // Back, or neither alerting nor reported any more: forget it.
+        foreach (var name in _missing.Keys.Where(n => present.Contains(n) || !(alerting.ContainsKey(n) || reported.ContainsKey(n))).ToList())
+            _missing.Remove(name);
+
+        var tracked = alerting.Keys.Concat(reported.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in tracked.Where(n => !present.Contains(n)).ToList())
+        {
+            var (polls, since) = _missing.TryGetValue(name, out var seen) ? seen : (0, nowUtc);
             polls++;
-            _missing[key] = (polls, since);
+            _missing[name] = (polls, since);
             if (polls < MissedPolls || nowUtc - since < GracePeriod)
                 continue;
 
-            var name = key[keyPrefix.Length..];
-            if (await alerts.RetireAsync(new AlertKey(key), reason(name), ct))
+            if (alerting.TryGetValue(name, out var key) &&
+                await alerts.RetireAsync(new AlertKey(key), reason(key[keyPrefix.Length..]), ct))
+            {
                 logger.LogInformation("Retired alert {Key}: missing from {Polls} consecutive listings of {What} since {Since:O}",
                     key, polls, what, since);
-            _missing.Remove(key);
+            }
+
+            if (snapshots is not null && reported.TryGetValue(name, out var stored) &&
+                snapshots.RemoveSnapshots(snapshotKind, [stored]) > 0)
+            {
+                logger.LogInformation(
+                    "Stopped reporting {Name} to the portal: missing from {Polls} consecutive listings of {What} since {Since:O}",
+                    stored, polls, what, since);
+            }
+
+            _missing.Remove(name);
         }
     }
 }

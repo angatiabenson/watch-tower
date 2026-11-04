@@ -40,8 +40,10 @@ public class NetworkMonitorWorker : BackgroundService
         _health = workerHealth;
 
         // Zero adapters can be genuine (all disabled), so it counts; the grace period still applies.
+        // Removed adapters also lose their snapshot row, so the portal stops receiving them.
         _removedAdapters = new AbsentResourceTracker(AlertKey.NetworkPrefix, "network adapters",
-            adapter => $"Network adapter {adapter} is no longer present", emptyIsSuspicious: false, logger);
+            adapter => $"Network adapter {adapter} is no longer present", emptyIsSuspicious: false, logger,
+            metricsStore, SnapshotKind.Network);
     }
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
@@ -133,7 +135,7 @@ public class NetworkMonitorWorker : BackgroundService
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Could not retire alerts of removed network adapters");
+            _logger.LogError(ex, "Could not retire alerts or snapshots of removed network adapters");
         }
     }
 }
