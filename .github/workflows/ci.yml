@@ -58,6 +58,31 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: ./build/package.ps1 -Version "0.0.0-ci.$env:RUN_NUMBER" -Repository $env:REPOSITORY -OutputDir artifacts
 
+      - name: One-line installer (smoke test)
+        shell: pwsh
+        # get-watchtower.ps1 against the package just built: verify, extract, install a throwaway
+        # service with the options passed through, uninstall it; then a damaged zip is refused.
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'wt-get'
+          $pw = ConvertTo-SecureString 'ci-console-password-1' -AsPlainText -Force
+          ./build/get-watchtower.ps1 -DownloadBaseUrl artifacts -ServiceName WatchTowerCI -InstallDir "$root\bin" -DataDir "$root\data" -AdminPassword $pw -NoStart
+          $svc = Get-Service -Name WatchTowerCI
+          if ($svc.Status -ne 'Stopped') { throw "Expected WatchTowerCI installed and stopped (-NoStart), got $($svc.Status)" }
+          if ((Get-Content "$root\data\config\watchtower.settings.json" -Raw) -notmatch 'AdminPasswordHash') { throw '-AdminPassword was not passed through' }
+          & "$root\bin\WatchTower.exe" uninstall --service-name WatchTowerCI --data-dir "$root\data" --purge-data
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed ($LASTEXITCODE)" }
+
+          $bad = Join-Path $env:RUNNER_TEMP 'wt-bad'
+          New-Item -ItemType Directory -Path $bad | Out-Null
+          Copy-Item artifacts/SHA256SUMS.txt, artifacts/WatchTower-*.zip -Destination $bad
+          $zip = Get-ChildItem $bad -Filter 'WatchTower-*.zip'
+          [IO.File]::AppendAllText($zip.FullName, 'x')
+          $refused = $false
+          try { ./build/get-watchtower.ps1 -DownloadBaseUrl $bad -ServiceName WatchTowerCI2 -NoStart }
+          catch { $refused = $_.Exception.Message -like 'SHA-256 mismatch*' }
+          if (-not $refused) { throw 'A damaged zip was not refused' }
+          if (Get-Service -Name WatchTowerCI2 -ErrorAction SilentlyContinue) { throw 'Installed despite the checksum mismatch' }
+
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
@@ -65,4 +90,6 @@ jobs:
           path: |
             artifacts/WatchTower-*.zip
             artifacts/watchtower-update.json
+            artifacts/get-watchtower.ps1
+            artifacts/SHA256SUMS.txt
           retention-days: 7

@@ -17,6 +17,7 @@ sync. Run them if you change any of them.
 
 - [ ] MUST serve HTTP/1.1 over TLS 1.2+ with a certificate the agent's Windows trusts (or plain HTTP only for `requireTls: false` lab setups).
 - [ ] MUST accept chunked request bodies without `Content-Length`.
+- [ ] MUST answer 415 to a `Content-Encoding` it cannot read (never 2xx, never store the body). If it accepts `gzip`: MUST decode it before parsing, SHOULD cap the decompressed size (413), and MAY then put `"acceptsGzip": true` in enrollment codes. Test with `AgentSimulator --gzip`.
 - [ ] MUST NOT redirect agent API requests, and MUST NOT compress responses.
 - [ ] MUST serve the API under `BaseUrl` + `/api/v1/agent/` including any path prefix.
 - [ ] MUST authenticate `X-Agent-Id` + `Authorization: Bearer` on every request and answer 401 on failure.
@@ -28,7 +29,7 @@ sync. Run them if you change any of them.
 
 - [ ] MUST ignore unknown properties in every request body.
 - [ ] MUST accept unknown values of the open value sets (`incidentType`, `actionType`, `status`, `updatePhase`, `type`). The spec lists the known values in `x-extensible-enum`; they are not closed enums.
-- [ ] MUST accept requests where optional properties are absent (1.0.x agents).
+- [ ] MUST accept requests where optional properties are absent (older agents, 1.0.19 and earlier included).
 - [ ] MUST accept any RFC 3339 offset (`Z`, `+00:00`, `+03:00`) and up to 7 fractional digits.
 - [ ] MUST send camelCase property names in responses.
 

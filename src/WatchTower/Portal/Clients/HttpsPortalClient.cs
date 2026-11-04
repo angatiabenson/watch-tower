@@ -17,8 +17,19 @@ namespace WatchTower.Portal.Clients;
 /// failure of that call, handled like any other failed status: POSTs return <c>false</c> (so the
 /// caller's normal retry applies) and GETs return "nothing". The redirect is logged as a warning
 /// with its target, at most once per <see cref="RedirectWarningInterval"/> per endpoint.
+/// <para>
+/// With <c>CompressRequests=Gzip</c> the metrics batches and events are sent with
+/// <c>Content-Encoding: gzip</c> (see <see cref="RequestCompression"/>); acknowledgements and
+/// command results are a few hundred bytes at most, which gzip would not shrink, so they never are.
+/// A portal that cannot read the encoding answers 415: the request is resent once uncompressed and
+/// compression is switched off. A 413 (the body inflated past the portal's cap) is resent once
+/// uncompressed too, compression staying on. A 400 to a compressed request is blamed on the
+/// encoding only before the portal has accepted any compressed request, and only when the same
+/// body sent uncompressed is accepted. Either way the portal did not take the refused request, so the resend neither loses
+/// nor duplicates a message, and a failed resend fails the call like any other (the outbox retries).
+/// </para>
 /// </remarks>
-public class HttpsPortalClient : IPortalClient
+public class HttpsPortalClient : IPortalClient, IDisposable
 {
     /// <summary>Minimum time between two redirect warnings for the same portal endpoint.</summary>
     internal static readonly TimeSpan RedirectWarningInterval = TimeSpan.FromMinutes(15);
@@ -27,6 +38,7 @@ public class HttpsPortalClient : IPortalClient
     private readonly IOptionsMonitor<PortalOptions> _options;
     private readonly ILogger<HttpsPortalClient> _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly RequestCompression _compression;
 
     private readonly object _redirectLogLock = new();
     private readonly Dictionary<string, (DateTimeOffset LoggedAt, int Suppressed)> _redirectLog = new(StringComparer.Ordinal);
@@ -49,22 +61,27 @@ public class HttpsPortalClient : IPortalClient
         _timeProvider = timeProvider ?? TimeProvider.System;
 
         PortalTls.EnsureTransportAllowed(options.CurrentValue);
+        _compression = new RequestCompression(options, logger, _timeProvider);
     }
 
-    private string BuildUrl(string path)
+    public void Dispose()
     {
-        var base_ = _options.CurrentValue.BaseUrl.TrimEnd('/');
-        return $"{base_}/{path}";
+        _compression.Dispose();
+        GC.SuppressFinalize(this);
     }
+
+    private string BuildUrl(string path) => JoinUrl(_options.CurrentValue.BaseUrl, path);
+
+    private static string JoinUrl(string baseUrl, string path) => $"{baseUrl.TrimEnd('/')}/{path}";
 
     public async Task<bool> SendMetricsBatchAsync(MetricsBatchDto batch, CancellationToken ct)
     {
-        return await PostAsync("api/v1/agent/metrics/batch", batch, ct);
+        return await PostAsync("api/v1/agent/metrics/batch", batch, ct, compressible: true);
     }
 
     public async Task<bool> SendEventAsync(AgentEventDto evt, CancellationToken ct)
     {
-        return await PostAsync("api/v1/agent/events", evt, ct);
+        return await PostAsync("api/v1/agent/events", evt, ct, compressible: true);
     }
 
     public async Task<IReadOnlyList<AgentCommandDto>> PollCommandsAsync(CancellationToken ct)
@@ -167,39 +184,102 @@ public class HttpsPortalClient : IPortalClient
     /// <param name="payload">JSON body.</param>
     /// <param name="ct">Cancellation.</param>
     /// <param name="endpoint">Endpoint template for rate-limiting the redirect warning (defaults to <paramref name="path"/>).</param>
-    private async Task<bool> PostAsync<T>(string path, T payload, CancellationToken ct, string? endpoint = null)
+    /// <param name="compressible">Gzip the body while request compression is on.</param>
+    private async Task<bool> PostAsync<T>(
+        string path, T payload, CancellationToken ct, string? endpoint = null, bool compressible = false)
     {
         try
         {
             var client = CreateClient();
-            using var response = await client.PostAsJsonAsync(BuildUrl(path), payload, JsonOpts, ct);
-
-            if (IsRedirect(response))
+            // A compressible request takes its destination from the same snapshot as its
+            // compression ticket, so its outcome can only ever apply to the portal it went to.
+            var ticket = compressible ? _compression.Begin() : default;
+            var url = compressible ? JoinUrl(ticket.BaseUrl, path) : BuildUrl(path);
+            var gzip = ticket.Gzip;
+            var response = await SendPostAsync(client, url, payload, gzip, ct);
+            try
             {
-                // Not delivered: a redirect is never followed, so nothing reached the portal.
-                LogRedirect(endpoint ?? path, path, response);
-                return false;
+                if (gzip && response.IsSuccessStatusCode)
+                    _compression.MarkAccepted(ticket);
+                else if (gzip && ShouldResendUncompressed(response.StatusCode, ticket))
+                {
+                    var refused = response.StatusCode;
+                    // 415: the portal cannot read the encoding, which is unambiguous.
+                    if (refused == HttpStatusCode.UnsupportedMediaType)
+                        _compression.Disable(ticket, "415 Unsupported Media Type");
+                    response.Dispose();
+
+                    // The portal refused the request, so it did not take it: sending it once more,
+                    // uncompressed, neither loses nor duplicates it.
+                    response = await SendPostAsync(client, url, payload, gzip: false, ct);
+                    // A 400 that the uncompressed body passes may still have been transient, so it
+                    // only suspends compression for a while (see RequestCompression).
+                    if (refused == HttpStatusCode.BadRequest && response.IsSuccessStatusCode)
+                        _compression.RefusedAmbiguously(ticket, "400 Bad Request");
+                }
+                return Evaluate(response, path, endpoint);
             }
-
-            if (response.IsSuccessStatusCode)
-                return true;
-
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            finally
             {
-                _logger.LogError(
-                    "Portal returned 401 Unauthorized on {Path}. Check AgentToken.", path);
-                return false;
+                response.Dispose();
             }
-
-            _logger.LogWarning(
-                "Portal request to {Path} returned {StatusCode}", path, (int)response.StatusCode);
-            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Portal request to {Path} failed", path);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Whether a refused compressed request is sent again uncompressed: always for 415 (the
+    /// encoding is not supported) and 413 (a portal may cap the inflated size, which a very
+    /// repetitive batch can exceed; compression stays on); for 400 only until the portal has
+    /// accepted a compressed request (after that a 400 is about the content).
+    /// </summary>
+    private bool ShouldResendUncompressed(HttpStatusCode status, RequestCompression.Ticket ticket) =>
+        status is HttpStatusCode.UnsupportedMediaType or HttpStatusCode.RequestEntityTooLarge ||
+        (status == HttpStatusCode.BadRequest && !_compression.IsProven(ticket));
+
+    private static Task<HttpResponseMessage> SendPostAsync<T>(
+        HttpClient client, string url, T payload, bool gzip, CancellationToken ct)
+    {
+        HttpContent content = gzip
+            ? new GzipJsonContent<T>(payload, JsonOpts)
+            : JsonContent.Create(payload, options: JsonOpts);
+        var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+        return SendAndDisposeRequestAsync(client, request, ct);
+    }
+
+    private static async Task<HttpResponseMessage> SendAndDisposeRequestAsync(
+        HttpClient client, HttpRequestMessage request, CancellationToken ct)
+    {
+        using (request)
+            return await client.SendAsync(request, ct);
+    }
+
+    private bool Evaluate(HttpResponseMessage response, string path, string? endpoint)
+    {
+        if (IsRedirect(response))
+        {
+            // Not delivered: a redirect is never followed, so nothing reached the portal.
+            LogRedirect(endpoint ?? path, path, response);
+            return false;
+        }
+
+        if (response.IsSuccessStatusCode)
+            return true;
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            _logger.LogError(
+                "Portal returned 401 Unauthorized on {Path}. Check AgentToken.", path);
+            return false;
+        }
+
+        _logger.LogWarning(
+            "Portal request to {Path} returned {StatusCode}", path, (int)response.StatusCode);
+        return false;
     }
 
     private static bool IsRedirect(HttpResponseMessage response) =>

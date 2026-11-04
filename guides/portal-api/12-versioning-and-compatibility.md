@@ -22,6 +22,7 @@ agent speaks v1:
 | New action types | none until the portal sends them; older agents answer `Unknown action type` |
 | New optional properties in portal responses that the agent understands (commands, config) | none: older agents ignore them |
 | New remote-config fields | none; older agents ignore them |
+| Opt-in request encodings (`Content-Encoding: gzip`, after 1.0.20) | none unless the operator, or your enrollment code's `acceptsGzip`, turns it on; a portal that can't read it answers 415 and the agent falls back |
 | Behaviour changes inside the agent (thresholds, retry timings, descriptions) | none; they are not part of the contract |
 | Stricter agent-side checks of what a portal sends (command freshness, never re-executing a known command ID, configuration validation, the command allow-list, refusing redirects) | none for a portal that follows these docs; one that relied on the old leniency sees failed results, rejected configurations or failed deliveries. Listed under "Changed" in the [CHANGELOG](CHANGELOG.md) |
 
@@ -53,21 +54,22 @@ There is no capability negotiation. Use:
 
 - `agent.version` in every batch from current agents (semantic version; `0.0.0-dev` and other
   prerelease suffixes for development builds);
-- **no `agent` object at all** means a 1.0.x agent: 1.0.19 when the batch has a `batchId`,
-  1.0.18 or older when it hasn't;
+- **no `agent` object at all** means an agent up to 1.0.19: 1.0.19 when the batch has a
+  `batchId`, 1.0.18 or older when it hasn't;
 - the presence of a property, rather than version arithmetic, when you can (for example
-  `endpointStatuses`, `alertKey`). Check each property on its own: `isStale` came later than
-  the other after-1.0.19 properties, so a batch with an `agent` object can still lack it. A
-  missing `isStale` means unknown: fall back to the entry's `timestamp`
-  ([Staleness](06-telemetry-reference.md#staleness-isstale)).
+  `endpointStatuses`, `alertKey`), checking each property on its own. A missing `isStale`
+  means unknown: fall back to the entry's `timestamp`
+  ([Staleness](06-telemetry-reference.md#staleness-isstale)). Development builds from before
+  the 1.0.20 release may send an `agent` object without `isStale`.
 
 ## Feature compatibility
 
-`base` = every released v1 agent up to and including 1.0.19. `1.0.19` = added in 1.0.19
-(released 2026-06-15). `after-1.0.19` = added after 1.0.19 and not released yet: builds from
-the current source, then the first release after 1.0.19 and later.
+`base` = every released v1 agent. `1.0.19` = added in 1.0.19 (released 2026-06-15). `1.0.20` =
+added in 1.0.20 (released 2026-11-04). `after-1.0.20` = added after 1.0.20 and not released
+yet: builds from the current source, then the first release after 1.0.20 and later; not sent
+by 1.0.20 or earlier.
 
-| Feature | ≤ 1.0.18 | 1.0.19 | after-1.0.19 (unreleased) |
+| Feature | ≤ 1.0.18 | 1.0.19 | 1.0.20 |
 | --- | --- | --- | --- |
 | The seven endpoints, bearer + `X-Agent-Id`, BaseUrl path prefixes | ✓ | ✓ | ✓ |
 | Metrics series and snapshots (CPU, RAM, disks, queues, NICs, services, pools) | ✓ | ✓ | ✓ |
@@ -83,7 +85,7 @@ the current source, then the first release after 1.0.19 and later.
 | Command results retried with backoff, given up after `ResultRetryMaxHours` (168 h) | ✗ (every cycle, without limit) | ✗ (every cycle, without limit) | ✓ |
 | `ConfigurationError` endpoint status (invalid check keeps its last result) | ✗ (no `endpointStatuses`) | ✗ (no `endpointStatuses`) | ✓ |
 | Snapshot entries removed only when the resource is gone (absent past the grace period, or removed from the configuration; names compared case-insensitively) and kept through the daily report purge | ✗ (every snapshot row deleted by the daily report purge, then read again) | ✗ (as 1.0.18) | ✓ |
-| `isStale` on every snapshot entry (HTTPS `isStale`; gRPC `is_stale`) | ✗ (absent: unknown, judge by `timestamp`) | ✗ (as 1.0.18) | ✓ from later unreleased builds only; earlier ones omit it too |
+| `isStale` on every snapshot entry (HTTPS `isStale`; gRPC `is_stale`) | ✗ (absent: unknown, judge by `timestamp`) | ✗ (as 1.0.18) | ✓ |
 | 3xx answered as a failure, redirects not followed | ✗ (followed by .NET, dropping the token) | ✗ (as 1.0.18) | ✓ |
 | Local allow-list for service and pool commands | ✗ (any service or pool name is acted on) | partial (watched names only, but watch lists pushed by the portal count; others fail with `Not authorized: ...`) | ✓ (`AllowPortalManagedTargets` opt-in) |
 | Remote configuration validation of every field (ranges, names, list sizes, all or nothing) | partial (CPU/RAM poll interval and threshold, disk critical threshold only) | partial (every poll interval, portal timings included, CPU/RAM sustained time, CPU/RAM/disk thresholds only) | ✓ |
@@ -94,11 +96,22 @@ the current source, then the first release after 1.0.19 and later.
 | Results for commands interrupted by a restart (`Interrupted: ...`) | ✗ | ✗ | ✓ |
 | Commands stored but not started before a restart run afterwards, or expire (`Rejected: command expired before it could run (agent restarted)`) | ✗ (never run, no result) | ✗ (as 1.0.18) | ✓ |
 
-Consequences for portals with 1.0.x agents in the fleet (1.0.19 included): send a current
+Consequences for portals with 1.0.19 or older agents in the fleet: send a current
 `issuedAt` anyway (it becomes REQUIRED in v2; 1.0.19 drops a command whose `issuedAt` is stale
 without answering it), validate remote configuration yourself (those agents check only a few
 values), and gate service and pool commands in the portal: 1.0.18 and older act on any name,
 and 1.0.19 accepts any name on a watch list your portal pushed.
+
+### After 1.0.20 (unreleased)
+
+| Feature | ≤ 1.0.20 | after-1.0.20 |
+| --- | --- | --- |
+| Gzip-compressed `metrics/batch` and `events` bodies (`Content-Encoding: gzip`; gRPC `grpc-encoding: gzip`), opt-in with `VisibilityPortal:CompressRequests=Gzip`, with the 415 fallback | ✗ (always plain JSON) | ✓ (off by default) |
+| `acceptsGzip` in enrollment codes turns compression on | ✗ (ignored like any unknown property) | ✓ |
+
+A portal can't tell from a request whether the agent would compress: it sees `Content-Encoding`
+only when compression is on. Put `"acceptsGzip": true` in codes only if you decode gzip; the same
+code works for older agents, which ignore the flag and keep sending plain JSON.
 
 ## The gRPC alternative
 
@@ -138,5 +151,22 @@ Differences from the JSON API:
 - **TLS**: same `RequireTls` rule. `Tls:AllowUntrustedCert` is honoured only by the gRPC transport
   and only outside the Production environment. HTTP/2 is required. `EnableMultipleHttp2Connections`
   is on.
+- **Settings changes** (after 1.0.20): a change of BaseUrl, agent id, token or any `Tls` setting
+  while the agent runs applies from the next call. The agent opens a new channel for the new
+  settings and closes the old one once the calls still running on it have finished (they finish
+  on their old portal, with its credentials). The metadata, the `AgentIdentity` and the
+  destination of a call always come from one snapshot of the settings, and the credentials are
+  only sent to that snapshot's BaseUrl origin (scheme, host and port). If the new settings can't
+  be connected with (for example `http://` under `RequireTls`), calls fail unsent and then follow
+  each operation's normal retry policy and limits (batches and events retry with backoff up to
+  their attempt limit, command results with their own backoff, config acknowledgements on each config cycle while
+  that version is current, command acknowledgements not at all); the agent never falls back to the old channel. Up to 1.0.20 the channel
+  was built once at startup, so after a BaseUrl change calls kept going to the old portal, with
+  the new token.
+- **Compression** (after 1.0.20): with `CompressRequests=Gzip`, `SendMetricsBatch` and `SendEvent`
+  use gRPC message compression (`grpc-encoding: gzip`, compressed-flag set on the message), which
+  ASP.NET Core gRPC and most gRPC servers read out of the box. A server that doesn't answers
+  `UNIMPLEMENTED` with a message naming the encoding; the agent then resends the call once without
+  compression and stops compressing, as for an HTTPS 415.
 
 New v1 fields are added to both transports with new field numbers. Field numbers are never reused.

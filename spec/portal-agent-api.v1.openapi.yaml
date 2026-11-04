@@ -38,18 +38,17 @@ info:
       `x-extensible-enum` and in the description. A portal MUST accept a value it does not know
       and treat it as unrecognised but valid, for example by storing and displaying it.
     * A portal MUST NOT reject a request because an optional property is missing. Older v1
-      agents do not send properties marked `x-since: 1.0.19` or `x-since: after-1.0.19`.
+      agents do not send properties marked `x-since: 1.0.19`, `x-since: 1.0.20` or
+      `x-since: after-1.0.20`.
     * The agent ignores response properties it does not know, so a portal MAY add its own.
 
     ## Field availability (`x-since`)
 
-    * `base`: sent by every released v1 agent (up to and including 1.0.19).
+    * `base`: sent by every released v1 agent.
     * `1.0.19`: added in 1.0.19 (released 2026-06-15). Not sent by 1.0.18 or earlier.
-    * `after-1.0.19`: added after 1.0.19 (unreleased): sent by agents built from the current
-      source and by the first release after 1.0.19. Not sent by 1.0.19 or earlier. `isStale` on
-      snapshot entries came later than the rest of after-1.0.19, so earlier unreleased builds
-      omit it too (see SnapshotIsStale): never infer it from the presence of other after-1.0.19
-      fields.
+    * `1.0.20`: added in 1.0.20 (released 2026-11-04). Not sent by 1.0.19 or earlier.
+    * `after-1.0.20`: added after 1.0.20 (unreleased): sent by agents built from the current
+      source and by the first release after 1.0.20. Not sent by 1.0.20 or earlier.
 
     ## Status codes
 
@@ -70,6 +69,38 @@ info:
 
     The bearer token and `X-Agent-Id` are only ever sent to URLs below BaseUrl (same scheme,
     host, port and path prefix); a request for any other URL is refused and logged.
+
+    ## Compressed request bodies (`x-since: after-1.0.20`)
+
+    Request bodies are uncompressed JSON unless the operator sets
+    `VisibilityPortal:CompressRequests=Gzip` (default `Off`), which an enrollment code with
+    `acceptsGzip: true` also does (see EnrollmentCodePayload). Then `POST metrics/batch` and
+    `POST events` MAY carry `Content-Encoding: gzip` (RFC 9110 section 8.4): the body is the
+    gzip (RFC 1952) of the same JSON, `Content-Type` stays `application/json; charset=utf-8`,
+    and the body streams with chunked transfer encoding (no `Content-Length`). A typical batch
+    shrinks about five-fold. Acknowledgements and command results are never compressed. Agents
+    send no other encoding and do not compress the gRPC transport's HTTP body (gRPC uses its
+    own `grpc-encoding: gzip` message compression under the same setting).
+
+    * A portal that supports it MUST decode the body before parsing it and SHOULD cap the
+      decompressed size (a small gzip body can inflate to gigabytes), answering 413 past the
+      cap. Leave room: batches compress 4 to 7 times, very repetitive ones more, so a cap
+      relative to the compressed size SHOULD be at least 20 times it, or an absolute cap at
+      least the uncompressed request-body limit.
+    * A portal that does not support an encoding SHOULD answer 415 Unsupported Media Type,
+      ideally with `Accept-Encoding: identity` (RFC 7694), and MUST NOT store anything from
+      that request. A portal that does not look at `Content-Encoding` at all fails to parse the
+      body and answers 400, which agents also handle (below), but 415 is the clear signal.
+    * Agent fallback: on 415 the agent resends the same request once, uncompressed, logs one
+      warning ("Portal does not accept compressed requests; sending uncompressed") and sends
+      everything uncompressed until it restarts or `CompressRequests` or BaseUrl changes. On
+      400 it does the same only when no compressed request has been accepted yet since
+      compression was switched on and the uncompressed resend is accepted; otherwise the 400
+      is a normal failure. On 413 it resends once uncompressed and keeps compressing. Any
+      other answer is handled as without compression. A refused request was not taken, so the
+      resend neither loses nor duplicates a message; if the resend fails too, the message
+      stays in the outbox and is retried as usual (`batchId` and `eventId` deduplicate as
+      always).
 
     Outbox delivery (metrics batches and events) stops for the current flush cycle at the first
     failure; the remaining messages wait for the next cycle. The failed message itself is not
@@ -148,11 +179,17 @@ paths:
 
         Deduplicate on `batchId` (when present). The same `batchId` MUST produce the same
         stored result however many times it arrives.
+
+        The body MAY be gzip-compressed (`Content-Encoding: gzip`, after-1.0.20, opt-in on the
+        agent); see "Compressed request bodies" above.
       x-agent-behaviour:
         frequency: every Outbox.FlushIntervalSeconds (default 30 s) when there is data; immediately after command 301
         success: any 2xx; the response body is ignored
         failure: any other status (including every 3xx, 304 too, which is never followed), a timeout (30 s) or a network error. The batch waits RetryBackoffSeconds x attempt (default 60 s, 120 s, ...) and is retried on the first flush cycle after that; it is dropped after MaxRetryAttempts (default 5) failed attempts
         ordering: oldest first within the same priority, events before metrics; after a failure, later messages may be delivered before the one that failed
+        compression: with CompressRequests=Gzip, Content-Encoding gzip; a 415 (or a 400 the uncompressed body does not get, before any compressed request was accepted) is answered by one uncompressed resend and compression off until restart or a settings change; a 413 by one uncompressed resend
+      parameters:
+        - $ref: '#/components/parameters/ContentEncoding'
       requestBody:
         required: true
         content:
@@ -170,7 +207,9 @@ paths:
         '401':
           description: Missing or invalid credentials. The agent logs an error ("Check AgentToken") and retries like any failure.
         '413':
-          description: Too large. Treated as a failure and retried, so a portal MUST accept batches of the documented maximum size.
+          description: Too large. Treated as a failure and retried, so a portal MUST accept batches of the documented maximum size. To a compressed request (body inflated past the portal's cap), the agent first resends it once uncompressed.
+        '415':
+          description: The portal cannot read the request's Content-Encoding. The agent resends the request once uncompressed and stops compressing (see "Compressed request bodies"). A portal without compression support SHOULD answer this, not 400.
         '429':
           description: Rate limited. Treated as a failure; the agent does not read Retry-After and retries the batch once its backoff (60 s by default for the first retry) has expired.
         default:
@@ -185,10 +224,16 @@ paths:
         One event per request. Events have a higher outbox priority than metrics batches and
         are retried with exponential backoff for up to a week (`Outbox:EventMaxAgeHours`,
         default 168 h). Deduplicate on `eventId`.
+
+        The body MAY be gzip-compressed (`Content-Encoding: gzip`, after-1.0.20, opt-in on the
+        agent); see "Compressed request bodies" above.
       x-agent-behaviour:
         frequency: when an incident happens; queued in the outbox and sent on the next flush cycle (default every 30 s)
         success: any 2xx; the response body is ignored
         failure: any other status (including every 3xx, 304 too, which is never followed), a timeout or a network error. The event waits 30 s, 60 s, 120 s ... (capped at 15 min) and is retried on the first flush cycle after that; it is dropped once older than EventMaxAgeHours (default 168 h)
+        compression: as for metrics/batch
+      parameters:
+        - $ref: '#/components/parameters/ContentEncoding'
       requestBody:
         required: true
         content:
@@ -211,6 +256,8 @@ paths:
           description: Accepted. Any 2xx status means delivered.
         '401':
           description: Missing or invalid credentials; logged as an error and retried.
+        '415':
+          description: The portal cannot read the request's Content-Encoding. The agent resends the event once uncompressed and stops compressing (see "Compressed request bodies").
         default:
           description: Any other status (including 3xx) is a failure and the event is retried after its backoff.
 
@@ -502,6 +549,18 @@ components:
         type: string
         minLength: 1
       example: 6f1c9a52-6a43-4f3c-9d55-0d9c2b7f4e10
+    ContentEncoding:
+      name: Content-Encoding
+      in: header
+      required: false
+      description: |
+        `gzip` when the operator enabled `VisibilityPortal:CompressRequests=Gzip`; absent otherwise
+        (the body is then plain JSON). See "Compressed request bodies" in the API description.
+      schema:
+        type: string
+        enum: [gzip]
+      example: gzip
+      x-since: after-1.0.20
 
   schemas:
     Timestamp:
@@ -544,11 +603,10 @@ components:
         when the batch was built, not when it arrived. Just after an agent restart the first
         batch can mark entries read before the restart stale until they are read again.
 
-        Optional for portals to rely on: agents built from this version on always send it, older
-        agents never do (1.0.19 and earlier, and unreleased builds from before this field). A
-        missing `isStale` means UNKNOWN, not fresh: a portal MUST then fall back to the entry's
-        `timestamp`, for example
-        comparing `batchedAt - timestamp` with the windows above.
+        Optional for portals to rely on: 1.0.20 and later agents always send it, older agents
+        (1.0.19 and earlier) never do. A missing `isStale` means UNKNOWN, not fresh: a portal
+        MUST then fall back to the entry's `timestamp`, for example comparing
+        `batchedAt - timestamp` with the windows above.
 
     MetricsBatch:
       type: object
@@ -623,13 +681,13 @@ components:
           x-since: base
         agent:
           $ref: '#/components/schemas/AgentTelemetry'
-          x-since: after-1.0.19
+          x-since: 1.0.20
         endpointStatuses:
           type: array
           description: Last-known result per configured endpoint check (snapshot). Absent when no endpoint has a result yet.
           items:
             $ref: '#/components/schemas/EndpointStatus'
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     AgentTelemetry:
       type: object
@@ -752,7 +810,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt (for example a fixed drive that is not ready). Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     DiskQueueMetric:
       type: object
@@ -770,7 +828,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     NetworkMetric:
       type: object
@@ -788,7 +846,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this reading is older than max(3 x Monitoring:Network:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     ServiceStatus:
       type: object
@@ -812,7 +870,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this status is older than max(3 x Monitoring:Services:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     ApplicationPoolStatus:
       type: object
@@ -832,7 +890,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this status is older than max(3 x Monitoring:ApplicationPools:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     EndpointStatus:
       type: object
@@ -888,7 +946,7 @@ components:
             entries (which keep their status and last result, and turn stale once that result
             is older than the window, as the check does not run). Absent from older agents,
             which means unknown (see SnapshotIsStale).
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     AgentEvent:
       type: object
@@ -923,14 +981,14 @@ components:
             The alert this event belongs to. Known shapes: cpu, ram, disk:<drive>, diskqueue:<instance>,
             net:<interface>, svc:<serviceName>, pool:<appPoolName>, endpoint:<name>, reboot. Compare
             case-insensitively. Absent for incidents outside an alert lifecycle and from agents up to 1.0.19.
-          x-since: after-1.0.19
+          x-since: 1.0.20
         resolved:
           type: boolean
           description: |
             false = the alert opened or escalated; true = the alert cleared or was retired.
             Absent for one-shot events (e.g. ServerRestarted with alertKey "reboot") and for
             incidents outside an alert lifecycle.
-          x-since: after-1.0.19
+          x-since: 1.0.20
 
     IncidentType:
       type: integer
@@ -1197,7 +1255,7 @@ components:
         set locally. untilUtc may be at most 7 days (plus 5 minutes of clock-skew allowance)
         in the future; a past value ends the window; omitting maintenance from a later
         configuration version hands control back to the local setting.
-      x-since: after-1.0.19
+      x-since: 1.0.20
       properties:
         untilUtc:
           type: [string, 'null']
@@ -1244,6 +1302,15 @@ components:
         requireTls:
           type: boolean
           description: Value for Tls:RequireTls. When absent, true for https URLs and false for http URLs.
+        acceptsGzip:
+          type: boolean
+          description: |
+            Optional. `true` when the portal accepts gzip-compressed request bodies (see
+            "Compressed request bodies"): enrolling with the code then sets
+            `VisibilityPortal:CompressRequests=Gzip`. Absent or `false` leaves that setting as it
+            was (a code never turns compression off). Agents up to 1.0.20 ignore it, as they
+            ignore every unknown property of the payload; portals MAY add their own.
+          x-since: after-1.0.20
 
   examples:
     MetricsBatchFull:

@@ -81,6 +81,7 @@ executes (simulated) and reports them with the agent's own result messages:
 | `--services`, `--pools` | `W3SVC,Spooler`, `DefaultAppPool` | Local watch lists (also the command allow-list). |
 | `--allow-portal-managed-targets` | off | Let portal-pushed watch lists widen the allow-list. |
 | `--require-issued-at` | off (off) | Reject commands without `issuedAt`, like `VisibilityPortal:RequireCommandIssuedAt`. |
+| `--gzip`, `--no-gzip` | on when the code says `acceptsGzip` (as `WatchTower.exe enroll` does) | Gzip metrics batches and events (`Content-Encoding: gzip`), like `VisibilityPortal:CompressRequests=Gzip`. A portal that answers 415 gets the request again uncompressed, and the simulator stops compressing (logged once). |
 | `--verbose` | off | Log every HTTP request. |
 
 Retry timings are shortened too: metrics batches back off 10 s x attempt (agent: 60 s) and are

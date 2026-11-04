@@ -32,6 +32,11 @@ Content-Type: application/json; charset=utf-8
 Transfer-Encoding: chunked
 ```
 
+With `VisibilityPortal:CompressRequests=Gzip` (opt-in, after 1.0.20) the request also carries
+`Content-Encoding: gzip` and the body is the gzip of the same JSON; a portal that can't read it
+answers 415 and the agent resends it uncompressed. See
+[Compressed request bodies](../04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020).
+
 No query parameters. Body from a current agent. Drive `D:\` is still listed but hasn't been
 read since 1 November (a fixed drive that is not ready), and the check `status-api` has been
 left misconfigured for over 10 minutes. Both keep their last reading, marked `isStale: true`:
@@ -137,26 +142,26 @@ Body from an agent up to 1.0.18 (and the smallest body a current agent can send)
 | `applicationPoolStatuses[].status` | string (open enum) | `Started`, `Stopped`, `Starting`, `Stopping`, `Unknown`, `NotFound` | always | IIS state; `Unknown` when it could not be read, `NotFound` when IIS has no pool of that name. | base |
 | `applicationPoolStatuses[].isRunning` | boolean | | always | `status == Started`. | base |
 | `*.timestamp` (snapshots) | date-time | UTC | always | When that resource was last read. | base |
-| `*.isStale` (snapshots, `endpointStatuses[]` included) | boolean | | optional (always from current agents) | `true` when that reading is older than its freshness window at `batchedAt`: max(3 × the monitor's poll interval, 10 min), or for an endpoint check max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min). The reading and `timestamp` are the last ones. **Absent = unknown**: fall back to the `timestamp`. See [Staleness](../06-telemetry-reference.md#staleness-isstale). | after-1.0.19 (later builds only) |
-| `agent` | object | | optional (always from current agents) | Agent self-description, see [telemetry](../06-telemetry-reference.md#the-agent-object). | after-1.0.19 |
-| `agent.version` | string | semver, e.g. `1.6.0` | always in `agent` | Agent version (`0.0.0-dev` for development builds). | after-1.0.19 |
-| `agent.machineName` | string | | always in `agent` | Windows computer name. | after-1.0.19 |
-| `agent.os` | string | | always in `agent` | OS description. | after-1.0.19 |
-| `agent.startedAt` | date-time | `+00:00` offset | always in `agent` | Agent process start. | after-1.0.19 |
-| `agent.uptimeSeconds` | integer | s, ≥ 0 | always in `agent` | Agent process uptime (not the machine's). | after-1.0.19 |
-| `agent.updatePhase` | string (open enum) | `Idle`, `Checking`, `UpToDate`, `Available`, `Downloading`, `ReadyToInstall`, `Installing`, `Failed` | always in `agent` | Self-update state. | after-1.0.19 |
-| `agent.availableVersion` | string | | optional | Newer version offered by the feed. | after-1.0.19 |
-| `agent.lastUpdateResult` | object | | optional | `toVersion`, `success`, `completedAt` (any offset) of the last install. | after-1.0.19 |
-| `agent.maintenance` | object | | optional (always from current agents) | `active` (always), `untilUtc` (optional, `Z`), `reason` (optional, ≤ 500 chars, may be empty). | after-1.0.19 |
-| `endpointStatuses[]` | array | one per endpoint check | optional | Snapshot; absent when no endpoint has a result. | after-1.0.19 |
-| `endpointStatuses[].name` | string | | always | Check name, unique per agent. | after-1.0.19 |
-| `endpointStatuses[].type` | string (open enum) | `Http`, `Tcp`, `Certificate` | always | Check type. | after-1.0.19 |
-| `endpointStatuses[].target` | string | | always | URL or `host:port`, without credentials or query string. | after-1.0.19 |
-| `endpointStatuses[].status` | string (open enum) | `Up`, `Down`, `Expiring`, `ConfigurationError` | always | Result. `ConfigurationError`: the check is configured but invalid and does not run; the entry keeps its last result (`timestamp` included) and `detail` gives the error. | after-1.0.19 |
-| `endpointStatuses[].isUp` | boolean | | always | `false` for `Down`. With `ConfigurationError`, the last result's value (not a current health). | after-1.0.19 |
-| `endpointStatuses[].responseTimeMs` | number | ms, ≥ 0 | optional | Round-trip time. | after-1.0.19 |
-| `endpointStatuses[].certificateDaysLeft` | number | days, 0.1 precision, negative when expired | optional | TLS certificate lifetime left. | after-1.0.19 |
-| `endpointStatuses[].detail` | string | | optional | Human-readable result. | after-1.0.19 |
+| `*.isStale` (snapshots, `endpointStatuses[]` included) | boolean | | optional (always from current agents) | `true` when that reading is older than its freshness window at `batchedAt`: max(3 × the monitor's poll interval, 10 min), or for an endpoint check max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min). The reading and `timestamp` are the last ones. **Absent = unknown**: fall back to the `timestamp`. See [Staleness](../06-telemetry-reference.md#staleness-isstale). | 1.0.20 |
+| `agent` | object | | optional (always from current agents) | Agent self-description, see [telemetry](../06-telemetry-reference.md#the-agent-object). | 1.0.20 |
+| `agent.version` | string | semver, e.g. `1.6.0` | always in `agent` | Agent version (`0.0.0-dev` for development builds). | 1.0.20 |
+| `agent.machineName` | string | | always in `agent` | Windows computer name. | 1.0.20 |
+| `agent.os` | string | | always in `agent` | OS description. | 1.0.20 |
+| `agent.startedAt` | date-time | `+00:00` offset | always in `agent` | Agent process start. | 1.0.20 |
+| `agent.uptimeSeconds` | integer | s, ≥ 0 | always in `agent` | Agent process uptime (not the machine's). | 1.0.20 |
+| `agent.updatePhase` | string (open enum) | `Idle`, `Checking`, `UpToDate`, `Available`, `Downloading`, `ReadyToInstall`, `Installing`, `Failed` | always in `agent` | Self-update state. | 1.0.20 |
+| `agent.availableVersion` | string | | optional | Newer version offered by the feed. | 1.0.20 |
+| `agent.lastUpdateResult` | object | | optional | `toVersion`, `success`, `completedAt` (any offset) of the last install. | 1.0.20 |
+| `agent.maintenance` | object | | optional (always from current agents) | `active` (always), `untilUtc` (optional, `Z`), `reason` (optional, ≤ 500 chars, may be empty). | 1.0.20 |
+| `endpointStatuses[]` | array | one per endpoint check | optional | Snapshot; absent when no endpoint has a result. | 1.0.20 |
+| `endpointStatuses[].name` | string | | always | Check name, unique per agent. | 1.0.20 |
+| `endpointStatuses[].type` | string (open enum) | `Http`, `Tcp`, `Certificate` | always | Check type. | 1.0.20 |
+| `endpointStatuses[].target` | string | | always | URL or `host:port`, without credentials or query string. | 1.0.20 |
+| `endpointStatuses[].status` | string (open enum) | `Up`, `Down`, `Expiring`, `ConfigurationError` | always | Result. `ConfigurationError`: the check is configured but invalid and does not run; the entry keeps its last result (`timestamp` included) and `detail` gives the error. | 1.0.20 |
+| `endpointStatuses[].isUp` | boolean | | always | `false` for `Down`. With `ConfigurationError`, the last result's value (not a current health). | 1.0.20 |
+| `endpointStatuses[].responseTimeMs` | number | ms, ≥ 0 | optional | Round-trip time. | 1.0.20 |
+| `endpointStatuses[].certificateDaysLeft` | number | days, 0.1 precision, negative when expired | optional | TLS certificate lifetime left. | 1.0.20 |
+| `endpointStatuses[].detail` | string | | optional | Human-readable result. | 1.0.20 |
 
 Semantics, display and aggregation of every value: [Telemetry reference](../06-telemetry-reference.md).
 
@@ -167,6 +172,7 @@ Semantics, display and aggregation of every value: [Telemetry reference](../06-t
 | any 2xx (200, 201, 202, 204) | Delivered. The body is ignored. |
 | 401 | Failure; logged at Error ("Check AgentToken"). Retried as below. |
 | 3xx, 400, 403, 404, 413, 429, other 4xx, 5xx | Failure; logged at Warning with the status (redirects are not followed; the warning includes the `Location`). Retried as below. |
+| 415, 413, or 400 before any compressed request was accepted, to a **compressed** request | Resent once at once, uncompressed; that answer counts. 415 (and a 400 the uncompressed body doesn't get) switches compression off, see [Compressed request bodies](../04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020). |
 | timeout (30 s), DNS, TCP or TLS error | Failure; retried as below. |
 
 Retry: the first failed message ends the cycle (the rest stay queued without counting an
@@ -218,8 +224,9 @@ reach the portal. Delivered and dropped messages are purged from the agent after
 ## Common mistakes
 
 - Answering 400 or 409 to a duplicate `batchId`: the agent retries it five times and logs warnings.
-- Requiring `batchId`, `agent` or `endpointStatuses`: agents up to 1.0.18 don't send `batchId`, and
-  no released agent (1.0.19 included) sends `agent` or `endpointStatuses`.
+- Requiring `batchId`, `agent` or `endpointStatuses`: agents up to 1.0.18 don't send `batchId`,
+  agents up to 1.0.19 send neither `agent` nor `endpointStatuses`, and later ones omit
+  `endpointStatuses` until an endpoint check has a result.
 - Rejecting unknown properties (strict schema validation, `additionalProperties: false`, or
   Jackson `FAIL_ON_UNKNOWN_PROPERTIES`): the next agent version breaks your portal.
 - Rejecting chunked bodies (some WAFs and serverless gateways), or a body limit below a few

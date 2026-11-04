@@ -7,7 +7,9 @@ name: Release WatchTower
 # Each release carries:
 #   WatchTower-<version>-win-x64.zip   self-contained exe + install.ps1 (no .NET needed)
 #   watchtower-update.json             manifest the agents' self-updater reads
-#   SHA256SUMS.txt
+#   get-watchtower.ps1                 one-line installer: downloads, verifies and installs a
+#                                      release (releases/latest/download/get-watchtower.ps1)
+#   SHA256SUMS.txt                     checksums of the zip and of get-watchtower.ps1
 #
 # Servers pick releases up through WatchTower's built-in updater (console → Updates, or the
 # portal's "Update agent" command); there is no push deployment to servers from CI.
@@ -106,4 +108,5 @@ jobs:
           files: |
             artifacts/WatchTower-*.zip
             artifacts/watchtower-update.json
+            artifacts/get-watchtower.ps1
             artifacts/SHA256SUMS.txt

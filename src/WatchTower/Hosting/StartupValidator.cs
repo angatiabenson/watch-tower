@@ -75,6 +75,9 @@ public static class StartupValidator
             else if (portalUri.Scheme == Uri.UriSchemeHttp && !portalUri.IsLoopback)
                 warnings.Add("The portal connection uses plain HTTP: the agent token, metrics and commands " +
                              "travel unencrypted. Use https:// unless the network is trusted.");
+            if (!RequestCompressionModes.IsValid(portal.CompressRequests))
+                errors.Add($"VisibilityPortal:CompressRequests '{portal.CompressRequests}' must be " +
+                           $"{string.Join(" or ", RequestCompressionModes.All)}.");
             RequirePositive("VisibilityPortal:Outbox:FlushIntervalSeconds", portal.Outbox.FlushIntervalSeconds);
             RequirePositive("VisibilityPortal:CommandPoll:PollIntervalSeconds", portal.CommandPoll.PollIntervalSeconds);
             RequirePositive("VisibilityPortal:RemoteConfig:PollIntervalSeconds", portal.RemoteConfig.PollIntervalSeconds);

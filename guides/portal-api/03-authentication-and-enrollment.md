@@ -120,8 +120,24 @@ The JSON object:
 | `agentId` | string | yes | Trimmed; MUST NOT be empty. |
 | `token` | string | yes | Trimmed; MUST NOT be empty. |
 | `requireTls` | boolean | no | Becomes `Tls:RequireTls`. When absent: `true` for `https` URLs, `false` for `http` URLs. `true` with an `http://` URL is an invalid configuration, which `enroll` refuses to save. |
+| `acceptsGzip` | boolean | no | after-1.0.20. `true`: your portal accepts gzip-compressed request bodies, so `enroll` (CLI and console) also sets `VisibilityPortal:CompressRequests=Gzip`. Absent, `false` or any non-boolean value leaves that setting as it is: a code never turns compression off for an operator who turned it on. Only send `true` if you decode gzip, see [Compressed request bodies](04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020). |
 
-Unknown properties are ignored. A payload that is not valid base64url, not UTF-8 JSON, not an
+A portal that accepts compressed requests adds the flag:
+
+<!-- schema: EnrollmentCodePayload -->
+```json
+{
+  "v": 1,
+  "url": "https://portal.example.com",
+  "agentId": "SRV-WEB-01",
+  "token": "q6Xr0dZ1t8yJm2Kp4Vb7Nc9Lw3Hs5Gf0Ae1Ui2Oo3Pp",
+  "requireTls": true,
+  "acceptsGzip": true
+}
+```
+
+Unknown properties are ignored (1.0.20 and earlier ignore `acceptsGzip` too, so the same code
+works for every agent). A payload that is not valid base64url, not UTF-8 JSON, not an
 object, or has a value of the wrong type gives *The enrollment code is damaged (was it copied
 completely?)*.
 
@@ -213,7 +229,8 @@ Operators can also paste the code into the agent's web console (pairing with a p
 
 - validates the code, then merges `VisibilityPortal: { Enabled: true, Protocol: "Https", BaseUrl,
   AgentId, AgentToken, Tls: { RequireTls } }` into the operator settings, after checking the
-  resulting configuration is valid. The token is encrypted on write.
+  resulting configuration is valid. The token is encrypted on write. With `"acceptsGzip": true`
+  it also sets `CompressRequests: "Gzip"` (after 1.0.20); without it, that setting is untouched.
 - warns when the URL is `http://` ("the agent token will travel unencrypted").
 - restarts the service if it is running (`--no-restart` skips that; `install.ps1` uses it and
   starts the service itself). Data starts arriving within about a minute.

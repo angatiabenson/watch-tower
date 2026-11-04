@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/ci.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/release.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-  <img src="https://img.shields.io/badge/tests-1075%20passing-brightgreen" alt="Tests: 1075 passing">
+  <img src="https://img.shields.io/badge/tests-1118%20passing-brightgreen" alt="Tests: 1118 passing">
   <img src="https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet" alt=".NET 10">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license"></a>
@@ -54,7 +54,9 @@ WatchTower is a .NET 10 agent that runs as a Windows service on each server. It:
 - **alerts** by email, Microsoft Teams, Slack or a signed webhook, with reminders, recoveries
   and maintenance windows, and sends a **daily HTML report**;
 - pings a **dead man's switch** (e.g. healthchecks.io), so you hear about it if WatchTower itself stops;
-- is configured from a **local web console** and **updates itself** from signed releases.
+- is configured from a **local web console** and **updates itself** from GitHub releases (or
+  your own feed), checking each package's SHA-256 and, when the release was signed (the
+  `WATCHTOWER_SIGNING_KEY` secret is configured) and `Updates:PublicKey` is set, its signature.
 
 It works **standalone** (the default), or **attached to a portal** that collects metrics and
 alerts from many servers and sends commands back. The agent only makes outbound calls over a
@@ -68,9 +70,43 @@ small, public, versioned API, so the portal can be ours or one you build yoursel
 Requirements: Windows Server 2016+ or Windows 10+ (x64). No .NET installation is needed: the
 release zip contains a self-contained `WatchTower.exe`.
 
+**One line**, in an elevated PowerShell (Windows PowerShell 5.1 or PowerShell 7):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/angatiabenson/watch-tower/releases/latest/download/get-watchtower.ps1)))
+```
+
+[`get-watchtower.ps1`](build/get-watchtower.ps1) looks up the latest release, downloads
+`WatchTower-<version>-win-x64.zip` and `SHA256SUMS.txt` over HTTPS (TLS 1.2+), **stops without
+installing anything if the zip's SHA-256 doesn't match**, extracts it to a new temporary folder,
+runs its `install.ps1` (step 2 below) and deletes the temporary folder. Every
+[`install.ps1` parameter](#install-parameters) passes straight through, and `-Version 1.0.20`
+picks a release:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/angatiabenson/watch-tower/releases/latest/download/get-watchtower.ps1))) -InstallDir C:\Services\WatchTower -EnrollmentCode WT1.eyJ2IjoxLC...
+```
+
+The checksum comes from the same release as the zip: it catches a damaged or swapped download,
+not a compromised release. To read the script before running it, download it, read it, then run
+the file:
+
+```powershell
+irm https://github.com/angatiabenson/watch-tower/releases/latest/download/get-watchtower.ps1 -OutFile get-watchtower.ps1
+notepad get-watchtower.ps1      # read it; its own SHA-256 is in the release's SHA256SUMS.txt too
+.\get-watchtower.ps1 -InstallDir C:\Services\WatchTower
+```
+
+On an older Windows PowerShell without TLS 1.2 enabled, run
+`[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072`
+first (the script does this itself, but `irm` fetches it before it runs).
+
+**Or manually:**
+
 1. **Download** `WatchTower-<version>-win-x64.zip` from the
    [latest release](https://github.com/angatiabenson/watch-tower/releases/latest) and extract it
-   on the server (e.g. to `C:\Temp\WatchTower`). `SHA256SUMS.txt` in the release has its checksum.
+   on the server (e.g. to `C:\Temp\WatchTower`). `SHA256SUMS.txt` in the release has its checksum
+   (`Get-FileHash .\WatchTower-<version>-win-x64.zip`).
 2. **Install** from an elevated PowerShell:
 
    ```powershell
@@ -92,6 +128,8 @@ release zip contains a self-contained `WatchTower.exe`.
    # Or import settings from a seed file (same keys as appsettings.json; secrets are encrypted)
    .\install.ps1 -ConfigFile .\watchtower.seed.json -AdminPassword $securePassword
    ```
+
+   <a id="install-parameters"></a>
 
    | Parameter | Default | |
    |---|---|---|
@@ -249,6 +287,15 @@ as a warning, because the token then travels unencrypted. An optional client cer
 (`VisibilityPortal:Tls:ClientCertThumbprint`) enables mutual TLS, and
 `VisibilityPortal:Protocol` can switch to gRPC for portals that offer it (enrollment codes
 always use HTTPS/JSON).
+
+**Compressed requests** (`VisibilityPortal:CompressRequests`, console *Compress requests*):
+`Off` by default; `Gzip` gzips the metrics batches and events (`Content-Encoding: gzip`, or gRPC's
+`grpc-encoding: gzip`), about five times smaller (a typical 30-second batch goes from ~7 KB to
+~1.3 KB, ~21 MB to ~4 MB a day). Enrolling with a code that says `acceptsGzip` turns it on; no
+code turns it off. Only enable it for a portal that accepts compressed requests. If the portal
+refuses one (415), the agent resends it uncompressed, logs *Portal does not accept compressed
+requests; sending uncompressed* once and stays uncompressed until the service restarts or the
+setting changes; nothing is lost or sent twice.
 
 Portal commands: start, stop and restart services and pools (only those watched in the
 agent's own settings, unless `VisibilityPortal:CommandPoll:AllowPortalManagedTargets` is on;
@@ -704,11 +751,14 @@ Build the release zip locally (self-contained single-file exe, `install.ps1`, `I
 
 - **CI** ([ci.yml](.github/workflows/ci.yml)): every pull request, and every push except those that change only
   Markdown, branding or `logo.png`, runs restore, a format
-  check, a Release build, the tests and a packaging smoke test on GitHub-hosted runners.
+  check, a Release build, the tests, a packaging smoke test and a test of `get-watchtower.ps1`
+  against that package (install, uninstall, a damaged zip refused) on GitHub-hosted runners.
 - **Release** ([release.yml](.github/workflows/release.yml)): every push to `main` that changes
   the product (`src/`, `build/`, `global.json`, `Directory.*.props`, the solution or the
   workflow) builds, tests and publishes the next patch version (`v1.2.3` → `v1.2.4`) as a GitHub
-  release with the zip, `watchtower-update.json` and `SHA256SUMS.txt`. *Run workflow* releases a
+  release with the zip, `watchtower-update.json`, `get-watchtower.ps1` (the
+  [one-line installer](#quick-start), served at `releases/latest/download/get-watchtower.ps1`) and
+  `SHA256SUMS.txt` (checksums of the zip and of `get-watchtower.ps1`). *Run workflow* releases a
   version you enter (e.g. `1.3.0` or `1.3.0-beta.1`; a version with a suffix is a prerelease).
 - **Signing**: with the repository secret `WATCHTOWER_SIGNING_KEY` (ECDSA P-256 private key,
   PEM) set, packages are signed; agents with the matching `Updates:PublicKey` then install only

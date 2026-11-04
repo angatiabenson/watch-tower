@@ -16,7 +16,8 @@
 .OUTPUTS
     <OutputDir>/WatchTower-<Version>-win-x64.zip
     <OutputDir>/watchtower-update.json
-    <OutputDir>/SHA256SUMS.txt
+    <OutputDir>/get-watchtower.ps1      the one-line installer (a copy of build/get-watchtower.ps1)
+    <OutputDir>/SHA256SUMS.txt          checksums of the zip and of get-watchtower.ps1
 
     Runs on Windows PowerShell 5.1 and PowerShell 7+. Signing needs PowerShell 7.2+ (PEM
     import); it fails loudly rather than shipping an unsigned package when a key is supplied.
@@ -119,7 +120,13 @@ $manifest = [ordered]@{
     )
 }
 [IO.File]::WriteAllText((Join-Path $OutputDir 'watchtower-update.json'), ($manifest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-"$sha256  $zipName" | Set-Content (Join-Path $OutputDir 'SHA256SUMS.txt') -Encoding ascii
+
+# The one-line installer is a release asset of its own (releases/latest/download/get-watchtower.ps1).
+$bootstrap = Join-Path $OutputDir 'get-watchtower.ps1'
+Copy-Item (Join-Path $root 'build/get-watchtower.ps1') $bootstrap -Force
+$bootstrapSha256 = (Get-FileHash $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
+
+@("$sha256  $zipName", "$bootstrapSha256  get-watchtower.ps1") | Set-Content (Join-Path $OutputDir 'SHA256SUMS.txt') -Encoding ascii
 
 Remove-Item $stageDir -Recurse -Force
 Write-Host "Packaged $zipName ($([math]::Round($size / 1MB, 1)) MB) sha256=$sha256"

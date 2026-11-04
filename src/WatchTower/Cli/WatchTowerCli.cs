@@ -590,6 +590,8 @@ public static class WatchTowerCli
             DataDirectorySecurity.Harden(paths.DataDirectory);
             MergeValidated(paths, enrollment.ToSettingsPatch(), "The enrollment code");
             output.WriteLine($"Connected to {enrollment.Url} as agent '{enrollment.AgentId}' (token stored encrypted).");
+            if (enrollment.AcceptsGzip)
+                output.WriteLine("The portal accepts compressed requests: metrics and events will be sent gzip-compressed.");
             if (enrollment.Url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
                 output.WriteLine("warning: the portal uses plain HTTP; the agent token will travel unencrypted.");
 
