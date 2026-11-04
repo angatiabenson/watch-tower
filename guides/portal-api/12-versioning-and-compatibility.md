@@ -55,7 +55,10 @@ There is no capability negotiation. Use:
   prerelease suffixes for development builds);
 - **no `agent` object at all** means a 1.0.x agent (1.0.18 or older);
 - the presence of a property, rather than version arithmetic, when you can (for example
-  `endpointStatuses`, `alertKey`).
+  `endpointStatuses`, `alertKey`). Check each property on its own: `isStale` came later than
+  the other post-1.0.18 properties, so a batch with an `agent` object can still lack it. A
+  missing `isStale` means unknown: fall back to the entry's `timestamp`
+  ([Staleness](06-telemetry-reference.md#staleness-isstale)).
 
 ## Feature compatibility
 
@@ -78,6 +81,7 @@ after 1.0.18 and later (and builds from current source).
 | Command results retried with backoff, given up after `ResultRetryMaxHours` (168 h) | ✗ (every cycle, without limit) | ✓ |
 | `ConfigurationError` endpoint status (invalid check keeps its last result) | ✗ (no `endpointStatuses`) | ✓ |
 | Snapshot entries removed only when the resource is gone (absent past the grace period, or removed from the configuration; names compared case-insensitively) and kept through the daily report purge | ✗ (every snapshot row deleted by the daily report purge, then read again) | ✓ |
+| `isStale` on every snapshot entry (HTTPS `isStale`; gRPC `is_stale`) | ✗ (absent: unknown, judge by `timestamp`) | ✓ from later post-1.0.18 builds only; earlier ones omit it too |
 | 3xx answered as a failure, redirects not followed | ✗ (followed by .NET, dropping the token) | ✓ |
 | Local allow-list for service and pool commands | ✗ (any service or pool name is acted on) | ✓ (`AllowPortalManagedTargets` opt-in) |
 | Remote configuration validation of every field (ranges, names, list sizes, all or nothing) | partial (CPU/RAM poll interval and threshold, disk critical threshold only) | ✓ |

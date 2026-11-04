@@ -114,6 +114,13 @@ curl -s -X PUT -H "X-Admin-Key: $KEY" -H "Content-Type: application/json" \
   timestamp): an equal timestamp is ordered by `batchedAt`, and the admin view shows each entry's
   `health` (`up`, `warning`, `down`, `not checked (configuration error)`, or `unknown (<status>)`
   for values from later agents) instead of trusting `isUp`.
+- Stale snapshot entries: the admin view shows every snapshot entry's `freshness`. With
+  `isStale: true` it is `stale (no reading since <timestamp>)`: the resource is still listed
+  but the agent couldn't read it within its window, so the values are the last ones read. A
+  missing `isStale` (agents that predate it) is treated as unknown and judged from the timestamp
+  instead (`batchedAt - timestamp` over 10 minutes is stale), with the result marked "judged
+  from the timestamp". An equal timestamp is ordered by `batchedAt` for every snapshot, so a
+  late older batch can't make a stale entry fresh again.
 - The alert lifecycle from `alertKey` and `resolved`, decided by event timestamps rather than
   arrival order: an opening or escalation older than the alert's current state is kept as
   history only (it never overwrites a newer severity or description), a close only ends the

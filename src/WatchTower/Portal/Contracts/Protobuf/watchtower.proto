@@ -56,13 +56,17 @@ message AgentTelemetryProto {
 message UpdateResultProto { string to_version = 1; bool success = 2; string completed_at = 3; }
 message MaintenanceProto { bool active = 1; optional string until_utc = 2; optional string reason = 3; }
 
+// Snapshot entries (disk to endpoint) carry is_stale: true when the reading is older than its
+// freshness window when the batch is built (polled resources: max(3 x poll interval, 10 min);
+// endpoint checks: max(2 x interval + timeout, 10 min)), false otherwise. Unset from agents that
+// predate it: treat unset as unknown and fall back to the timestamp.
 message CpuMetricProto       { string timestamp = 1; double usage_percent = 2; }
 message RamMetricProto       { string timestamp = 1; double usage_percent = 2; double available_mb = 3; double total_mb = 4; }
-message DiskMetricProto      { string timestamp = 1; string drive_name = 2; double total_gb = 3; double free_gb = 4; double usage_percent = 5; }
-message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; double queue_length = 3; }
-message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; }
-message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; }
-message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; }
+message DiskMetricProto      { string timestamp = 1; string drive_name = 2; double total_gb = 3; double free_gb = 4; double usage_percent = 5; optional bool is_stale = 6; }
+message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; double queue_length = 3; optional bool is_stale = 4; }
+message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; optional bool is_stale = 4; }
+message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; optional bool is_stale = 6; }
+message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; optional bool is_stale = 5; }
 message EndpointStatusProto  {
   string          timestamp             = 1;
   string          name                  = 2;
@@ -73,6 +77,7 @@ message EndpointStatusProto  {
   optional double response_time_ms      = 7;
   optional double certificate_days_left = 8;
   optional string detail                = 9;
+  optional bool   is_stale              = 10; // computed for ConfigurationError entries too
 }
 
 // ── Event ────────────────────────────────────────────────────────────────────

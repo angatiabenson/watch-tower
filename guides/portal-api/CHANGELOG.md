@@ -28,6 +28,18 @@ See "Changed" below.
   `Up`/`Down`/`Expiring` should show it as "not checked" (`isUp` is the last result's), and one
   that keeps the newest entry per name must let an equal `timestamp` from a later batch replace
   it.
+- `isStale` on every snapshot entry (`diskMetrics`, `diskQueueMetrics`, `networkMetrics`,
+  `serviceStatuses`, `applicationPoolStatuses`, `endpointStatuses`), optional boolean; gRPC
+  `optional bool is_stale` (field 6 of `DiskMetricProto` and `ServiceStatusProto`, 4 of
+  `DiskQueueMetricProto` and `NetworkMetricProto`, 5 of `AppPoolStatusProto`, 10 of
+  `EndpointStatusProto`). `true` when the entry's reading is older than its freshness window at
+  `batchedAt`: max(3 × the monitor's poll interval, 10 min) for drives, physical disks, network
+  interfaces, services and pools; max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) for an
+  endpoint check, `ConfigurationError` included. The reading and its `timestamp` are unchanged.
+  It came after the other additions here, so earlier post-1.0.18 builds don't send it either:
+  a missing `isStale` means unknown, and portals MUST fall back to the `timestamp`. The agent
+  also logs a warning when an entry first goes stale (at most once per hour per resource) and
+  greys stale entries out in its console.
 - Agent options that affect what a portal sees (operator settings, not part of the wire format):
   `VisibilityPortal:RequireCommandIssuedAt` (default false), `VisibilityPortal:CommandIdRetentionDays`
   (365, 0 = no age limit), `VisibilityPortal:CommandIdMaxCount` (200 000, 0 = no limit) and
@@ -89,7 +101,8 @@ See "Changed" below.
   daily report purge deletes only history (delivered CPU/RAM samples and incidents); 1.0.x also
   deleted every snapshot row with it, so resources vanished from the batches until they were
   read again. A resource that is still present but can't be read keeps its last reading and
-  `timestamp`: the `timestamp` is the freshness indicator.
+  `timestamp`. Current agents mark it `isStale: true` once that reading is older than its window
+  (see "Added"); without `isStale`, the `timestamp` is the freshness indicator.
 - Every occurrence of an alert key gets its own recovery event, in the order the alert opened
   and closed (an occurrence's recovery is no longer lost when the alert re-opens).
 - Service and application-pool commands only act on names from the agent's local watch lists

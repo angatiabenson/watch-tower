@@ -31,8 +31,9 @@ public sealed record EndpointCheck(
     int FailuresBeforeAlert)
 {
     public const int MaxNameLength = 100;
-    public const int MinIntervalSeconds = 5;
-    public const int MaxTimeoutSeconds = 120;
+    public const int MinIntervalSeconds = SnapshotFreshness.EndpointMinIntervalSeconds;
+    public const int MaxIntervalSeconds = SnapshotFreshness.EndpointMaxIntervalSeconds;
+    public const int MaxTimeoutSeconds = SnapshotFreshness.EndpointMaxTimeoutSeconds;
 
     public bool IsExpectedStatus(int status) => ExpectStatus.Any(r => status >= r.From && status <= r.To);
 
@@ -50,8 +51,8 @@ public sealed record EndpointCheck(
             return Fail($"{key}:Type must be Http, Tcp or Certificate.", out error);
         if (o.TimeoutSeconds < 1 || o.TimeoutSeconds > MaxTimeoutSeconds)
             return Fail($"{key}:TimeoutSeconds must be between 1 and {MaxTimeoutSeconds}.", out error);
-        if (o.IntervalSeconds < MinIntervalSeconds || o.IntervalSeconds > 86_400)
-            return Fail($"{key}:IntervalSeconds must be between {MinIntervalSeconds} and 86400.", out error);
+        if (o.IntervalSeconds < MinIntervalSeconds || o.IntervalSeconds > MaxIntervalSeconds)
+            return Fail($"{key}:IntervalSeconds must be between {MinIntervalSeconds} and {MaxIntervalSeconds}.", out error);
         if (o.FailuresBeforeAlert < 1 || o.FailuresBeforeAlert > 100)
             return Fail($"{key}:FailuresBeforeAlert must be between 1 and 100.", out error);
         if (o.CertificateWarnDays < 1 || o.CertificateWarnDays > 3650)

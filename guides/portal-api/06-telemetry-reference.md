@@ -11,6 +11,8 @@ Windows side, the units, how often it changes and how to show it. Two kinds of d
   batch until a newer reading replaces it. Keep "current state per resource" and append to
   history only when the reading's `timestamp` changes (or, for an endpoint check, its `status`
   becomes `ConfigurationError`, which keeps the `timestamp`; see [Endpoints](#endpoints-endpointstatuses-post-1018)).
+  Take the stored `isStale` from the newest batch (latest `batchedAt`), even when the
+  `timestamp` is unchanged: it turns `true` without a new reading (see [Staleness](#staleness-isstale)).
 
 A snapshot entry is the resource's last-known reading, repeated until a newer reading replaces it
 or the resource is removed:
@@ -30,10 +32,60 @@ or the resource is removed:
   entry. Do not expect a resource to vanish from the very next batch.
 - Nothing else removes an entry: the agent's daily report purge deletes only history
   (delivered CPU/RAM samples and incidents). A resource that is still present but can't be read
-  (for example a fixed drive that is not ready) keeps its last reading and `timestamp`
-  indefinitely, so the `timestamp` is the freshness indicator: show old readings as stale.
+  (for example a fixed drive that is not ready) keeps its last reading and `timestamp` until it
+  is removed. Current agents mark such an entry `isStale: true`; see [Staleness](#staleness-isstale).
 
 All timestamps are the agent's clock in UTC. See [clock skew](10-reliability.md#clock-skew).
+
+## Staleness (`isStale`)
+
+Every snapshot entry (`diskMetrics`, `diskQueueMetrics`, `networkMetrics`, `serviceStatuses`,
+`applicationPoolStatuses`, `endpointStatuses`) carries `isStale` from current agents. The agent
+computes it when it builds the batch:
+
+- `true`: the entry's reading is older than its freshness window, i.e.
+  `batchedAt - timestamp > window`. The resource is still listed, but hasn't been read within its
+  window.
+- `false`: it isn't. A reading exactly at the edge of its window, or with a `timestamp` after
+  `batchedAt`, is fresh.
+- Nothing else changes. A stale entry still carries the last reading and its original
+  `timestamp`. An endpoint check with status `ConfigurationError` keeps that status and gets
+  `isStale` like any other entry. It goes stale once its last result is older than the window,
+  because the check doesn't run.
+
+| Entries | Freshness window |
+| --- | --- |
+| drives, physical disks | max(3 × `Monitoring:Disk:PollIntervalSeconds`, 10 min) |
+| network interfaces | max(3 × `Monitoring:Network:PollIntervalSeconds`, 10 min) |
+| services | max(3 × `Monitoring:Services:PollIntervalSeconds`, 10 min) |
+| application pools | max(3 × `Monitoring:ApplicationPools:PollIntervalSeconds`, 10 min) |
+| endpoint checks | max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) of that check (interval clamped to 5 to 86400 s, timeout to 1 to 120 s) |
+
+The intervals are the agent's current ones, local or pushed by [remote config](09-remote-config.md).
+With the defaults every window is 10 minutes. An endpoint check's window is longer once
+2 × interval + timeout exceeds 600 s: a daily certificate check stays fresh for 48 hours plus
+its timeout.
+
+Typical causes of a stale entry: a fixed drive that is not ready, a performance counter that
+stopped returning a disk or adapter, a monitor that keeps failing, an endpoint check left with
+an invalid configuration. The agent logs a warning on the server once when an entry first goes
+stale, and an information message when it is read again (see
+[Troubleshooting](13-troubleshooting-faq.md#a-resource-shows-an-old-reading-or-isstale-true)).
+
+How to use it:
+
+- `isStale: true`: show the entry as stale, for example grey with "no reading since
+  `<timestamp>`". Don't alert on its last reading as if it were current, and don't count it as
+  up or down.
+- `isStale: false`: the reading is current as of `batchedAt`.
+- **`isStale` missing: unknown, not fresh.** Agents built before this field (1.0.x, and earlier
+  post-1.0.18 builds) don't send it. Fall back to the timestamp: treat the entry as stale when
+  `batchedAt - timestamp` exceeds the window above (or your own fixed threshold, such as
+  10 minutes, if you don't track the agent's intervals).
+- `isStale` describes the batch when it was built (`batchedAt`). A batch that arrives late
+  describes the past, like the rest of it. Just after an agent restart, the first batch can
+  mark entries read before the restart as stale until the monitors read them again (seconds
+  later).
 
 ## CPU (`cpuMetrics[]`)
 
@@ -69,14 +121,17 @@ One entry per **fixed** drive that is ready (no removable, network or CD drives)
 | `totalGb` | GiB (2³⁰ bytes) | drive capacity |
 | `freeGb` | GiB | free space for all users (not quota-limited) |
 | `usagePercent` | %, 0 to 100 | `(total - free) / total × 100`; 0 for a zero-size drive |
+| `isStale` | | `true` once the reading is older than its [window](#staleness-isstale); absent from older agents (unknown) |
 
 Display: a bar per drive with used/free; warn at the agent's thresholds (`Monitoring:Disk:WarningThresholdPercent`
 70, `CriticalThresholdPercent` 85 by default, or what you pushed in [remote config](09-remote-config.md)).
 A removed drive stays in the list with its last reading until it has been absent from 3
 consecutive successful inventories and for at least 10 minutes; then it disappears from the list,
-and an open alert for it is retired. A drive that is still present but not ready keeps its last
-reading indefinitely: show it as stale using its `timestamp` (see
-[Events and alerts](07-events-and-alerts.md#retirement)).
+and an open alert for it is retired (see [Events and alerts](07-events-and-alerts.md#retirement)).
+A drive that is still present but not ready keeps its last reading and `timestamp`. Once that
+reading is older than max(3 × `PollIntervalSeconds`, 10 min), current agents send it with
+`isStale: true`. Show it as stale. Without `isStale` (older agents), decide from the `timestamp`
+yourself (see [Staleness](#staleness-isstale)).
 
 ## Disk queues (`diskQueueMetrics[]`)
 
@@ -84,6 +139,7 @@ reading indefinitely: show it as stale using its `timestamp` (see
 | --- | --- | --- |
 | `instanceName` | | PhysicalDisk counter instance, e.g. `0 C:` (disk number and its volumes); `_Total` is excluded |
 | `queueLength` | outstanding requests | `\PhysicalDisk(*)\Current Disk Queue Length`, an instantaneous value |
+| `isStale` | | `true` once the reading is older than its [window](#staleness-isstale) (disk poll interval); absent from older agents |
 
 Read with the disk poll (60 s). Instantaneous queue lengths are noisy: show a maximum over a
 window, and compare with `Monitoring:Disk:QueueLengthWarningThreshold` (default 2).
@@ -94,6 +150,7 @@ window, and compare with `Monitoring:Disk:QueueLengthWarningThreshold` (default 
 | --- | --- | --- |
 | `interfaceName` | | `\Network Interface(*)` instance name (adapter description; `#` and `/` characters are replaced by Windows, e.g. `Intel[R] ...`) |
 | `outputQueueLength` | packets | `\Network Interface(*)\Output Queue Length`; normally 0 on modern NICs |
+| `isStale` | | `true` once the reading is older than its [window](#staleness-isstale); absent from older agents |
 
 Every `Monitoring:Network:PollIntervalSeconds` (default 30 s). Any value above
 `OutputQueueWarningThreshold` (default 0) raises a network alert. Virtual and disconnected
@@ -109,6 +166,7 @@ One entry per name in `Monitoring:Services:WatchedServices`, every `PollInterval
 | `displayName` | display name from the Service Control Manager; equals `serviceName` when not found |
 | `status` | `Running`, `Stopped`, `StartPending`, `StopPending`, `ContinuePending`, `PausePending`, `Paused`, or `NotFound` (the service does not exist or can't be queried) |
 | `isRunning` | `true` only for `Running` |
+| `isStale` | `true` once the status is older than its [window](#staleness-isstale): `status` and `isRunning` are the last ones read; absent from older agents |
 
 Display: green for `Running`, amber for `*Pending`/`Paused`, red for `Stopped`/`NotFound`. The
 agent restarts stopped services automatically (unless they are disabled or a maintenance window is
@@ -123,6 +181,7 @@ One entry per name in `Monitoring:ApplicationPools:WatchedApplicationPools`, eve
 | `applicationPoolName` | pool name as configured |
 | `status` | `Started`, `Stopped`, `Starting`, `Stopping`, `NotFound` (no pool with that name exists) or `Unknown` (IIS unavailable or the query failed). Treat the set as open: accept and display values you don't know |
 | `isRunning` | `true` only for `Started` |
+| `isStale` | `true` once the status is older than its [window](#staleness-isstale): `status` and `isRunning` are the last ones read; absent from older agents |
 
 ## Endpoints (`endpointStatuses[]`, post-1.0.18)
 
@@ -139,6 +198,7 @@ Absent from the batch until at least one check produced a result.
 | `responseTimeMs` | ms | absent when the check didn't get far enough to measure |
 | `certificateDaysLeft` | days, 0.1 precision | absent when no certificate was inspected; negative when expired |
 | `detail` | | e.g. `HTTP 200`, `Connection refused`, certificate summary; for `ConfigurationError`, `Configuration error: <error> Last result: <status>[: <detail>]` |
+| `isStale` | | `true` once the result is older than max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) of the check, `ConfigurationError` included; absent from older agents (unknown). See [Staleness](#staleness-isstale) |
 
 The agent alerts only after `FailuresBeforeAlert` (default 2) consecutive failures, but every
 single result is reported here.
@@ -154,7 +214,9 @@ Down: HTTP 503`. A check that never produced a result gets no entry. Once the ch
 runs at once and reports a real result with a new `timestamp`; once it is removed, its entry
 goes. Display: grey or "not checked", with the detail. Don't treat it as up or down, and don't
 alert on `isUp` for it. Because the `timestamp` doesn't change, a portal that keeps the newest
-entry per name must let an equal `timestamp` from a later batch (`batchedAt`) replace it.
+entry per name must let an equal `timestamp` from a later batch (`batchedAt`) replace it. The
+same goes for `isStale`, which turns `true` on a later batch once the kept result is older than
+the check's window.
 
 ## The agent object
 

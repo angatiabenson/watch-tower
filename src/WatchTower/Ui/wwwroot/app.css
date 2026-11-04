@@ -307,6 +307,14 @@ input[type="search"]::-webkit-search-cancel-button { filter: grayscale(1); }
 .tag-critical { color: var(--crit); }
 .tag-info { color: var(--info); }
 .tag-stopped { color: var(--fg-2); }
+.tag-stale { color: var(--fg-2); }
+
+/* Stale snapshot entries: the last reading is older than its freshness window. Grey, never alarm colours. */
+.is-stale, .is-stale .strong, .is-stale .disk-pct, .is-stale .disk-meta, .is-stale .ep-detail,
+.status-list li.is-stale.down .strong { color: var(--fg-2); }
+.is-stale .bar-fill { background: var(--fg-2); opacity: 0.5; }
+.stale-note { font-family: var(--font-mono); font-size: 11px; color: var(--fg-2); }
+.status-tags { display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 12px; }
 
 .badges { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .badge {

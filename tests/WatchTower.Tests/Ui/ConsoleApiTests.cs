@@ -302,6 +302,32 @@ public class ConsoleApiTests
         response.Content.Headers.ContentType!.MediaType.Should().Be("text/html");
     }
 
+    [Fact]
+    public async Task Status_MarksSnapshotEntriesOlderThanTheirWindow_AsStale_WithTheirReadingTime()
+    {
+        await using var host = await ConsoleTestHost.StartAsync();
+        var store = host.Services.GetRequiredService<WatchTower.Services.Abstractions.IMetricsStore>();
+        var now = DateTime.UtcNow;
+        var old = now.AddDays(-100);
+        store.AddDiskMetric(new WatchTower.Models.DiskMetric(old, @"D:\", 500, 123, 75.4));
+        store.AddDiskMetric(new WatchTower.Models.DiskMetric(now, @"C:\", 500, 400, 20));
+        store.AddServiceStatus(new WatchTower.Models.ServiceStatus(old, "OldSvc", "Old service", "Running", true));
+        store.AddEndpointStatus(new WatchTower.Models.EndpointStatus(old, "gone-quiet", "Http", "https://example.com/",
+            WatchTower.Models.EndpointStatus.ConfigurationError, true));
+        var client = await host.SignedInClientAsync();
+
+        var metrics = (await client.GetFromJsonAsync<JsonElement>("api/status", Ct)).GetProperty("metrics");
+
+        var disks = metrics.GetProperty("disks").EnumerateArray().ToDictionary(d => d.GetProperty("drive").GetString()!);
+        disks[@"D:\"].GetProperty("isStale").GetBoolean().Should().BeTrue();
+        disks[@"D:\"].GetProperty("readAt").GetDateTime().ToUniversalTime().Should().BeCloseTo(old, TimeSpan.FromMilliseconds(1));
+        disks[@"C:\"].GetProperty("isStale").GetBoolean().Should().BeFalse();
+        metrics.GetProperty("services").EnumerateArray().Single().GetProperty("isStale").GetBoolean().Should().BeTrue();
+        var endpoint = metrics.GetProperty("endpoints").EnumerateArray().Single();
+        endpoint.GetProperty("isStale").GetBoolean().Should().BeTrue();
+        endpoint.GetProperty("status").GetString().Should().Be("ConfigurationError");
+    }
+
     private static async Task WaitForAsync(Func<Task<bool>> condition)
     {
         // Saved settings reach IConfiguration via the file watcher (debounced ~250 ms).

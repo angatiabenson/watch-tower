@@ -27,16 +27,17 @@ public static class AgentPayloads
         [new CpuMetricDto(Utc(TimeSpan.FromSeconds(30)), 12.5), new CpuMetricDto(Utc(TimeSpan.FromSeconds(25)), 97.25)],
         [new RamMetricDto(Utc(TimeSpan.FromSeconds(30)), 61.21, 6355.4, 16383.5)],
         [
-            new DiskMetricDto(Utc(TimeSpan.FromMinutes(1)), @"C:\", 126.4, 40.2, 68.2),
-            new DiskMetricDto(Utc(TimeSpan.FromMinutes(1)), @"D:\", 0, 0, 0),
+            new DiskMetricDto(Utc(TimeSpan.FromMinutes(1)), @"C:\", 126.4, 40.2, 68.2, IsStale: false),
+            // A fixed drive that is not ready: still listed, last reading kept, older than its window.
+            new DiskMetricDto(Utc(TimeSpan.FromDays(3)), @"D:\", 0, 0, 0, IsStale: true),
         ],
-        [new DiskQueueMetricDto(Utc(TimeSpan.FromMinutes(1)), "0 C:", 0.4)],
-        [new NetworkMetricDto(Utc(TimeSpan.FromSeconds(30)), "Intel[R] 82574L Gigabit Network Connection", 0)],
+        [new DiskQueueMetricDto(Utc(TimeSpan.FromMinutes(1)), "0 C:", 0.4, IsStale: false)],
+        [new NetworkMetricDto(Utc(TimeSpan.FromSeconds(30)), "Intel[R] 82574L Gigabit Network Connection", 0, IsStale: false)],
         [
-            new ServiceStatusDto(Utc(TimeSpan.FromSeconds(20)), "W3SVC", "World Wide Web Publishing Service", "Running", true),
-            new ServiceStatusDto(Utc(TimeSpan.FromSeconds(20)), "NoSuchSvc", "NoSuchSvc", "NotFound", false),
+            new ServiceStatusDto(Utc(TimeSpan.FromSeconds(20)), "W3SVC", "World Wide Web Publishing Service", "Running", true, IsStale: false),
+            new ServiceStatusDto(Utc(TimeSpan.FromSeconds(20)), "NoSuchSvc", "NoSuchSvc", "NotFound", false, IsStale: false),
         ],
-        [new ApplicationPoolStatusDto(Utc(TimeSpan.FromSeconds(20)), "DefaultAppPool", "Started", true)],
+        [new ApplicationPoolStatusDto(Utc(TimeSpan.FromSeconds(20)), "DefaultAppPool", "Started", true, IsStale: false)],
         new AgentTelemetryDto(
             "1.6.0",
             "SRV-WEB-01",
@@ -49,9 +50,9 @@ public static class AgentPayloads
             new MaintenanceTelemetryDto(true, "2026-11-03T18:00:00.0000000Z", "Patch Tuesday")),
         [
             new EndpointStatusDto(Utc(TimeSpan.FromSeconds(10)), "shop-home", "Http", "https://shop.example.com/", "Up", true,
-                182.4, 61.4, "HTTP 200"),
+                182.4, 61.4, "HTTP 200", IsStale: false),
             new EndpointStatusDto(Utc(TimeSpan.FromSeconds(10)), "old-cert", "Certificate", "legacy.example.com:443", "Down", false,
-                40.0, -2.5, "Certificate expired 2.5 days ago"),
+                40.0, -2.5, "Certificate expired 2.5 days ago", IsStale: false),
         ]);
 
     /// <summary>A batch as the agent builds it with nothing optional: no telemetry provider, no endpoints.</summary>

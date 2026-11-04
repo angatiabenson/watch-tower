@@ -45,7 +45,9 @@ info:
 
     * `base`: sent by every released v1 agent (up to and including 1.0.18).
     * `post-1.0.18`: added after 1.0.18; sent by agents built from the current source and by
-      the first release after 1.0.18. Not sent by 1.0.18 or earlier.
+      the first release after 1.0.18. Not sent by 1.0.18 or earlier. `isStale` on snapshot
+      entries came later than the rest of post-1.0.18, so earlier post-1.0.18 builds omit it
+      too (see SnapshotIsStale): never infer it from the presence of other post-1.0.18 fields.
 
     ## Status codes
 
@@ -137,8 +139,10 @@ paths:
           entry. A portal MUST NOT expect a resource to vanish from the very next batch.
         * Nothing else removes an entry (the agent's daily report purge deletes only history).
           A resource that is still present but cannot be read (for example a fixed drive that is
-          not ready) keeps its last reading and `timestamp` indefinitely, so the entry's
-          `timestamp`, not its presence in the batch, says how fresh it is.
+          not ready) keeps its last reading and `timestamp` until it is removed. Current agents
+          then send the entry with `isStale: true` once that reading is older than its freshness
+          window (see SnapshotIsStale). Presence in the batch never means fresh: use `isStale`,
+          and where it is missing (older agents) the entry's `timestamp`.
 
         Deduplicate on `batchId` (when present). The same `batchId` MUST produce the same
         stored result however many times it arrives.
@@ -506,6 +510,43 @@ components:
         - '2026-11-03T10:15:00.1234567Z'
         - '2026-11-03T08:00:00.0000000+00:00'
 
+    SnapshotIsStale:
+      type: boolean
+      description: |
+        Staleness of a snapshot entry (drive, physical disk, network interface, service,
+        application pool, endpoint check), computed by the agent when it assembles the batch.
+        `true`: the entry's reading is older than its freshness window, that is
+        `batchedAt - timestamp > window`. `false`: it is not (a reading exactly at the edge of
+        its window, or with a `timestamp` after `batchedAt`, is fresh). Nothing else in the entry
+        changes: a stale entry still carries the last reading and its original `timestamp`.
+
+        A stale entry is a resource that is still listed (it was not removed, see the
+        sendMetricsBatch operation) but has not been read within its window: for example a fixed
+        drive that is not ready, a performance counter that stopped returning an instance, a
+        monitor that keeps failing, or an endpoint check with status ConfigurationError (which
+        does not run; its isStale is computed the same way and its status is kept). The agent
+        logs a warning, once, when an entry first becomes stale.
+
+        Freshness windows, from the agent's current configuration (local or remote):
+        * drives and physical disks: max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min);
+        * network interfaces: max(3 x Monitoring:Network:PollIntervalSeconds, 10 min);
+        * services: max(3 x Monitoring:Services:PollIntervalSeconds, 10 min);
+        * application pools: max(3 x Monitoring:ApplicationPools:PollIntervalSeconds, 10 min);
+        * endpoint checks: max(2 x IntervalSeconds + TimeoutSeconds, 10 min) of that check, with
+          the interval clamped to 5 to 86400 s and the timeout to 1 to 120 s (a daily check is
+          fresh for 48 h plus its timeout).
+        With the default intervals every window is 10 minutes; an endpoint check's is longer
+        once 2 x IntervalSeconds + TimeoutSeconds exceeds 600 s.
+
+        It is evaluated at `batchedAt`: a batch delivered late says whether the reading was stale
+        when the batch was built, not when it arrived. Just after an agent restart the first
+        batch can mark entries read before the restart stale until they are read again.
+
+        Optional for portals to rely on: agents built from this version on always send it, older
+        agents never do (including earlier post-1.0.18 builds). A missing `isStale` means
+        UNKNOWN, not fresh: a portal MUST then fall back to the entry's `timestamp`, for example
+        comparing `batchedAt - timestamp` with the windows above.
+
     MetricsBatch:
       type: object
       description: One outbox batch. Arrays are always present and may be empty.
@@ -705,6 +746,10 @@ components:
           minimum: 0
           maximum: 100
           description: (totalGb - freeGb) / totalGb x 100; 0 when totalGb is 0.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt (for example a fixed drive that is not ready). Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: post-1.0.18
 
     DiskQueueMetric:
       type: object
@@ -719,6 +764,10 @@ components:
           type: number
           minimum: 0
           description: Current disk queue length (requests waiting), a dimensionless count.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: post-1.0.18
 
     NetworkMetric:
       type: object
@@ -733,6 +782,10 @@ components:
           type: number
           minimum: 0
           description: Packets waiting in the output queue, a dimensionless count.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this reading is older than max(3 x Monitoring:Network:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: post-1.0.18
 
     ServiceStatus:
       type: object
@@ -753,6 +806,10 @@ components:
         isRunning:
           type: boolean
           description: True only when status is Running.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this status is older than max(3 x Monitoring:Services:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: post-1.0.18
 
     ApplicationPoolStatus:
       type: object
@@ -769,6 +826,10 @@ components:
         isRunning:
           type: boolean
           description: True only when status is Started.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: True when this status is older than max(3 x Monitoring:ApplicationPools:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
+          x-since: post-1.0.18
 
     EndpointStatus:
       type: object
@@ -816,6 +877,15 @@ components:
         detail:
           type: string
           description: Human-readable result or error. Absent when there is none.
+        isStale:
+          $ref: '#/components/schemas/SnapshotIsStale'
+          description: |
+            True when this result is older than max(2 x the check's IntervalSeconds + its
+            TimeoutSeconds, 10 min) at batchedAt. Computed the same way for ConfigurationError
+            entries (which keep their status and last result, and turn stale once that result
+            is older than the window, as the check does not run). Absent from older agents,
+            which means unknown (see SnapshotIsStale).
+          x-since: post-1.0.18
 
     AgentEvent:
       type: object
@@ -1195,25 +1265,36 @@ components:
             totalGb: 126.4
             freeGb: 40.2
             usagePercent: 68.2
+            isStale: false
+          - timestamp: '2026-11-01T06:12:00.0000000Z'
+            driveName: 'D:\'
+            totalGb: 931.5
+            freeGb: 210.7
+            usagePercent: 77.4
+            isStale: true
         diskQueueMetrics:
           - timestamp: '2026-11-03T10:14:30.0000000Z'
             instanceName: '0 C:'
             queueLength: 0.4
+            isStale: false
         networkMetrics:
           - timestamp: '2026-11-03T10:15:00.0000000Z'
             interfaceName: Intel[R] 82574L Gigabit Network Connection
             outputQueueLength: 0
+            isStale: false
         serviceStatuses:
           - timestamp: '2026-11-03T10:15:10.0000000Z'
             serviceName: W3SVC
             displayName: World Wide Web Publishing Service
             status: Running
             isRunning: true
+            isStale: false
         applicationPoolStatuses:
           - timestamp: '2026-11-03T10:15:10.0000000Z'
             applicationPoolName: DefaultAppPool
             status: Started
             isRunning: true
+            isStale: false
         agent:
           version: 1.6.0
           machineName: SRV-WEB-01
@@ -1237,6 +1318,7 @@ components:
             responseTimeMs: 182
             certificateDaysLeft: 61.4
             detail: HTTP 200
+            isStale: false
           - timestamp: '2026-11-03T09:58:41.0000000Z'
             name: sql-port
             type: Tcp
@@ -1245,6 +1327,7 @@ components:
             isUp: true
             responseTimeMs: 3.1
             detail: 'Configuration error: Monitoring:Endpoints:1:Target must be host:port. Last result: Up: Connected'
+            isStale: true
     MetricsBatchMinimal:
       summary: A batch as sent by a 1.0.x agent (no batchId, agent or endpointStatuses)
       value:

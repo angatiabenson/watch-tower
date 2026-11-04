@@ -45,15 +45,18 @@ public sealed record MetricsBatch(
 
 public sealed record CpuMetric(DateTimeOffset Timestamp, double UsagePercent);
 public sealed record RamMetric(DateTimeOffset Timestamp, double UsagePercent, double AvailableMb, double TotalMb);
-public sealed record DiskMetric(DateTimeOffset Timestamp, string DriveName, double TotalGb, double FreeGb, double UsagePercent);
-public sealed record DiskQueueMetric(DateTimeOffset Timestamp, string InstanceName, double QueueLength);
-public sealed record NetworkMetric(DateTimeOffset Timestamp, string InterfaceName, double OutputQueueLength);
-public sealed record ServiceStatus(DateTimeOffset Timestamp, string ServiceName, string DisplayName, string Status, bool IsRunning);
-public sealed record ApplicationPoolStatus(DateTimeOffset Timestamp, string ApplicationPoolName, string Status, bool IsRunning);
+// Snapshot entries end with IsStale: true when the agent's last reading of the resource is older
+// than its freshness window (the resource is still listed but no longer read). Older agents don't
+// send it: null means UNKNOWN, never fresh (see PortalState.Freshness).
+public sealed record DiskMetric(DateTimeOffset Timestamp, string DriveName, double TotalGb, double FreeGb, double UsagePercent, bool? IsStale = null);
+public sealed record DiskQueueMetric(DateTimeOffset Timestamp, string InstanceName, double QueueLength, bool? IsStale = null);
+public sealed record NetworkMetric(DateTimeOffset Timestamp, string InterfaceName, double OutputQueueLength, bool? IsStale = null);
+public sealed record ServiceStatus(DateTimeOffset Timestamp, string ServiceName, string DisplayName, string Status, bool IsRunning, bool? IsStale = null);
+public sealed record ApplicationPoolStatus(DateTimeOffset Timestamp, string ApplicationPoolName, string Status, bool IsRunning, bool? IsStale = null);
 
 public sealed record EndpointStatus(
     DateTimeOffset Timestamp, string Name, string Type, string Target, string Status, bool IsUp,
-    double? ResponseTimeMs, double? CertificateDaysLeft, string? Detail);
+    double? ResponseTimeMs, double? CertificateDaysLeft, string? Detail, bool? IsStale = null);
 
 public sealed record AgentTelemetry(
     string Version, string MachineName, string Os, DateTimeOffset StartedAt, long UptimeSeconds,
@@ -138,8 +141,12 @@ public sealed class AgentRecord
     public Dictionary<string, ApplicationPoolStatus> AppPools { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, EndpointStatus> Endpoints { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>batchedAt of the batch each endpoint entry came from (orders equal timestamps).</summary>
-    public Dictionary<string, DateTimeOffset> EndpointBatchedAt { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// batchedAt of the batch each snapshot entry came from, keyed "kind/name": orders entries
+    /// with equal timestamps (a ConfigurationError endpoint, an isStale that turned true) and
+    /// is the reference time for judging freshness when the agent sends no isStale.
+    /// </summary>
+    public Dictionary<string, DateTimeOffset> SnapshotBatchedAt { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public HashSet<string> SeenBatchIds { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Queue<string> BatchIdOrder { get; } = new();
@@ -301,12 +308,13 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
 
             // Snapshots can be older than what is stored (a batch delayed in the agent's outbox
             // while the portal was down is delivered after newer ones): keep the newest.
-            Latest(agent.Disks, batch.DiskMetrics, m => m.DriveName, m => m.Timestamp);
-            Latest(agent.DiskQueues, batch.DiskQueueMetrics, m => m.InstanceName, m => m.Timestamp);
-            Latest(agent.Networks, batch.NetworkMetrics, m => m.InterfaceName, m => m.Timestamp);
-            Latest(agent.Services, batch.ServiceStatuses, m => m.ServiceName, m => m.Timestamp);
-            Latest(agent.AppPools, batch.ApplicationPoolStatuses, m => m.ApplicationPoolName, m => m.Timestamp);
-            LatestEndpoints(agent, batch);
+            var batchedAt = batch.BatchedAt ?? DateTimeOffset.MinValue;
+            Latest(agent, DiskKind, agent.Disks, batch.DiskMetrics, m => m.DriveName, m => m.Timestamp, batchedAt);
+            Latest(agent, DiskQueueKind, agent.DiskQueues, batch.DiskQueueMetrics, m => m.InstanceName, m => m.Timestamp, batchedAt);
+            Latest(agent, NetworkKind, agent.Networks, batch.NetworkMetrics, m => m.InterfaceName, m => m.Timestamp, batchedAt);
+            Latest(agent, ServiceKind, agent.Services, batch.ServiceStatuses, m => m.ServiceName, m => m.Timestamp, batchedAt);
+            Latest(agent, AppPoolKind, agent.AppPools, batch.ApplicationPoolStatuses, m => m.ApplicationPoolName, m => m.Timestamp, batchedAt);
+            Latest(agent, EndpointKind, agent.Endpoints, batch.EndpointStatuses, m => m.Name, m => m.Timestamp, batchedAt);
 
             // Same for the agent object: a late, older batch must not roll the version back.
             if (batch.Agent is not null && (agent.TelemetryBatchedAt is null || agent.TelemetryBatchedAt <= batch.BatchedAt))
@@ -528,24 +536,14 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
                 LatestCpu = agent.Cpu.Values.LastOrDefault(),
                 RamSamples = agent.Ram.Count,
                 LatestRam = agent.Ram.Values.LastOrDefault(),
-                Disks = agent.Disks.Values,
-                DiskQueues = agent.DiskQueues.Values,
-                Networks = agent.Networks.Values,
-                Services = agent.Services.Values,
-                AppPools = agent.AppPools.Values,
-                Endpoints = agent.Endpoints.Values.Select(e => new
-                {
-                    e.Timestamp,
-                    e.Name,
-                    e.Type,
-                    e.Target,
-                    e.Status,
-                    e.IsUp,
-                    e.ResponseTimeMs,
-                    e.CertificateDaysLeft,
-                    e.Detail,
-                    Health = EndpointHealth(e),
-                }),
+                // Every snapshot entry as received, plus "freshness": how a console shows it.
+                Disks = SnapshotView(agent, DiskKind, agent.Disks.Values, m => m.DriveName, m => m.Timestamp, m => m.IsStale),
+                DiskQueues = SnapshotView(agent, DiskQueueKind, agent.DiskQueues.Values, m => m.InstanceName, m => m.Timestamp, m => m.IsStale),
+                Networks = SnapshotView(agent, NetworkKind, agent.Networks.Values, m => m.InterfaceName, m => m.Timestamp, m => m.IsStale),
+                Services = SnapshotView(agent, ServiceKind, agent.Services.Values, m => m.ServiceName, m => m.Timestamp, m => m.IsStale),
+                AppPools = SnapshotView(agent, AppPoolKind, agent.AppPools.Values, m => m.ApplicationPoolName, m => m.Timestamp, m => m.IsStale),
+                Endpoints = SnapshotView(agent, EndpointKind, agent.Endpoints.Values, e => e.Name, e => e.Timestamp, e => e.IsStale,
+                    (e, view) => view["health"] = EndpointHealth(e)),
                 Events = agent.Events.Values.OrderByDescending(e => e.Timestamp).Take(50),
                 agent.DuplicateEvents,
                 OpenAlerts = agent.OpenAlerts.Values,
@@ -570,24 +568,42 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             series.Remove(series.Keys.First());
     }
 
+    private const string DiskKind = "disk", DiskQueueKind = "diskQueue", NetworkKind = "network",
+        ServiceKind = "service", AppPoolKind = "appPool", EndpointKind = "endpoint";
+
     /// <summary>
-    /// Endpoint entries are snapshots too, with one twist: a check whose configuration became
-    /// invalid is reported as ConfigurationError with its last result's UNCHANGED timestamp. So an
-    /// equal timestamp is decided by the batch: the entry from the later batchedAt wins, and a
-    /// late re-delivery of an older batch cannot bring the old status back.
+    /// Without isStale (older agents), an entry is judged stale when its reading is this much
+    /// older than its batch: the agent's shortest freshness window. A portal that tracks the
+    /// agent's poll and check intervals can apply the exact windows of the spec instead.
     /// </summary>
-    private static void LatestEndpoints(AgentRecord agent, MetricsBatch batch)
+    public static readonly TimeSpan FallbackStaleAfter = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// How a console shows a snapshot entry. isStale true: the agent still lists the resource but
+    /// has not read it within its window, so the values are the last ones read, not current.
+    /// isStale absent: unknown (an agent that predates it), so judge from the timestamp.
+    /// </summary>
+    public static string Freshness(DateTimeOffset timestamp, bool? isStale, DateTimeOffset batchedAt) => isStale switch
     {
-        var batchedAt = batch.BatchedAt ?? DateTimeOffset.MinValue;
-        foreach (var entry in batch.EndpointStatuses ?? [])
+        true => $"stale (no reading since {timestamp:O})",
+        false => "fresh",
+        null when batchedAt - timestamp > FallbackStaleAfter => $"stale (no reading since {timestamp:O}; judged from the timestamp, the agent sends no isStale)",
+        null => "fresh (judged from the timestamp, the agent sends no isStale)",
+    };
+
+    private static JsonArray SnapshotView<T>(AgentRecord agent, string kind, IEnumerable<T> entries, Func<T, string> key,
+        Func<T, DateTimeOffset> at, Func<T, bool?> isStale, Action<T, JsonObject>? extra = null)
+    {
+        var view = new JsonArray();
+        foreach (var entry in entries)
         {
-            if (agent.Endpoints.TryGetValue(entry.Name, out var current) &&
-                (current.Timestamp > entry.Timestamp ||
-                 (current.Timestamp == entry.Timestamp && agent.EndpointBatchedAt.GetValueOrDefault(entry.Name) > batchedAt)))
-                continue;
-            agent.Endpoints[entry.Name] = entry;
-            agent.EndpointBatchedAt[entry.Name] = batchedAt;
+            var node = JsonSerializer.SerializeToNode(entry, PortalApi.Json)!.AsObject();
+            extra?.Invoke(entry, node);
+            node["freshness"] = Freshness(at(entry), isStale(entry),
+                agent.SnapshotBatchedAt.GetValueOrDefault($"{kind}/{key(entry)}", DateTimeOffset.MinValue));
+            view.Add(node);
         }
+        return view;
     }
 
     /// <summary>
@@ -604,12 +620,25 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
         _ => $"unknown ({entry.Status})",
     };
 
-    private static void Latest<T>(Dictionary<string, T> into, List<T>? items, Func<T, string> key, Func<T, DateTimeOffset> at)
+    /// <summary>
+    /// Keeps the newest entry per resource. An equal timestamp is decided by the batch: the entry
+    /// from the later batchedAt wins. Two cases repeat a reading's timestamp with new information:
+    /// an endpoint check whose configuration became invalid (ConfigurationError, last result's
+    /// timestamp unchanged) and an entry whose isStale turned true. A late re-delivery of an older
+    /// batch can bring neither the old status nor "fresh" back.
+    /// </summary>
+    private static void Latest<T>(AgentRecord agent, string kind, Dictionary<string, T> into, List<T>? items,
+        Func<T, string> key, Func<T, DateTimeOffset> at, DateTimeOffset batchedAt)
     {
         foreach (var item in items ?? [])
         {
-            if (!into.TryGetValue(key(item), out var current) || at(current) <= at(item))
-                into[key(item)] = item;
+            var batchKey = $"{kind}/{key(item)}";
+            if (into.TryGetValue(key(item), out var current) &&
+                (at(current) > at(item) ||
+                 (at(current) == at(item) && agent.SnapshotBatchedAt.GetValueOrDefault(batchKey) > batchedAt)))
+                continue;
+            into[key(item)] = item;
+            agent.SnapshotBatchedAt[batchKey] = batchedAt;
         }
     }
 

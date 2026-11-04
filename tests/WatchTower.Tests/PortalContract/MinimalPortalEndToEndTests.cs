@@ -170,6 +170,49 @@ public sealed class MinimalPortalEndToEndTests : IAsyncLifetime
         portal.State.Describe(portal.Agent)["endpoints"]![0]!["health"]!.GetValue<string>().Should().Be("not checked (configuration error)");
     }
 
+    [Fact]
+    public async Task StaleEntry_IsShownStale_ALateOlderBatchDoesNotMakeItFresh_AndAMissingIsStaleIsJudgedFromTheTimestamp()
+    {
+        var portal = await StartPortalAsync("");
+        var client = portal.Client();
+        var ct = TestContext.Current.CancellationToken;
+        var readAt = AgentPayloads.Now.AddMinutes(-30);
+        var reading = new DiskMetricDto(AgentPayloads.Utc(readAt), @"D:\", 512, 301.7, 41.1);
+        MetricsBatchDto Batch(string id, DateTime batchedAt, bool? isStale) => AgentPayloads.MinimalBatch() with
+        {
+            BatchId = id,
+            BatchedAt = AgentPayloads.Utc(batchedAt),
+            CpuMetrics = [],
+            DiskMetrics = [reading with { IsStale = isStale }],
+        };
+        string Freshness() => portal.State.Describe(portal.Agent)["disks"]![0]!["freshness"]!.GetValue<string>();
+        var early = Batch("0f1e2d3c-4b5a-4968-8776-655443322110", readAt.AddMinutes(5), false);
+
+        (await client.SendMetricsBatchAsync(early, ct)).Should().BeTrue();
+        Freshness().Should().Be("fresh");
+
+        // The same reading 20 minutes later: still listed, not read again, now older than its window.
+        (await client.SendMetricsBatchAsync(Batch("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", readAt.AddMinutes(20), true), ct)).Should().BeTrue();
+        Freshness().Should().Be($"stale (no reading since {new DateTimeOffset(readAt):O})");
+        portal.Agent.Disks[@"D:\"].FreeGb.Should().Be(301.7, "the last reading is kept");
+
+        // The early batch delivered again late (another batchId, as after a retry from an older outbox).
+        (await client.SendMetricsBatchAsync(early with { BatchId = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e" }, ct)).Should().BeTrue();
+        Freshness().Should().StartWith("stale", "an older batch must not make the entry fresh again");
+
+        // An agent that predates isStale: unknown, so the portal judges from the timestamp.
+        var older = await StartPortalAsync("");
+        (await older.Client().SendMetricsBatchAsync(Batch("3c4d5e6f-7a8b-4c9d-8e0f-2a3b4c5d6e7f", readAt.AddMinutes(20), null), ct)).Should().BeTrue();
+        older.State.Describe(older.Agent)["disks"]![0]!["freshness"]!.GetValue<string>()
+            .Should().StartWith("stale").And.Contain("judged from the timestamp");
+        (await older.Client().SendMetricsBatchAsync(Batch("4d5e6f7a-8b9c-4d0e-9f1a-3b4c5d6e7f80", readAt.AddMinutes(25), null) with
+        {
+            DiskMetrics = [new DiskMetricDto(AgentPayloads.Utc(readAt.AddMinutes(24)), @"D:\", 512, 301.0, 41.2)],
+        }, ct)).Should().BeTrue();
+        older.State.Describe(older.Agent)["disks"]![0]!["freshness"]!.GetValue<string>()
+            .Should().Be("fresh (judged from the timestamp, the agent sends no isStale)");
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("/watchtower")]

@@ -11,7 +11,8 @@ Delivers the agent's measurements and its self-description. The outbox worker ru
    5 s by default, `Monitoring:Cpu:PollIntervalSeconds` / `Monitoring:Ram:PollIntervalSeconds`),
    at most `Outbox:MaxBatchSize` (500) of each;
 2. adds the latest reading of every disk, physical-disk queue, network interface, watched
-   service, watched application pool and endpoint check;
+   service, watched application pool and endpoint check, each with `isStale`: whether that
+   reading is older than its freshness window at `batchedAt`;
 3. adds the `agent` object;
 4. stores that batch in the outbox with a new `batchId` (only if there is any CPU, RAM, disk,
    network, service, app-pool or endpoint data);
@@ -31,7 +32,9 @@ Content-Type: application/json; charset=utf-8
 Transfer-Encoding: chunked
 ```
 
-No query parameters. Body from a current agent:
+No query parameters. Body from a current agent. Drive `D:\` is still listed but hasn't been
+read since 1 November (a fixed drive that is not ready), and the check `status-api` has been
+left misconfigured for over 10 minutes. Both keep their last reading, marked `isStale: true`:
 
 <!-- schema: MetricsBatch -->
 ```json
@@ -47,21 +50,21 @@ No query parameters. Body from a current agent:
     { "timestamp": "2026-11-03T10:15:00.0000000Z", "usagePercent": 61.2, "availableMb": 6355.4, "totalMb": 16384 }
   ],
   "diskMetrics": [
-    { "timestamp": "2026-11-03T10:14:30.0000000Z", "driveName": "C:\\", "totalGb": 126.4, "freeGb": 40.2, "usagePercent": 68.2 },
-    { "timestamp": "2026-11-03T10:14:30.0000000Z", "driveName": "D:\\", "totalGb": 512, "freeGb": 301.7, "usagePercent": 41.1 }
+    { "timestamp": "2026-11-03T10:14:30.0000000Z", "driveName": "C:\\", "totalGb": 126.4, "freeGb": 40.2, "usagePercent": 68.2, "isStale": false },
+    { "timestamp": "2026-11-01T06:12:00.0000000Z", "driveName": "D:\\", "totalGb": 512, "freeGb": 301.7, "usagePercent": 41.1, "isStale": true }
   ],
   "diskQueueMetrics": [
-    { "timestamp": "2026-11-03T10:14:30.0000000Z", "instanceName": "0 C:", "queueLength": 0.4 }
+    { "timestamp": "2026-11-03T10:14:30.0000000Z", "instanceName": "0 C:", "queueLength": 0.4, "isStale": false }
   ],
   "networkMetrics": [
-    { "timestamp": "2026-11-03T10:15:00.0000000Z", "interfaceName": "Intel[R] 82574L Gigabit Network Connection", "outputQueueLength": 0 }
+    { "timestamp": "2026-11-03T10:15:00.0000000Z", "interfaceName": "Intel[R] 82574L Gigabit Network Connection", "outputQueueLength": 0, "isStale": false }
   ],
   "serviceStatuses": [
-    { "timestamp": "2026-11-03T10:15:10.0000000Z", "serviceName": "W3SVC", "displayName": "World Wide Web Publishing Service", "status": "Running", "isRunning": true },
-    { "timestamp": "2026-11-03T10:15:10.0000000Z", "serviceName": "Spooler", "displayName": "Print Spooler", "status": "Stopped", "isRunning": false }
+    { "timestamp": "2026-11-03T10:15:10.0000000Z", "serviceName": "W3SVC", "displayName": "World Wide Web Publishing Service", "status": "Running", "isRunning": true, "isStale": false },
+    { "timestamp": "2026-11-03T10:15:10.0000000Z", "serviceName": "Spooler", "displayName": "Print Spooler", "status": "Stopped", "isRunning": false, "isStale": false }
   ],
   "applicationPoolStatuses": [
-    { "timestamp": "2026-11-03T10:15:10.0000000Z", "applicationPoolName": "DefaultAppPool", "status": "Started", "isRunning": true }
+    { "timestamp": "2026-11-03T10:15:10.0000000Z", "applicationPoolName": "DefaultAppPool", "status": "Started", "isRunning": true, "isStale": false }
   ],
   "agent": {
     "version": "1.6.0",
@@ -75,9 +78,9 @@ No query parameters. Body from a current agent:
     "maintenance": { "active": true, "untilUtc": "2026-11-03T18:00:00.0000000Z", "reason": "Patch Tuesday" }
   },
   "endpointStatuses": [
-    { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "shop-home", "type": "Http", "target": "https://shop.example.com/", "status": "Up", "isUp": true, "responseTimeMs": 182, "certificateDaysLeft": 61.4, "detail": "HTTP 200" },
-    { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "sql-port", "type": "Tcp", "target": "sql01.corp.local:1433", "status": "Down", "isUp": false, "detail": "Connection refused" },
-    { "timestamp": "2026-11-03T09:58:41.0000000Z", "name": "status-api", "type": "Http", "target": "https://api.example.com/health", "status": "ConfigurationError", "isUp": true, "responseTimeMs": 95, "detail": "Configuration error: Monitoring:Endpoints:2:ExpectStatus must be status codes or ranges between 100 and 599, e.g. 200-399 or 200,204. Last result: Up: HTTP 200" }
+    { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "shop-home", "type": "Http", "target": "https://shop.example.com/", "status": "Up", "isUp": true, "responseTimeMs": 182, "certificateDaysLeft": 61.4, "detail": "HTTP 200", "isStale": false },
+    { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "sql-port", "type": "Tcp", "target": "sql01.corp.local:1433", "status": "Down", "isUp": false, "detail": "Connection refused", "isStale": false },
+    { "timestamp": "2026-11-03T09:58:41.0000000Z", "name": "status-api", "type": "Http", "target": "https://api.example.com/health", "status": "ConfigurationError", "isUp": true, "responseTimeMs": 95, "detail": "Configuration error: Monitoring:Endpoints:2:ExpectStatus must be status codes or ranges between 100 and 599, e.g. 200-399 or 200,204. Last result: Up: HTTP 200", "isStale": true }
   ]
 }
 ```
@@ -134,6 +137,7 @@ Body from a 1.0.x agent (and the smallest body a current agent can send):
 | `applicationPoolStatuses[].status` | string (open enum) | `Started`, `Stopped`, `Starting`, `Stopping`, `Unknown`, `NotFound` | always | IIS state; `Unknown` when it could not be read, `NotFound` when IIS has no pool of that name. | base |
 | `applicationPoolStatuses[].isRunning` | boolean | | always | `status == Started`. | base |
 | `*.timestamp` (snapshots) | date-time | UTC | always | When that resource was last read. | base |
+| `*.isStale` (snapshots, `endpointStatuses[]` included) | boolean | | optional (always from current agents) | `true` when that reading is older than its freshness window at `batchedAt`: max(3 × the monitor's poll interval, 10 min), or for an endpoint check max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min). The reading and `timestamp` are the last ones. **Absent = unknown**: fall back to the `timestamp`. See [Staleness](../06-telemetry-reference.md#staleness-isstale). | post-1.0.18 (later builds only) |
 | `agent` | object | | optional (always from current agents) | Agent self-description, see [telemetry](../06-telemetry-reference.md#the-agent-object). | post-1.0.18 |
 | `agent.version` | string | semver, e.g. `1.6.0` | always in `agent` | Agent version (`0.0.0-dev` for development builds). | post-1.0.18 |
 | `agent.machineName` | string | | always in `agent` | Windows computer name. | post-1.0.18 |
@@ -204,8 +208,12 @@ reach the portal. Delivered and dropped messages are purged from the agent after
   - Nothing else removes an entry: the agent's daily report purge deletes only history
     (delivered CPU/RAM samples and incidents), never the current state. A resource that is still
     present but can't be read (for example a fixed drive that is not ready) keeps its last
-    reading and `timestamp` indefinitely. Use the entry's `timestamp`, not its presence in the
-    batch, to judge how fresh it is, and show old readings as stale.
+    reading and `timestamp` until it is removed. Its presence in the batch never means it is
+    fresh. Current agents send it with `isStale: true` once the reading is older than its
+    window: show it as stale. When `isStale` is missing (older agents), it is unknown, not
+    `false`: judge freshness from the entry's `timestamp` against `batchedAt` instead.
+- **Staleness**: take `isStale` from the newest batch (latest `batchedAt`) even when the
+  `timestamp` didn't change. It turns `true` without a new reading.
 
 ## Common mistakes
 
@@ -217,6 +225,8 @@ reach the portal. Delivered and dropped messages are purged from the agent after
   hundred kilobytes.
 - Treating `batchedAt` or arrival time as the sample time; use each item's `timestamp`.
 - Counting snapshot entries as new samples (disk history with duplicates every 30 s).
+- Treating a missing `isStale` as `false` (older agents don't send it), or showing a stale
+  entry's last `status` or usage as current.
 - Parsing `driveName` without the trailing backslash, or `"C:\\"` as an escape error.
 - Using `agent.uptimeSeconds` as server uptime (it is the agent process; a reboot shows up as a
   ServerRestarted event instead).

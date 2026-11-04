@@ -23,13 +23,15 @@ public sealed class StatusService(
     Updates.UpdateService updates,
     IWorkerHealth workerHealth,
     Services.Alerting.IMaintenanceState maintenance,
-    Services.Alerting.IAlertManager alerts)
+    Services.Alerting.IAlertManager alerts,
+    Services.SnapshotFreshnessPolicy freshness)
 {
     private const int MaxSeriesPoints = 120;
 
     public object GetStatus()
     {
         var now = time.GetUtcNow();
+        var nowUtc = now.UtcDateTime;
         var report = StartupValidator.Validate(configuration);
         var portal = portalOptions.CurrentValue;
         var email = emailOptions.CurrentValue;
@@ -103,6 +105,8 @@ public sealed class StatusService(
                     availableMb = Math.Round(lastRam.AvailableMb),
                     series = Downsample(ram.Select(m => (m.Timestamp, m.UsagePercent)).ToList()),
                 },
+                // Snapshot entries: the last reading (readAt) and whether it is older than its
+                // freshness window (the same rule as the metrics batches' isStale).
                 disks = metrics.GetLatestDiskMetrics().OrderBy(d => d.DriveName).Select(d => new
                 {
                     drive = d.DriveName,
@@ -111,21 +115,39 @@ public sealed class StatusService(
                     usagePercent = Round(d.UsagePercent),
                     warningPercent = disk.WarningThresholdPercent,
                     criticalPercent = disk.CriticalThresholdPercent,
+                    readAt = Utc(d.Timestamp),
+                    isStale = freshness.IsStale(SnapshotKind.Disk, d.DriveName, d.Timestamp, nowUtc),
                 }),
-                diskQueues = metrics.GetLatestDiskQueueMetrics().Select(q => new { instance = q.InstanceName, queueLength = Round(q.QueueLength) }),
-                network = metrics.GetLatestNetworkMetrics().Select(n => new { @interface = n.InterfaceName, outputQueueLength = Round(n.OutputQueueLength) }),
+                diskQueues = metrics.GetLatestDiskQueueMetrics().Select(q => new
+                {
+                    instance = q.InstanceName,
+                    queueLength = Round(q.QueueLength),
+                    readAt = Utc(q.Timestamp),
+                    isStale = freshness.IsStale(SnapshotKind.DiskQueue, q.InstanceName, q.Timestamp, nowUtc),
+                }),
+                network = metrics.GetLatestNetworkMetrics().Select(n => new
+                {
+                    @interface = n.InterfaceName,
+                    outputQueueLength = Round(n.OutputQueueLength),
+                    readAt = Utc(n.Timestamp),
+                    isStale = freshness.IsStale(SnapshotKind.Network, n.InterfaceName, n.Timestamp, nowUtc),
+                }),
                 services = metrics.GetLatestServiceStatuses().OrderBy(s => s.DisplayName).Select(s => new
                 {
                     name = s.ServiceName,
                     displayName = s.DisplayName,
                     status = s.Status,
                     isRunning = s.IsRunning,
+                    readAt = Utc(s.Timestamp),
+                    isStale = freshness.IsStale(SnapshotKind.Service, s.ServiceName, s.Timestamp, nowUtc),
                 }),
                 appPools = metrics.GetLatestApplicationPoolStatuses().OrderBy(p => p.ApplicationPoolName).Select(p => new
                 {
                     name = p.ApplicationPoolName,
                     status = p.Status,
                     isRunning = p.IsRunning,
+                    readAt = Utc(p.Timestamp),
+                    isStale = freshness.IsStale(SnapshotKind.ApplicationPool, p.ApplicationPoolName, p.Timestamp, nowUtc),
                 }),
                 // Read-only: endpoints are configured with `WatchTower config import` (Monitoring:Endpoints).
                 endpoints = metrics.GetLatestEndpointStatuses().OrderBy(e => e.Name).Select(e => new
@@ -139,6 +161,7 @@ public sealed class StatusService(
                     certificateDaysLeft = e.CertificateDaysLeft,
                     detail = e.Detail,
                     checkedAt = DateTime.SpecifyKind(e.Timestamp, DateTimeKind.Utc),
+                    isStale = freshness.IsStale(SnapshotKind.Endpoint, e.Name, e.Timestamp, nowUtc),
                 }),
             },
             incidents = metrics.GetIncidents(TimeSpan.FromHours(24))
@@ -181,6 +204,8 @@ public sealed class StatusService(
     };
 
     private static double Round(double value) => Math.Round(value, 1);
+
+    private static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
     private static IEnumerable<object> Downsample(List<(DateTime Timestamp, double Value)> points)
     {

@@ -81,7 +81,7 @@ export function icon(name, cls = '') {
 
 /** Severity/status → `■ LABEL` (glyph + visible word), so state is never conveyed by colour alone. */
 export function statusTag(kind, label) {
-  const k = ['critical', 'warning', 'ok', 'info', 'stopped'].includes(kind) ? kind : 'info';
+  const k = ['critical', 'warning', 'ok', 'info', 'stopped', 'stale'].includes(kind) ? kind : 'info';
   return h('span', { class: `tag tag-${k}` }, h('span', { class: 'tag-glyph', 'aria-hidden': 'true' }, '■'), h('span', null, label));
 }
 

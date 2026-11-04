@@ -8,6 +8,7 @@ using WatchTower.Portal.Actions;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Storage;
+using WatchTower.Services;
 using WatchTower.Services.Abstractions;
 
 namespace WatchTower.Workers;
@@ -23,6 +24,7 @@ public class OutboxDispatchWorker : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<OutboxDispatchWorker> _logger;
     private readonly IAgentTelemetry? _telemetry;
+    private readonly SnapshotFreshnessPolicy _freshness;
 
     internal const string MetricsMessageType = "MetricsBatch";
     internal const string EventMessageType = "AgentEvent";
@@ -50,9 +52,11 @@ public class OutboxDispatchWorker : BackgroundService
         IOptionsMonitor<PortalOptions> options,
         TimeProvider timeProvider,
         ILogger<OutboxDispatchWorker> logger,
-        IAgentTelemetry? telemetry = null)
+        IAgentTelemetry? telemetry = null,
+        SnapshotFreshnessPolicy? freshness = null)
     {
         _telemetry = telemetry;
+        _freshness = freshness ?? SnapshotFreshnessPolicy.Default;
         _portalClient = portalClient;
         _outboxStore = outboxStore;
         _syncState = syncState;
@@ -116,7 +120,8 @@ public class OutboxDispatchWorker : BackgroundService
         {
             var maxBatch = opts.Outbox.MaxBatchSize;
             var agentId = opts.AgentId;
-            var batchedAt = UtcNow.ToString("O");
+            var now = UtcNow;
+            var batchedAt = now.ToString("O");
             var batchId = Guid.NewGuid().ToString();
 
             // Cursor-based append tables
@@ -142,22 +147,32 @@ public class OutboxDispatchWorker : BackgroundService
             if (!hasData)
                 return;
 
+            // Snapshot entries keep their last reading and its timestamp; isStale says whether that
+            // reading is older than its freshness window as of batchedAt.
+            bool Stale(SnapshotKind kind, string name, DateTime readingAt) => _freshness.IsStale(kind, name, readingAt, now);
+
             var batch = new MetricsBatchDto(
                 agentId,
                 batchId,
                 batchedAt,
                 cpuMetrics.Select(m => new CpuMetricDto(m.Timestamp.ToString("O"), m.UsagePercent)).ToList(),
                 ramMetrics.Select(m => new RamMetricDto(m.Timestamp.ToString("O"), m.UsagePercent, m.AvailableMb, m.TotalMb)).ToList(),
-                diskMetrics.Select(m => new DiskMetricDto(m.Timestamp.ToString("O"), m.DriveName, m.TotalGb, m.FreeGb, m.UsagePercent)).ToList(),
-                diskQueueMetrics.Select(m => new DiskQueueMetricDto(m.Timestamp.ToString("O"), m.InstanceName, m.QueueLength)).ToList(),
-                networkMetrics.Select(m => new NetworkMetricDto(m.Timestamp.ToString("O"), m.InterfaceName, m.OutputQueueLength)).ToList(),
-                serviceStatuses.Select(m => new ServiceStatusDto(m.Timestamp.ToString("O"), m.ServiceName, m.DisplayName, m.Status, m.IsRunning)).ToList(),
-                appPoolStatuses.Select(m => new ApplicationPoolStatusDto(m.Timestamp.ToString("O"), m.ApplicationPoolName, m.Status, m.IsRunning)).ToList(),
+                diskMetrics.Select(m => new DiskMetricDto(m.Timestamp.ToString("O"), m.DriveName, m.TotalGb, m.FreeGb, m.UsagePercent,
+                    Stale(SnapshotKind.Disk, m.DriveName, m.Timestamp))).ToList(),
+                diskQueueMetrics.Select(m => new DiskQueueMetricDto(m.Timestamp.ToString("O"), m.InstanceName, m.QueueLength,
+                    Stale(SnapshotKind.DiskQueue, m.InstanceName, m.Timestamp))).ToList(),
+                networkMetrics.Select(m => new NetworkMetricDto(m.Timestamp.ToString("O"), m.InterfaceName, m.OutputQueueLength,
+                    Stale(SnapshotKind.Network, m.InterfaceName, m.Timestamp))).ToList(),
+                serviceStatuses.Select(m => new ServiceStatusDto(m.Timestamp.ToString("O"), m.ServiceName, m.DisplayName, m.Status, m.IsRunning,
+                    Stale(SnapshotKind.Service, m.ServiceName, m.Timestamp))).ToList(),
+                appPoolStatuses.Select(m => new ApplicationPoolStatusDto(m.Timestamp.ToString("O"), m.ApplicationPoolName, m.Status, m.IsRunning,
+                    Stale(SnapshotKind.ApplicationPool, m.ApplicationPoolName, m.Timestamp))).ToList(),
                 _telemetry?.Snapshot(),
                 endpointStatuses.Count == 0
                     ? null
                     : endpointStatuses.Select(e => new EndpointStatusDto(e.Timestamp.ToString("O"), e.Name, e.Type, e.Target,
-                        e.Status, e.IsUp, e.ResponseTimeMs, e.CertificateDaysLeft, e.Detail)).ToList()
+                        e.Status, e.IsUp, e.ResponseTimeMs, e.CertificateDaysLeft, e.Detail,
+                        Stale(SnapshotKind.Endpoint, e.Name, e.Timestamp))).ToList()
             );
 
             await _outboxStore.AddMessageAsync(

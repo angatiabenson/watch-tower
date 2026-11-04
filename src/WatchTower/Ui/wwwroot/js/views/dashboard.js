@@ -306,6 +306,22 @@ function whenText(iso) {
   return today ? fmtTime(iso) : shortDtf.format(d);
 }
 
+/**
+ * Snapshot entries (drives, disks, adapters, services, pools, endpoints) carry `isStale` from the
+ * agent: the last reading is older than its freshness window (the resource is still listed but no
+ * longer read). They keep that reading, shown grey with the time it was taken.
+ */
+function staleText(readAt) {
+  const at = whenText(readAt);
+  return at ? `Stale since ${at}` : 'Stale';
+}
+
+function staleTag(readAt) {
+  return statusTag('stale', staleText(readAt));
+}
+
+const staleTitle = (readAt) => (readAt ? `No new reading since ${fmtDateTime(readAt)}; showing the last one` : null);
+
 function staleWorkerLine(w) {
   const at = whenText(w.at);
   const every = isNum(w.every) && w.every > 0 ? `, expected every ${fmtDuration(w.every)}` : '';
@@ -364,9 +380,10 @@ function stat(label, value, sub, kind) {
 function upDown(list, noneText) {
   const a = Array.isArray(list) ? list : [];
   const down = a.filter((x) => !x.isRunning).length;
+  const stale = a.filter((x) => x.isStale).length;
   if (!a.length) return ['–', h('span', { class: 'muted' }, noneText), null];
   return [`${a.length - down}/${a.length}`,
-    down ? statusTag('critical', `${down} down`) : statusTag('ok', 'All running'),
+    down ? statusTag('critical', `${down} down`) : stale ? statusTag('stale', `${stale} stale`) : statusTag('ok', 'All running'),
     down ? 'critical' : null];
 }
 
@@ -437,9 +454,10 @@ function renderDisks(disks) {
     const { bar, level } = usageBar({
       percent: d.usagePercent, warning: d.warningPercent, critical: d.criticalPercent, label: `Drive ${d.drive} usage`,
     });
-    return h('li', { class: 'disk' },
+    return h('li', { class: `disk${d.isStale ? ' is-stale' : ''}`, title: d.isStale ? staleTitle(d.readAt) : null },
       h('div', { class: 'disk-head' },
         h('span', { class: 'disk-drive' }, d.drive),
+        d.isStale ? staleTag(d.readAt) : null,
         level !== 'ok' ? statusTag(level, level === 'critical' ? 'Critical' : 'Low space') : null,
         h('span', { class: 'disk-pct' }, fmtPct(d.usagePercent), h('span', { class: 'muted' }, ' used'))),
       bar,
@@ -450,16 +468,24 @@ function renderDisks(disks) {
 
 function statusList(items, nameOf, subOf) {
   const sorted = [...items].sort((a, b) => Number(a.isRunning) - Number(b.isRunning) || nameOf(a).localeCompare(nameOf(b)));
-  return h('ul', { class: 'status-list' }, sorted.map((it) => h('li', { class: it.isRunning ? '' : 'down' },
-    h('div', { class: 'status-name' },
-      h('span', { class: 'strong' }, nameOf(it)),
-      subOf(it) ? h('span', { class: 'muted small' }, subOf(it)) : null),
-    statusTag(it.isRunning ? 'ok' : 'critical', it.status || (it.isRunning ? 'Running' : 'Stopped')))));
+  return h('ul', { class: 'status-list' }, sorted.map((it) => h('li', {
+    class: [it.isRunning ? '' : 'down', it.isStale ? 'is-stale' : ''].filter(Boolean).join(' '),
+    title: it.isStale ? staleTitle(it.readAt) : null,
+  },
+  h('div', { class: 'status-name' },
+    h('span', { class: 'strong' }, nameOf(it)),
+    subOf(it) ? h('span', { class: 'muted small' }, subOf(it)) : null),
+  h('span', { class: 'status-tags' },
+    it.isStale ? staleTag(it.readAt) : null,
+    // A stale entry's status is its last reading: grey, not an alarm.
+    statusTag(it.isStale ? 'stale' : it.isRunning ? 'ok' : 'critical', it.status || (it.isRunning ? 'Running' : 'Stopped'))))));
 }
 
 function countLine(items) {
   const down = items.filter((i) => !i.isRunning).length;
-  return h('span', { class: 'panel-meta' }, down ? `${down} of ${items.length} down` : `${items.length} watched`);
+  const stale = items.filter((i) => i.isStale).length;
+  const text = down ? `${down} of ${items.length} down` : `${items.length} watched`;
+  return h('span', { class: 'panel-meta' }, stale ? `${text}, ${stale} stale` : text);
 }
 
 function renderServices(services) {
@@ -485,11 +511,14 @@ function renderIo({ q, n }) {
     h('thead', null, h('tr', null, cols.map((c, i) => h('th', { scope: 'col', class: i ? 'num' : '' }, c)))),
     h('tbody', null, rows));
   const out = [panelHead('h-io', 'Queues')];
+  const row = (d, name, value) => h('tr', { class: d.isStale ? 'is-stale' : null, title: d.isStale ? staleTitle(d.readAt) : null },
+    h('td', null, name, d.isStale ? h('span', { class: 'stale-note' }, ` · ${staleText(d.readAt)}`) : null),
+    h('td', { class: 'num' }, value));
   out.push(Array.isArray(q) && q.length
-    ? table('Disk I/O queue', ['Disk', 'Queue length'], q.map((d) => h('tr', null, h('td', null, d.instance), h('td', { class: 'num' }, fmt1(d.queueLength)))))
+    ? table('Disk I/O queue', ['Disk', 'Queue length'], q.map((d) => row(d, d.instance, fmt1(d.queueLength))))
     : emptyState('No disk queue samples yet.'));
   out.push(Array.isArray(n) && n.length
-    ? table('Network output queue', ['Adapter', 'Packets queued'], n.map((d) => h('tr', null, h('td', null, d.interface), h('td', { class: 'num' }, fmt0(d.outputQueueLength)))))
+    ? table('Network output queue', ['Adapter', 'Packets queued'], n.map((d) => row(d, d.interface, fmt0(d.outputQueueLength))))
     : emptyState('No network samples yet.'));
   return out;
 }
@@ -586,8 +615,9 @@ function renderEndpoints(endpoints) {
   const down = list.filter((e) => endpointState(e)[0] === 'critical').length;
   const expiring = list.filter((e) => endpointState(e) === ENDPOINT_STATUS.expiring).length;
   const misconfigured = list.filter((e) => endpointState(e) === ENDPOINT_STATUS.configurationerror).length;
+  const stale = list.filter((e) => e.isStale).length;
   const meta = [down ? `${down} down` : '', expiring ? `${expiring} expiring` : '',
-    misconfigured ? `${misconfigured} misconfigured` : ''].filter(Boolean).join(', ') || `${list.length} checked`;
+    misconfigured ? `${misconfigured} misconfigured` : '', stale ? `${stale} stale` : ''].filter(Boolean).join(', ') || `${list.length} checked`;
   return [
     panelHead('h-endpoints', 'Endpoints', h('span', { class: 'panel-meta' }, meta, ' · ',
       h('a', { href: '#/config/endpoints', 'aria-label': 'Edit endpoint checks' }, 'Edit'))),
@@ -600,14 +630,15 @@ function renderEndpoints(endpoints) {
       h('tbody', null, list.map((e) => {
         const [kind, label] = endpointState(e);
         const certKind = isNum(e.certificateDaysLeft) && kind !== 'ok' && e.certificateDaysLeft < 30 ? kind : null;
-        return h('tr', { class: `ep sev-${kind}`, title: e.checkedAt ? `Checked ${fmtDateTime(e.checkedAt)}` : null },
+        const title = e.isStale ? staleTitle(e.checkedAt) : e.checkedAt ? `Checked ${fmtDateTime(e.checkedAt)}` : null;
+        return h('tr', { class: `ep sev-${kind}${e.isStale ? ' is-stale' : ''}`, title },
           h('td', { class: 'ep-main' },
             h('p', { class: 'ep-name' },
               h('span', { class: 'strong' }, e.name || '–'),
               e.type ? h('span', { class: 'badge ep-type' }, ENDPOINT_TYPE[String(e.type).toLowerCase()] || e.type) : null),
             e.target ? h('p', { class: 'ep-target' }, e.target) : null,
             e.detail ? h('p', { class: `ep-detail${kind === 'ok' ? '' : ` is-${kind}`}` }, e.detail) : null),
-          h('td', { class: 'ep-status' }, statusTag(kind, label)),
+          h('td', { class: 'ep-status' }, statusTag(kind, label), e.isStale ? [h('br'), staleTag(e.checkedAt)] : null),
           h('td', { class: 'num' }, isNum(e.responseTimeMs) ? `${fmt0(e.responseTimeMs)} ms` : '–'),
           h('td', { class: `num${certKind ? ` is-${certKind}` : ''}` }, certText(e.certificateDaysLeft)));
       })))),

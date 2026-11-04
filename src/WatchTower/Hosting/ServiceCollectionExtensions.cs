@@ -92,6 +92,10 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<ServiceMonitorWorker>();
         services.AddHostedService<ApplicationPoolMonitorWorker>();
         services.AddHostedService<EndpointMonitorWorker>();
+        // Freshness windows of the snapshot entries (metrics batches, console), and the warning
+        // for a resource that is still listed but no longer read.
+        services.AddSingleton<SnapshotFreshnessPolicy>();
+        services.AddHostedService<StaleSnapshotWorker>();
         services.AddHostedService<HeartbeatWorker>();
         services.AddSingleton<IBootTimeProvider, TickCountBootTimeProvider>();
         services.AddHostedService<RebootDetectionWorker>();

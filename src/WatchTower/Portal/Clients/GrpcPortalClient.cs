@@ -121,46 +121,11 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                     AvailableMb = m.AvailableMb,
                     TotalMb = m.TotalMb
                 }));
-            payload.DiskMetrics.AddRange(
-                batch.DiskMetrics.Select(m => new DiskMetricProto
-                {
-                    Timestamp = m.Timestamp,
-                    DriveName = m.DriveName,
-                    TotalGb = m.TotalGb,
-                    FreeGb = m.FreeGb,
-                    UsagePercent = m.UsagePercent
-                }));
-            payload.DiskQueueMetrics.AddRange(
-                batch.DiskQueueMetrics.Select(m => new DiskQueueMetricProto
-                {
-                    Timestamp = m.Timestamp,
-                    InstanceName = m.InstanceName,
-                    QueueLength = m.QueueLength
-                }));
-            payload.NetworkMetrics.AddRange(
-                batch.NetworkMetrics.Select(m => new NetworkMetricProto
-                {
-                    Timestamp = m.Timestamp,
-                    InterfaceName = m.InterfaceName,
-                    OutputQueueLength = m.OutputQueueLength
-                }));
-            payload.ServiceStatuses.AddRange(
-                batch.ServiceStatuses.Select(m => new ServiceStatusProto
-                {
-                    Timestamp = m.Timestamp,
-                    ServiceName = m.ServiceName,
-                    DisplayName = m.DisplayName,
-                    Status = m.Status,
-                    IsRunning = m.IsRunning
-                }));
-            payload.AppPoolStatuses.AddRange(
-                batch.ApplicationPoolStatuses.Select(m => new AppPoolStatusProto
-                {
-                    Timestamp = m.Timestamp,
-                    AppPoolName = m.ApplicationPoolName,
-                    Status = m.Status,
-                    IsRunning = m.IsRunning
-                }));
+            payload.DiskMetrics.AddRange(batch.DiskMetrics.Select(ToProto));
+            payload.DiskQueueMetrics.AddRange(batch.DiskQueueMetrics.Select(ToProto));
+            payload.NetworkMetrics.AddRange(batch.NetworkMetrics.Select(ToProto));
+            payload.ServiceStatuses.AddRange(batch.ServiceStatuses.Select(ToProto));
+            payload.AppPoolStatuses.AddRange(batch.ApplicationPoolStatuses.Select(ToProto));
 
             if (batch.EndpointStatuses is { } endpoints)
                 payload.EndpointStatuses.AddRange(endpoints.Select(ToProto));
@@ -345,6 +310,65 @@ public class GrpcPortalClient : IPortalClient, IDisposable
             proto.CertificateDaysLeft = days;
         if (e.Detail is not null)
             proto.Detail = e.Detail;
+        if (e.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    // Snapshot entries: is_stale is optional, so it is only set when the batch carries it (a
+    // batch queued by an agent that predates it has none, and unset means "unknown").
+
+    internal static DiskMetricProto ToProto(DiskMetricDto m)
+    {
+        var proto = new DiskMetricProto
+        {
+            Timestamp = m.Timestamp,
+            DriveName = m.DriveName,
+            TotalGb = m.TotalGb,
+            FreeGb = m.FreeGb,
+            UsagePercent = m.UsagePercent,
+        };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static DiskQueueMetricProto ToProto(DiskQueueMetricDto m)
+    {
+        var proto = new DiskQueueMetricProto { Timestamp = m.Timestamp, InstanceName = m.InstanceName, QueueLength = m.QueueLength };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static NetworkMetricProto ToProto(NetworkMetricDto m)
+    {
+        var proto = new NetworkMetricProto { Timestamp = m.Timestamp, InterfaceName = m.InterfaceName, OutputQueueLength = m.OutputQueueLength };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static ServiceStatusProto ToProto(ServiceStatusDto m)
+    {
+        var proto = new ServiceStatusProto
+        {
+            Timestamp = m.Timestamp,
+            ServiceName = m.ServiceName,
+            DisplayName = m.DisplayName,
+            Status = m.Status,
+            IsRunning = m.IsRunning,
+        };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
+        return proto;
+    }
+
+    internal static AppPoolStatusProto ToProto(ApplicationPoolStatusDto m)
+    {
+        var proto = new AppPoolStatusProto { Timestamp = m.Timestamp, AppPoolName = m.ApplicationPoolName, Status = m.Status, IsRunning = m.IsRunning };
+        if (m.IsStale is { } stale)
+            proto.IsStale = stale;
         return proto;
     }
 

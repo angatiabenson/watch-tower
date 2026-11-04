@@ -38,6 +38,8 @@ lines to search for:
 | `Refusing unauthorized command ...` | Allow-list refusal (a result is sent) |
 | `Remote config version {v} failed validation: ...` | Configuration rejected (no acknowledgement) |
 | `Remote configuration updated to version {v}` | Configuration applied |
+| `{Drive\|Physical disk\|Network interface\|Service\|Application pool\|Endpoint check} {name} has had no new reading since {time} (freshness window N min): it is still reported with that reading, marked stale. {reason}` | That entry is sent with `isStale: true`. Logged once when it goes stale, at most once per hour per resource; the reason says what to check |
+| `{kind} {name} is being read again (reading at {time}); it is no longer reported as stale` | The entry is fresh again (`isStale: false`) |
 
 ## Symptoms
 
@@ -84,7 +86,30 @@ can't change endpoint checks), so it
 doesn't run. Its entry keeps the last result and its `timestamp`, and `detail` says what is
 wrong: `Configuration error: <error> Last result: <status>[: <detail>]`. Fix the check: it then
 runs at once. If your portal still shows the old status, it only replaces an entry when the
-`timestamp` is newer; let an equal `timestamp` from a later batch replace it too.
+`timestamp` is newer; let an equal `timestamp` from a later batch replace it too. Once the last
+result is older than the check's window (at least 10 minutes), the entry also comes with
+`isStale: true`.
+
+### A resource shows an old reading, or `isStale: true`
+
+The resource is still listed but the agent can't read it any more: for example a fixed drive
+that is not ready, a disk or adapter the performance counters no longer return, a monitor that
+keeps failing, or a misconfigured endpoint check. The entry keeps its last reading and
+`timestamp` until the resource is removed, which can be indefinitely. Current agents mark it
+`isStale: true` once that reading is older than its window (max(3 × poll interval, 10 min), or
+max(2 × interval + timeout, 10 min) for an endpoint check; see
+[Staleness](06-telemetry-reference.md#staleness-isstale)). The server's log has one warning
+`... has had no new reading since ...` explaining the likely cause.
+
+What to do in the portal:
+
+- `isStale: true`: show the entry as stale (grey, "no reading since `<timestamp>`"). Don't treat
+  its last value as current or alert on it.
+- `isStale` missing: the agent is older and doesn't send it. That means unknown, not fresh. Fall
+  back to the timestamp: show the entry as stale when `batchedAt - timestamp` exceeds the
+  window (10 minutes with the default intervals).
+- `isStale: true` on many entries in the first batch after the agent restarted: those readings
+  predate the restart. The next batches clear it as the monitors read them again.
 
 ### Commands stay pending
 
