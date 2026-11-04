@@ -150,8 +150,39 @@ public class MetricsStore : IMetricsStore
 
     public IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep)
     {
-        var kept = keep.ToHashSet(StringComparer.Ordinal);
-        return RemoveWhere(kind, n => !kept.Contains(n));
+        var plan = SnapshotPrunePlan.Create(Snapshot(kind).Keys.Cast<string>().ToList(), keep);
+        var removed = plan.Remove.ToHashSet(StringComparer.Ordinal);
+        RemoveWhere(kind, removed.Contains);
+        foreach (var (stored, configured) in plan.Rename)
+            Rename(kind, stored, configured);
+        return plan.Remove;
+    }
+
+    private void Rename(SnapshotKind kind, string from, string to)
+    {
+        switch (kind)
+        {
+            case SnapshotKind.Disk:
+                if (_diskMetrics.TryRemove(from, out var disk)) _diskMetrics[to] = disk with { DriveName = to };
+                break;
+            case SnapshotKind.DiskQueue:
+                if (_diskQueueMetrics.TryRemove(from, out var queue)) _diskQueueMetrics[to] = queue with { InstanceName = to };
+                break;
+            case SnapshotKind.Network:
+                if (_networkMetrics.TryRemove(from, out var network)) _networkMetrics[to] = network with { InterfaceName = to };
+                break;
+            case SnapshotKind.Service:
+                if (_serviceStatuses.TryRemove(from, out var service)) _serviceStatuses[to] = service with { ServiceName = to };
+                break;
+            case SnapshotKind.ApplicationPool:
+                if (_applicationPoolStatuses.TryRemove(from, out var pool)) _applicationPoolStatuses[to] = pool with { ApplicationPoolName = to };
+                break;
+            case SnapshotKind.Endpoint:
+                if (_endpointStatuses.TryRemove(from, out var endpoint)) _endpointStatuses[to] = endpoint with { Name = to };
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
+        }
     }
 
     private List<string> RemoveWhere(SnapshotKind kind, Func<string, bool> predicate)

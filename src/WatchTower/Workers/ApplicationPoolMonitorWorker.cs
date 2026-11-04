@@ -23,9 +23,10 @@ public class ApplicationPoolMonitorWorker : BackgroundService
     private readonly IWorkerHealth? _health;
     private readonly IMaintenanceState _maintenance;
 
-    private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new();
-    private readonly ConcurrentDictionary<string, byte> _activeOutages = new();
-    private readonly ConcurrentDictionary<string, byte> _maintenanceLogged = new();
+    // IIS application pool names are case-insensitive, like the alert keys and snapshot rows.
+    private readonly ConcurrentDictionary<string, int> _consecutiveFailures = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _activeOutages = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _maintenanceLogged = new(StringComparer.OrdinalIgnoreCase);
 
     public ApplicationPoolMonitorWorker(
         IIisApplicationPoolManager applicationPoolManager,
@@ -88,18 +89,24 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
     internal const string RemovedReason = $"removed from {ApplicationPoolMonitorOptions.SectionName}:WatchedApplicationPools";
 
+    /// <summary>
+    /// The pools polled, in alert keys and in snapshot rows: blank entries skipped, and the first
+    /// spelling of names that only differ in case (IIS pool names are case-insensitive).
+    /// </summary>
+    private static List<string> Watched(ApplicationPoolMonitorOptions opts) =>
+        opts.WatchedApplicationPools.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
     /// <summary>Runs a single poll/evaluate cycle over all watched pools. Exposed for testing.</summary>
     internal async Task PollOnceAsync(CancellationToken ct)
     {
         var opts = _options.CurrentValue;
+        var watched = Watched(opts);
 
         // First poll (startup) and every poll after a configuration change: alerts of pools that
         // are no longer watched would otherwise stay open forever.
         try
         {
-            await _alerts.RetireUnconfiguredAsync(
-                AlertKey.AppPoolPrefix, opts.WatchedApplicationPools.Where(p => !string.IsNullOrWhiteSpace(p)).Select(AlertKey.AppPool),
-                RemovedReason, ct);
+            await _alerts.RetireUnconfiguredAsync(AlertKey.AppPoolPrefix, watched.Select(AlertKey.AppPool), RemovedReason, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -109,7 +116,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
         // Their last status would otherwise be repeated in every metrics batch forever.
         try
         {
-            foreach (var removed in _metricsStore.RemoveSnapshotsExcept(SnapshotKind.ApplicationPool, opts.WatchedApplicationPools))
+            foreach (var removed in _metricsStore.RemoveSnapshotsExcept(SnapshotKind.ApplicationPool, watched))
                 _logger.LogInformation("Stopped reporting application pool {ApplicationPoolName} to the portal: {Reason}", removed, RemovedReason);
         }
         catch (Exception ex)
@@ -117,13 +124,13 @@ public class ApplicationPoolMonitorWorker : BackgroundService
             _logger.LogError(ex, "Could not remove the snapshots of application pools that are no longer watched");
         }
 
-        if (opts.WatchedApplicationPools.Count == 0)
+        if (watched.Count == 0)
         {
             _logger.LogDebug("No IIS application pools configured for monitoring");
             return;
         }
 
-        foreach (var applicationPoolName in opts.WatchedApplicationPools)
+        foreach (var applicationPoolName in watched)
         {
             // A stopped pool can take StartDelay + StartTimeout + StableStateDelay to handle: report
             // progress per pool so a long cycle over several pools is not mistaken for a dead worker.

@@ -54,8 +54,10 @@ public interface IMetricsStore
     /// <summary>
     /// Deletes every latest-state row of <paramref name="kind"/> whose name is not in
     /// <paramref name="keep"/>, for resources that are configured rather than discovered.
-    /// Names match exactly: rows are written with the configured name, so a name whose case
-    /// changed in the configuration replaces its old row. Returns the names deleted.
+    /// Names match case-insensitively (OrdinalIgnoreCase), like the workers' schedules and the
+    /// alert keys: a row whose name only differs in case from a configured name is kept and
+    /// renamed to the configured spelling (another row of the same name is deleted). Returns
+    /// the names deleted.
     /// </summary>
     IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep);
 }

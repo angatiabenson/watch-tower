@@ -331,6 +331,87 @@ public sealed class SnapshotPruningTests : IDisposable
     }
 
     [Fact]
+    public async Task ApplicationPoolRenamedOnlyInCase_KeepsItsRow()
+    {
+        var manager = new Mock<IIisApplicationPoolManager>();
+        manager.Setup(m => m.GetApplicationPoolStatusAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string name, CancellationToken _) => new ApplicationPoolStatus(_time.GetUtcNow().UtcDateTime, name, "Started", true));
+        var options = new TestOptionsMonitor<ApplicationPoolMonitorOptions>(new ApplicationPoolMonitorOptions
+        {
+            PollIntervalSeconds = 60,
+            WatchedApplicationPools = ["DefaultAppPool", "defaultapppool", " "],
+        });
+        var worker = new ApplicationPoolMonitorWorker(manager.Object, _store, _alerts, new NullPortalEventPublisher(), options, _time,
+            NullLogger<ApplicationPoolMonitorWorker>.Instance);
+        IEnumerable<string> Reported() => _store.GetLatestApplicationPoolStatuses().Select(s => s.ApplicationPoolName);
+
+        await worker.PollOnceAsync(Ct);
+        Reported().Should().BeEquivalentTo(["DefaultAppPool"]);
+        manager.Verify(m => m.GetApplicationPoolStatusAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+            "names that only differ in case are one pool, and blank entries are skipped");
+
+        // Renamed in case only while the pool cannot be read: its last row is kept, renamed.
+        manager.Setup(m => m.GetApplicationPoolStatusAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("IIS unavailable"));
+        options.CurrentValue = new ApplicationPoolMonitorOptions { PollIntervalSeconds = 60, WatchedApplicationPools = ["defaultapppool"] };
+        var poll = () => worker.PollOnceAsync(Ct);
+        await poll.Should().ThrowAsync<InvalidOperationException>();
+        Reported().Should().BeEquivalentTo(["defaultapppool"]);
+    }
+
+    private static Mock<IEndpointProbe> UpProbe()
+    {
+        var probe = new Mock<IEndpointProbe>();
+        probe.Setup(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new EndpointProbeResult(EndpointState.Up, "HTTP 200", 12.3, null));
+        return probe;
+    }
+
+    private static EndpointCheckOptions DailyCheck(string name) =>
+        new() { Name = name, Target = "https://site.example", IntervalSeconds = 86_400 };
+
+    [Fact]
+    public async Task EndpointRenamedOnlyInCase_KeepsItsRow_UnderTheNewName()
+    {
+        var probe = UpProbe();
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(new EndpointMonitorOptions { Endpoints = [DailyCheck("Site")] });
+        using var worker = new EndpointMonitorWorker(probe.Object, _store, _alerts, options, _time, NullLogger<EndpointMonitorWorker>.Instance);
+
+        await worker.PollOnceAsync(Ct);
+        var checkedAt = _time.GetUtcNow().UtcDateTime;
+
+        options.CurrentValue = new EndpointMonitorOptions { Endpoints = [DailyCheck("site")] };
+        _time.Advance(EndpointMonitorWorker.Tick);
+        await worker.PollOnceAsync(Ct);
+
+        // The check is not due for a day; its last result is still reported, under the new name.
+        probe.Verify(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()), Times.Once);
+        _store.GetLatestEndpointStatuses().Should().ContainSingle()
+            .Which.Should().Match<EndpointStatus>(e => e.Name == "site" && e.Status == "Up" && e.Timestamp == checkedAt);
+    }
+
+    [Fact]
+    public async Task EndpointRemovedAndAddedAgain_RunsImmediately()
+    {
+        var probe = UpProbe();
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(new EndpointMonitorOptions { Endpoints = [DailyCheck("site")] });
+        using var worker = new EndpointMonitorWorker(probe.Object, _store, _alerts, options, _time, NullLogger<EndpointMonitorWorker>.Instance);
+        await worker.PollOnceAsync(Ct);
+
+        options.CurrentValue = new EndpointMonitorOptions();
+        _time.Advance(EndpointMonitorWorker.Tick);
+        await worker.PollOnceAsync(Ct);
+        _store.GetLatestEndpointStatuses().Should().BeEmpty();
+
+        options.CurrentValue = new EndpointMonitorOptions { Endpoints = [DailyCheck("SITE")] };
+        _time.Advance(EndpointMonitorWorker.Tick);
+        await worker.PollOnceAsync(Ct);
+
+        probe.Verify(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _store.GetLatestEndpointStatuses().Select(e => e.Name).Should().Equal("SITE");
+    }
+
+    [Fact]
     public async Task EndpointRemovedFromConfiguration_DisappearsOnTheNextPoll()
     {
         var probe = new Mock<IEndpointProbe>();

@@ -664,16 +664,28 @@ public class SqliteMetricsStore : IMetricsStore, IDisposable
 
     public IReadOnlyList<string> RemoveSnapshotsExcept(SnapshotKind kind, IEnumerable<string> keep)
     {
-        var kept = keep.ToHashSet(StringComparer.Ordinal);
-
         lock (_lock)
         {
             using var conn = Open();
             using var tx = conn.BeginTransaction();
-            var stale = ReadSnapshotNames(conn, tx, kind).Where(n => !kept.Contains(n)).ToList();
-            DeleteSnapshotRows(conn, tx, kind, stale);
+            var plan = SnapshotPrunePlan.Create(ReadSnapshotNames(conn, tx, kind), keep);
+            DeleteSnapshotRows(conn, tx, kind, plan.Remove);
+
+            var (table, key) = SnapshotTable(kind);
+            using var rename = conn.CreateCommand();
+            rename.Transaction = tx;
+            rename.CommandText = $"UPDATE {table} SET {key} = @to WHERE {key} = @from";
+            var from = rename.Parameters.Add("@from", SqliteType.Text);
+            var to = rename.Parameters.Add("@to", SqliteType.Text);
+            foreach (var (stored, configured) in plan.Rename)
+            {
+                from.Value = stored;
+                to.Value = configured;
+                rename.ExecuteNonQuery();
+            }
+
             tx.Commit();
-            return stale;
+            return plan.Remove;
         }
     }
 
