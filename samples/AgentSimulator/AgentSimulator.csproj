@@ -28,6 +28,7 @@
 
   <ItemGroup Label="The agent's own portal code">
     <Compile Include="..\..\src\WatchTower\Configuration\PortalOptions.cs" Link="Agent\PortalOptions.cs" />
+    <Compile Include="..\..\src\WatchTower\Models\EndpointStatus.cs" Link="Agent\EndpointStatus.cs" />
     <Compile Include="..\..\src\WatchTower\Models\IncidentType.cs" Link="Agent\IncidentType.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Actions\ActionType.cs" Link="Agent\ActionType.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Actions\RemoteConfigValidator.cs" Link="Agent\RemoteConfigValidator.cs" />

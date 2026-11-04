@@ -30,12 +30,13 @@ real agent, a code with `requireTls: true` and an `http://` URL is refused.
 
 | Scenario | What it does |
 | --- | --- |
-| `smoke` (default) | A conformance check of every operation, sent through the agent's own authenticated HttpClient pipeline with the real status code checked: batch, duplicate batch, 1.0.x-style batch, unknown fields and enum values, events (open, duplicate, resolve, one-shot, no alert, unknown type), command poll (200 array the agent can parse, or 204), acknowledgement, result and a repeated result, config fetch (200 with both `config` and `version`, or 204), the agent's validation, acknowledgement and 204 for the current version, and a wrong token that must get exactly 401. Prints PASS, FAIL or SKIP per check. Checks that need a fixture are SKIPped when it is missing: queue a command (e.g. 301) and push a configuration for the agent before the run. Exit code 0 when everything passed, 1 when a check failed, 3 (INCOMPLETE) when nothing failed but checks were skipped. |
-| `run` | Behaves like an agent for `--duration` seconds: samples CPU/RAM every 5 s, flushes a batch every `--interval`, polls commands, polls config every `--config-interval`, and now and then plays a CPU alert or a service outage. |
+| `smoke` (default) | A conformance check of every operation, sent through the agent's own authenticated HttpClient pipeline with the real status code checked: batch, duplicate batch, 1.0.x-style batch, unknown fields and enum values, an endpoint entry with status `ConfigurationError`, events (open, duplicate, resolve, one-shot, no alert, unknown type), command poll (200 array the agent can parse, or 204), acknowledgement, result and a repeated result, config fetch (200 with both `config` and `version`, or 204), the agent's validation, acknowledgement and 204 for the current version, and a wrong token that must get exactly 401. Prints PASS, FAIL or SKIP per check. Checks that need a fixture are SKIPped when it is missing: queue a command (e.g. 301) and push a configuration for the agent before the run. Exit code 0 when everything passed, 1 when a check failed, 3 (INCOMPLETE) when nothing failed but checks were skipped. |
+| `run` | Behaves like an agent for `--duration` seconds: samples CPU/RAM every 5 s, flushes a batch every `--interval`, polls commands, polls config every `--config-interval`, and now and then plays a CPU alert, a service outage or an endpoint check left invalid for a few cycles (`ConfigurationError`). |
 | `alerts` | Sends one example of every incident type (0 to 16) and every alert lifecycle shape: opened, resolved, recovery types, retirement, one-shot, no alert key. |
 | `duplicate` | Sends the same batch three times and an alert's close before its open, then the open twice. A correct portal stores one batch, two events and ends with the alert closed. |
 | `outage` | Replays what an agent's outbox holds after the portal was unreachable for `--backlog-minutes` (default 120): one batch per 30 s with past timestamps, events first. Measures how fast your portal absorbs it. |
 | `portal-down` | Like `run` (default 10 minutes) but logs the outbox after every flush. Stop and restart your portal while it runs and watch the queue grow and drain. |
+| `endpoint-config` | Four batches for the endpoint check `shop-home`: a result `Up`; the check's configuration made invalid, so the entry keeps its last result and **timestamp** with status `ConfigurationError` and the error in `detail`; the first batch delivered again late; the check fixed, reporting a new result at once. Logs what a correct portal shows after each: `Up`, `ConfigurationError` (twice: an older batch must not bring `Up` back), `Up`. |
 
 ## Commands
 
@@ -56,8 +57,13 @@ executes (simulated) and reports them with the agent's own result messages:
 - 501 succeeds for no `Channel` or `Channel=Email`, otherwise fails like an agent without that
   channel.
 - Like the agent, a command without `issuedAt` is accepted with a warning that replay protection is
-  reduced; one whose `issuedAt` is unparseable, older than 3600 + 300 s or more than 300 s in the
-  future is not executed and is answered with a failed result giving the reason.
+  reduced, or rejected with `Rejected: issuedAt is required` when you pass `--require-issued-at`;
+  one whose `issuedAt` is unparseable, older than 3600 + 300 s or more than 300 s in the future is
+  not executed and is answered with a failed result giving the reason.
+- A `commandId` seen before is acknowledged again but never executed again (the agent remembers
+  IDs for 365 days by default; the simulator for as long as it runs).
+- A result your portal refuses is retried on its own backoff and given up on after a while,
+  like the agent (timings below).
 
 ## Options
 
@@ -73,11 +79,14 @@ executes (simulated) and reports them with the agent's own result messages:
 | `--available-version` | none | Version the simulated update feed offers. |
 | `--services`, `--pools` | `W3SVC,Spooler`, `DefaultAppPool` | Local watch lists (also the command allow-list). |
 | `--allow-portal-managed-targets` | off | Let portal-pushed watch lists widen the allow-list. |
+| `--require-issued-at` | off (off) | Reject commands without `issuedAt`, like `VisibilityPortal:RequireCommandIssuedAt`. |
 | `--verbose` | off | Log every HTTP request. |
 
 Retry timings are shortened too: metrics batches back off 10 s x attempt (agent: 60 s) and are
 dropped after 5 failed attempts (agent: 5); events back off 5 s doubling to 60 s (agent: 30 s
-doubling to 15 min) and are never dropped by the simulator (agent: after 7 days).
+doubling to 15 min) and are never dropped by the simulator (agent: after 7 days); command results
+back off 5 s doubling to 60 s (agent: 1 min doubling to 30 min), at most 50 per cycle (agent: 50),
+and are given up on after 10 minutes (agent: `CommandPoll:ResultRetryMaxHours`, 168 h).
 
 ## Not in the agent's package
 

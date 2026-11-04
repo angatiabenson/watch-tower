@@ -26,7 +26,7 @@ public static class Program
         Usage: AgentSimulator --code <WT1.enrollment code> [options]
 
           --code <code>              Enrollment code from the portal (or env WATCHTOWER_ENROLLMENT_CODE).
-          --scenario <name>          smoke (default) | run | alerts | duplicate | outage | portal-down
+          --scenario <name>          smoke (default) | run | alerts | duplicate | outage | portal-down | endpoint-config
           --duration <seconds>       How long run / portal-down last (default 120 / 600; 0 = until Ctrl+C).
           --interval <seconds>       Outbox flush and command poll interval (agent default 30; here 10).
           --config-interval <sec>    Remote config poll interval (agent default 300; here 30).
@@ -37,6 +37,7 @@ public static class Program
           --services <a,b>           Locally watched services (default W3SVC,Spooler).
           --pools <a,b>              Locally watched application pools (default DefaultAppPool).
           --allow-portal-managed-targets  Let portal-pushed watch lists widen the command allow-list.
+          --require-issued-at        Reject commands without issuedAt, like VisibilityPortal:RequireCommandIssuedAt.
           --verbose                  Log every HTTP request.
 
         Scenarios:
@@ -48,6 +49,8 @@ public static class Program
           duplicate    Send batches, events and results more than once and out of order.
           outage       Replay the backlog an agent builds while the portal was unreachable.
           portal-down  Like run, but reports the outbox; stop and start the portal meanwhile.
+          endpoint-config  An endpoint check whose configuration becomes invalid (ConfigurationError),
+                       a late re-delivery of an older batch, then the check fixed.
         """;
 
     public static async Task<int> Main(string[] args)
@@ -83,6 +86,7 @@ public static class Program
             Version = opts.Get("version") ?? "0.0.0-sim",
             AvailableVersion = opts.Get("available-version"),
             AllowPortalManagedTargets = opts.Has("allow-portal-managed-targets"),
+            RequireCommandIssuedAt = opts.Has("require-issued-at"),
         };
         if (opts.Get("services") is { } svc)
             settings.WatchedServices = [.. svc.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
@@ -130,6 +134,7 @@ public static class Program
                 "alerts" => await scenario.AlertsAsync(cts.Token),
                 "duplicate" => await scenario.DuplicateAsync(cts.Token),
                 "outage" => await scenario.OutageAsync(TimeSpan.FromMinutes(opts.Int("backlog-minutes", 120)), cts.Token),
+                "endpoint-config" => await scenario.EndpointConfigurationErrorAsync(cts.Token),
                 var other => Fail($"unknown scenario '{other}'"),
             };
         }
@@ -239,6 +244,14 @@ internal sealed class Scenarios(
             ["isRunning"] = false,
         });
         Expect2xx("Unknown properties and enum values ignored (forward compatibility)", await PostAsync("metrics/batch", future, ct));
+        var misconfigured = batch with
+        {
+            BatchId = Guid.NewGuid().ToString(),
+            BatchedAt = SimulatedAgent.Stamp(Now.AddSeconds(1)),
+            EndpointStatuses = [.. batch.EndpointStatuses!.Select(e =>
+                SimulatedAgent.MarkConfigurationError(e, "Monitoring:Endpoints:0:Target must be an absolute http(s) URL."))],
+        };
+        Expect2xx("Endpoint status ConfigurationError accepted (same timestamp, later batch)", await PostAsync("metrics/batch", misconfigured, ct));
 
         var opened = new AgentEventDto(Guid.NewGuid().ToString(), SimulatedAgent.Stamp(Now), (int)IncidentType.CpuThresholdBreached,
             "CPU at 99.6% for over 300s", agent.TopProcesses(), "cpu", false);
@@ -571,6 +584,46 @@ internal sealed class Scenarios(
         return ok ? 0 : 1;
     }
 
+    // ── endpoint-config ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An endpoint check whose configuration becomes invalid: the agent stops running it and
+    /// reports its last result with status ConfigurationError and an UNCHANGED timestamp. A late
+    /// re-delivery of the older batch must not bring the old status back, and once fixed the
+    /// check reports a new result at once.
+    /// </summary>
+    public async Task<int> EndpointConfigurationErrorAsync(CancellationToken ct)
+    {
+        var start = Now.AddMinutes(-3);
+        var ok = true;
+
+        async Task SendAsync(MetricsBatchDto batch, string label, string expect)
+        {
+            var accepted = await portal.SendMetricsBatchAsync(batch, ct);
+            var row = batch.EndpointStatuses?.FirstOrDefault();
+            log.LogInformation("{Label}: shop-home {Status} (timestamp {Timestamp}, isUp {IsUp}), batch {BatchId}: {Result}. Expected in the portal: {Expect}",
+                label, row?.Status, row?.Timestamp, row?.IsUp, batch.BatchId, accepted ? "2xx" : "FAILED", expect);
+            ok &= accepted;
+        }
+
+        agent.Sample(start);
+        var before = agent.BuildBatch(start);
+        await SendAsync(before, "1. Check runs", "Up");
+
+        agent.SetEndpointConfigurationError("Monitoring:Endpoints:0:Target must be an absolute http(s) URL.");
+        agent.Sample(start.AddMinutes(1));
+        await SendAsync(agent.BuildBatch(start.AddMinutes(1)), "2. Configuration made invalid",
+            "ConfigurationError with the error in its detail, shown as not checked (isUp is the LAST result's)");
+
+        await SendAsync(before, "3. Batch 1 delivered again (late)", "still ConfigurationError: batch 1 is older (batchedAt)");
+
+        agent.SetEndpointConfigurationError(null);
+        agent.Sample(start.AddMinutes(2));
+        await SendAsync(agent.BuildBatch(start.AddMinutes(2)), "4. Configuration fixed, check runs at once", "Up with a new timestamp");
+
+        return ok ? 0 : 1;
+    }
+
     // ── outage ──────────────────────────────────────────────────────────────
 
     public async Task<int> OutageAsync(TimeSpan backlog, CancellationToken ct)
@@ -620,20 +673,40 @@ internal sealed class Scenarios(
     }
 }
 
-/// <summary>Occasional realistic incidents for the run scenario: a CPU alert and a service outage.</summary>
+/// <summary>
+/// Occasional realistic incidents for the run scenario: a CPU alert, a service outage, or an
+/// endpoint check whose configuration is invalid for a while (ConfigurationError).
+/// </summary>
 internal sealed class IncidentScript(SimulatedAgent agent)
 {
-    private int _cpuStep = -1, _serviceStep = -1;
+    private int _cpuStep = -1, _serviceStep = -1, _endpointStep = -1;
     private DateTime _cpuOpenedAt;
 
     public void Step(DateTime now, bool start)
     {
-        if (_cpuStep < 0 && _serviceStep < 0 && start)
+        if (_cpuStep < 0 && _serviceStep < 0 && _endpointStep < 0 && start)
         {
-            if (Random.Shared.Next(2) == 0)
-                _cpuStep = 0;
-            else
-                _serviceStep = 0;
+            switch (Random.Shared.Next(3))
+            {
+                case 0: _cpuStep = 0; break;
+                case 1: _serviceStep = 0; break;
+                default: _endpointStep = 0; break;
+            }
+        }
+
+        switch (_endpointStep)
+        {
+            case 0:
+                agent.SetEndpointConfigurationError("Monitoring:Endpoints:0:IntervalSeconds must be between 5 and 86400.");
+                _endpointStep = 1;
+                break;
+            case >= 1 and < 3:
+                _endpointStep++;
+                break;
+            case 3:
+                agent.SetEndpointConfigurationError(null);
+                _endpointStep = -1;
+                break;
         }
 
         switch (_cpuStep)

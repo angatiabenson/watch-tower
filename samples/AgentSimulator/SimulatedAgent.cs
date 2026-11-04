@@ -36,6 +36,20 @@ public sealed class SimulatorSettings
     public int MaxBatchSize { get; set; } = 500;                // [500]
     public int MaxCommandAgeSeconds { get; set; } = 3600;       // [3600]
     public int ClockSkewSeconds { get; set; } = 300;            // [300]
+    public bool RequireCommandIssuedAt { get; set; }            // [false] reject commands without issuedAt
+    public int ResultRetryBaseSeconds { get; set; } = 5;        // [60] first retry of a refused result, doubling
+    public int ResultRetryMaxDelaySeconds { get; set; } = 60;   // [1800]
+    public int ResultRetryMaxSeconds { get; set; } = 600;       // [604800 = CommandPoll:ResultRetryMaxHours 168] then given up
+    public int MaxResultsPerCycle { get; set; } = 50;           // [50]
+}
+
+/// <summary>A command result the portal has not accepted yet, on its own retry schedule.</summary>
+public sealed class PendingResult
+{
+    public required CommandResultDto Result { get; init; }
+    public required DateTime ProducedAt { get; init; }
+    public int Attempts { get; set; }
+    public DateTime NextAttemptAt { get; set; }
 }
 
 /// <summary>One queued outbox message: a metrics batch or an event, retried like the agent does.</summary>
@@ -63,10 +77,14 @@ public sealed partial class SimulatedAgent(
         settings.WatchedServices.ToDictionary(s => s, _ => ("Running", true), StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (string Status, bool Running)> _pools =
         settings.WatchedPools.ToDictionary(p => p, _ => ("Started", true), StringComparer.OrdinalIgnoreCase);
+    // Like the agent's command_ids table: a known id is never executed again (the agent keeps
+    // ids for CommandIdRetentionDays, 365 days, and at most CommandIdMaxCount; this process forever).
     private readonly HashSet<string> _seenCommands = new(StringComparer.Ordinal);
     private bool _warnedMissingIssuedAt;
     private readonly List<AgentCommandDto> _scheduled = [];
-    private readonly List<CommandResultDto> _unsentResults = [];
+    private readonly List<PendingResult> _unsentResults = [];
+    private EndpointStatusDto? _lastEndpoint;
+    private string? _endpointConfigError;
     private long _nextId;
     private double _cpuLevel = 18, _ramLevel = 55;
 
@@ -124,11 +142,41 @@ public sealed partial class SimulatedAgent(
             _services.Select(s => new ServiceStatusDto(snap, s.Key, DisplayName(s.Key), s.Value.Status, s.Value.Running)).ToList(),
             _pools.Select(p => new ApplicationPoolStatusDto(snap, p.Key, p.Value.Status, p.Value.Running)).ToList(),
             Telemetry(at),
-            [
-                new EndpointStatusDto(snap, "shop-home", "Http", "https://shop.example.com/", "Up", true,
-                    Math.Round(120 + (_rng.NextDouble() * 80)), 61.4, "HTTP 200"),
-            ]);
+            Endpoints(snap));
     }
+
+    /// <summary>
+    /// The simulated endpoint check "shop-home". While its configuration is invalid it does not
+    /// run, and its entry keeps the last result marked ConfigurationError, as on the agent; a
+    /// check that never ran has no entry (and no endpointStatuses at all, like the agent).
+    /// </summary>
+    private List<EndpointStatusDto>? Endpoints(string snap)
+    {
+        if (_endpointConfigError is { } error)
+            return _lastEndpoint is { } last ? [MarkConfigurationError(last, error)] : null;
+
+        _lastEndpoint = new EndpointStatusDto(snap, "shop-home", "Http", "https://shop.example.com/", "Up", true,
+            Math.Round(120 + (_rng.NextDouble() * 80)), 61.4, "HTTP 200");
+        return [_lastEndpoint];
+    }
+
+    /// <summary>
+    /// Makes the simulated check's configuration invalid (<paramref name="error"/>, in the agent's
+    /// validation wording) or valid again (null): it then runs at once and reports a new result.
+    /// </summary>
+    public void SetEndpointConfigurationError(string? error) => _endpointConfigError = error;
+
+    /// <summary>
+    /// The agent's entry for a configured but invalid check (EndpointMonitorWorker): the last
+    /// result unchanged (timestamp, type, target, isUp, measurements), status ConfigurationError
+    /// and detail "Configuration error: &lt;error&gt; Last result: &lt;status&gt;[: &lt;detail&gt;]".
+    /// </summary>
+    public static EndpointStatusDto MarkConfigurationError(EndpointStatusDto last, string error) => last with
+    {
+        Status = EndpointStatus.ConfigurationError,
+        Detail = $"Configuration error: {error} Last result: {last.Status}" +
+                 (string.IsNullOrEmpty(last.Detail) ? string.Empty : $": {last.Detail}"),
+    };
 
     public AgentTelemetryDto Telemetry(DateTime at)
     {
@@ -273,11 +321,7 @@ public sealed partial class SimulatedAgent(
             await ExecuteAsync(due, ct);
         }
 
-        foreach (var result in _unsentResults.ToList())
-        {
-            if (await portal.ReportCommandResultAsync(result, ct))
-                _unsentResults.Remove(result);
-        }
+        await RetryUnsentResultsAsync(ct);
         return commands.Count;
     }
 
@@ -288,8 +332,47 @@ public sealed partial class SimulatedAgent(
 
     private async Task ReportAsync(CommandResultDto result, CancellationToken ct)
     {
-        if (!await portal.ReportCommandResultAsync(result, ct))
-            _unsentResults.Add(result); // retried on every poll until the portal answers 2xx
+        if (await portal.ReportCommandResultAsync(result, ct))
+            return;
+        var pending = new PendingResult { Result = result, ProducedAt = UtcNow };
+        ScheduleNextAttempt(pending);
+        _unsentResults.Add(pending);
+    }
+
+    /// <summary>
+    /// Like the agent: each refused result waits out its own backoff (agent: 1, 2, 4, 8, 16, then
+    /// every 30 minutes), at most MaxResultsPerCycle due results are sent per cycle, the
+    /// longest-due first, and a result still refused after ResultRetryMaxSeconds is given up on.
+    /// </summary>
+    private async Task RetryUnsentResultsAsync(CancellationToken ct)
+    {
+        var now = UtcNow;
+        var due = _unsentResults.Where(r => r.NextAttemptAt <= now)
+            .OrderBy(r => r.NextAttemptAt)
+            .Take(settings.MaxResultsPerCycle)
+            .ToList();
+        foreach (var pending in due)
+        {
+            if (await portal.ReportCommandResultAsync(pending.Result, ct))
+                _unsentResults.Remove(pending);
+            else
+                ScheduleNextAttempt(pending);
+        }
+
+        foreach (var expired in _unsentResults.Where(r => UtcNow - r.ProducedAt > TimeSpan.FromSeconds(settings.ResultRetryMaxSeconds)).ToList())
+        {
+            _unsentResults.Remove(expired);
+            log.LogWarning(
+                "Gave up delivering the result of command {CommandId}: the portal did not accept it in {Attempts} attempt(s) over {Seconds} s",
+                expired.Result.CommandId, expired.Attempts, settings.ResultRetryMaxSeconds);
+        }
+    }
+
+    private void ScheduleNextAttempt(PendingResult pending)
+    {
+        pending.Attempts++;
+        var delay = settings.ResultRetryBaseSeconds * Math.Pow(2, Math.Min(pending.Attempts - 1, 20));
+        pending.NextAttemptAt = UtcNow.AddSeconds(Math.Min(delay, settings.ResultRetryMaxDelaySeconds));
     }
 
     /// <summary>Authorizes and executes a command; returns the result to report.</summary>
@@ -426,6 +509,12 @@ public sealed partial class SimulatedAgent(
     public bool IsFresh(AgentCommandDto command, out string reason)
     {
         reason = string.Empty;
+        // VisibilityPortal:RequireCommandIssuedAt applies even when the age check is disabled.
+        if (settings.RequireCommandIssuedAt && string.IsNullOrWhiteSpace(command.IssuedAt))
+        {
+            reason = "issuedAt is required";
+            return false;
+        }
         if (settings.MaxCommandAgeSeconds <= 0)
             return true;
         if (string.IsNullOrWhiteSpace(command.IssuedAt))

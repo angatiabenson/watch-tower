@@ -108,7 +108,12 @@ curl -s -X PUT -H "X-Admin-Key: $KEY" -H "Content-Type: application/json" \
 - Deduplication on `batchId`, `eventId` and `commandId`; 2xx for duplicates so the agent stops
   retrying.
 - CPU and RAM samples stored by timestamp (also deduplicates batches from older agents without
-  `batchId`); snapshots keep the newest reading even when an old batch arrives late.
+  `batchId`); snapshots keep the newest reading even when an old batch arrives late, and are
+  keyed case-insensitively (the agent may report a resource under a new letter case).
+- Endpoint status `ConfigurationError` (a check left invalid keeps its last result and its
+  timestamp): an equal timestamp is ordered by `batchedAt`, and the admin view shows each entry's
+  `health` (`up`, `warning`, `down`, `not checked (configuration error)`, or `unknown (<status>)`
+  for values from later agents) instead of trusting `isUp`.
 - The alert lifecycle from `alertKey` and `resolved`, decided by event timestamps rather than
   arrival order: an opening or escalation older than the alert's current state is kept as
   history only (it never overwrites a newer severity or description), a close only ends the

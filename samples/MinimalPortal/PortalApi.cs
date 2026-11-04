@@ -138,6 +138,9 @@ public sealed class AgentRecord
     public Dictionary<string, ApplicationPoolStatus> AppPools { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, EndpointStatus> Endpoints { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>batchedAt of the batch each endpoint entry came from (orders equal timestamps).</summary>
+    public Dictionary<string, DateTimeOffset> EndpointBatchedAt { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public HashSet<string> SeenBatchIds { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Queue<string> BatchIdOrder { get; } = new();
     public int BatchesReceived { get; set; }
@@ -170,8 +173,9 @@ public sealed class PortalOptions
 
     /// <summary>
     /// Pending commands older than this are expired instead of delivered. Keep it below the
-    /// agent's CommandPoll:MaxCommandAgeSeconds (default 3600 s): the agent silently drops older
-    /// commands, without an acknowledgement or a result.
+    /// agent's CommandPoll:MaxCommandAgeSeconds (default 3600 s): the agent rejects older commands
+    /// without acknowledging or running them, and reports a failed result "Rejected: command is
+    /// stale: ...".
     /// </summary>
     public TimeSpan CommandExpiry { get; set; } = TimeSpan.FromMinutes(50);
 
@@ -302,7 +306,7 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             Latest(agent.Networks, batch.NetworkMetrics, m => m.InterfaceName, m => m.Timestamp);
             Latest(agent.Services, batch.ServiceStatuses, m => m.ServiceName, m => m.Timestamp);
             Latest(agent.AppPools, batch.ApplicationPoolStatuses, m => m.ApplicationPoolName, m => m.Timestamp);
-            Latest(agent.Endpoints, batch.EndpointStatuses, m => m.Name, m => m.Timestamp);
+            LatestEndpoints(agent, batch);
 
             // Same for the agent object: a late, older batch must not roll the version back.
             if (batch.Agent is not null && (agent.TelemetryBatchedAt is null || agent.TelemetryBatchedAt <= batch.BatchedAt))
@@ -399,11 +403,11 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
         DateTimeOffset? scheduledAt)
     {
         var command = new AgentCommand(
-            Guid.NewGuid().ToString(),                       // unique forever: the agent ignores repeats
+            Guid.NewGuid().ToString(),                       // globally unique, never reused: the agent never runs a known id again
             actionType,
             parameters ?? new Dictionary<string, string>(),  // values are always strings
             scheduledAt?.UtcDateTime.ToString("O"),
-            Now.UtcDateTime.ToString("O"));                  // REQUIRED: the agent drops commands without it
+            Now.UtcDateTime.ToString("O"));                  // always sent: agents with RequireCommandIssuedAt reject commands without it
         lock (_gate)
             agent.Commands[command.CommandId] = new CommandRecord { Command = command };
         return command;
@@ -462,6 +466,9 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
         {
             if (!agent.Commands.TryGetValue(commandId, out var record) || record.ResultReceivedAt is not null)
                 return;
+            // A result can be late, even for a command this portal already expired: after an agent
+            // restart a stored command runs (or is "Rejected: command expired before it could run
+            // (agent restarted)"), and one cut short is reported "Interrupted: ...". The first result wins.
             record.State = success ? CommandState.Succeeded : CommandState.Failed;
             record.ResultMessage = message;
             record.ExecutedAt = executedAt;
@@ -526,7 +533,19 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
                 Networks = agent.Networks.Values,
                 Services = agent.Services.Values,
                 AppPools = agent.AppPools.Values,
-                Endpoints = agent.Endpoints.Values,
+                Endpoints = agent.Endpoints.Values.Select(e => new
+                {
+                    e.Timestamp,
+                    e.Name,
+                    e.Type,
+                    e.Target,
+                    e.Status,
+                    e.IsUp,
+                    e.ResponseTimeMs,
+                    e.CertificateDaysLeft,
+                    e.Detail,
+                    Health = EndpointHealth(e),
+                }),
                 Events = agent.Events.Values.OrderByDescending(e => e.Timestamp).Take(50),
                 agent.DuplicateEvents,
                 OpenAlerts = agent.OpenAlerts.Values,
@@ -550,6 +569,40 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
         while (series.Count > options.MaxItemsPerAgent)
             series.Remove(series.Keys.First());
     }
+
+    /// <summary>
+    /// Endpoint entries are snapshots too, with one twist: a check whose configuration became
+    /// invalid is reported as ConfigurationError with its last result's UNCHANGED timestamp. So an
+    /// equal timestamp is decided by the batch: the entry from the later batchedAt wins, and a
+    /// late re-delivery of an older batch cannot bring the old status back.
+    /// </summary>
+    private static void LatestEndpoints(AgentRecord agent, MetricsBatch batch)
+    {
+        var batchedAt = batch.BatchedAt ?? DateTimeOffset.MinValue;
+        foreach (var entry in batch.EndpointStatuses ?? [])
+        {
+            if (agent.Endpoints.TryGetValue(entry.Name, out var current) &&
+                (current.Timestamp > entry.Timestamp ||
+                 (current.Timestamp == entry.Timestamp && agent.EndpointBatchedAt.GetValueOrDefault(entry.Name) > batchedAt)))
+                continue;
+            agent.Endpoints[entry.Name] = entry;
+            agent.EndpointBatchedAt[entry.Name] = batchedAt;
+        }
+    }
+
+    /// <summary>
+    /// How a console shows an endpoint entry. Status is an open set: show unknown values as such.
+    /// ConfigurationError means "not checked": its isUp belongs to the last result, so it is
+    /// neither up nor down now.
+    /// </summary>
+    public static string EndpointHealth(EndpointStatus entry) => entry.Status switch
+    {
+        "Up" => "up",
+        "Expiring" => "warning",
+        "Down" => "down",
+        "ConfigurationError" => "not checked (configuration error)",
+        _ => $"unknown ({entry.Status})",
+    };
 
     private static void Latest<T>(Dictionary<string, T> into, List<T>? items, Func<T, string> key, Func<T, DateTimeOffset> at)
     {
