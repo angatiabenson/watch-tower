@@ -92,8 +92,8 @@ A one-shot event (an alert key, no `resolved`):
 | `topProcesses[].cpuSeconds` | number | s | always | Processor time used since the process started. | base |
 | `topProcesses[].memoryMb` | number | MiB | always | Working set. | base |
 | `topProcesses[].cpuPercent` | number | % of all logical processors | always | CPU share over the sampling interval. | base |
-| `alertKey` | string | e.g. `cpu`, `disk:C:\`, `svc:W3SVC` | optional | The alert this event belongs to. Compare case-insensitively. | post-1.0.18 |
-| `resolved` | boolean | | optional | `false` opened or escalated the alert, `true` closed it. Absent for one-shot events and incidents without an alert. | post-1.0.18 |
+| `alertKey` | string | e.g. `cpu`, `disk:C:\`, `svc:W3SVC` | optional | The alert this event belongs to. Compare case-insensitively. | after-1.0.19 |
+| `resolved` | boolean | | optional | `false` opened or escalated the alert, `true` closed it. Absent for one-shot events and incidents without an alert. | after-1.0.19 |
 
 ## Responses and agent behaviour
 

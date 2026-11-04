@@ -6,17 +6,17 @@ Changes to the contract between the WatchTower agent and a portal
 ([spec](../../spec/portal-agent-api.v1.openapi.yaml)). Agent releases that don't change the
 contract aren't listed. Versioning rules: [Versioning and compatibility](12-versioning-and-compatibility.md).
 
-## Unreleased (first agent release after 1.0.18)
+## Unreleased (after 1.0.19)
 
-The wire format changes are all additive (new optional properties and values), so portals
-written for 1.0.x keep parsing everything. Some agent behaviour changed as well: a portal that
-relied on the old behaviour (redirects, stale commands, lenient configuration checks, commands
-for any service name, reused command IDs, results refused for more than a week) is affected.
-See "Changed" below.
+Everything here is marked `x-since: after-1.0.19` in the spec: agents built from the current
+source send it, 1.0.19 and older don't. The wire format changes are all additive (new optional
+properties and values), so portals written for 1.0.x keep parsing everything. Some agent
+behaviour changed as well: a portal that relied on the old behaviour (redirects, stale commands,
+lenient configuration checks, commands for any service name, reused command IDs, results
+refused for more than a week) is affected. See "Changed" below.
 
 ### Added
 
-- `batchId` in metrics batches, an idempotency key stable across retries.
 - `agent` object in metrics batches: `version`, `machineName`, `os`, `startedAt`,
   `uptimeSeconds`, `updatePhase`, `availableVersion`, `lastUpdateResult`, `maintenance`.
 - `endpointStatuses` in metrics batches (HTTP, TCP and certificate checks).
@@ -36,7 +36,7 @@ See "Changed" below.
   `batchedAt`: max(3 × the monitor's poll interval, 10 min) for drives, physical disks, network
   interfaces, services and pools; max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) for an
   endpoint check, `ConfigurationError` included. The reading and its `timestamp` are unchanged.
-  It came after the other additions here, so earlier post-1.0.18 builds don't send it either:
+  It came after the other additions here, so earlier unreleased builds don't send it either:
   a missing `isStale` means unknown, and portals MUST fall back to the `timestamp`. The agent
   also logs a warning when an entry first goes stale (at most once per hour per resource) and
   greys stale entries out in its console.
@@ -70,7 +70,9 @@ See "Changed" below.
   without `issuedAt` is accepted, acknowledged and executed, with a one-time warning in the agent
   log, unless the operator sets `VisibilityPortal:RequireCommandIssuedAt = true`: it is then
   rejected the same way with `Rejected: issuedAt is required`, even when `MaxCommandAgeSeconds`
-  is 0. Portals SHOULD send `issuedAt`; it becomes REQUIRED in v2.
+  is 0. Portals SHOULD send `issuedAt`; it becomes REQUIRED in v2. 1.0.19 dropped a stale,
+  future or unparseable command without acknowledging or answering it; 1.0.18 and older
+  accepted any `issuedAt`.
 - Replay protection by command ID: every `commandId` the agent receives (executed, failed,
   rejected or not authorized) is recorded before anything runs, and a known ID is never stored
   or executed again, even after `CommandPoll:RetentionDays` (30 days) purged the command; a
@@ -107,11 +109,13 @@ See "Changed" below.
   and closed (an occurrence's recovery is no longer lost when the alert re-opens).
 - Service and application-pool commands only act on names from the agent's local watch lists
   (opt-in `VisibilityPortal:CommandPoll:AllowPortalManagedTargets` to include portal-pushed
-  lists); the agent's own service is never a target.
+  lists); the agent's own service is never a target. 1.0.19 also accepted names on watch lists
+  pushed by the portal; 1.0.18 and older acted on any name.
 - Remote configuration validation covers every field (ranges, name syntax, list sizes, disk
-  warning ≤ critical, maintenance at most 7 days ahead); 1.0.x checked only CPU/RAM poll interval
-  and threshold and the disk critical threshold. Invalid versions are rejected as a whole,
-  without acknowledgement.
+  warning ≤ critical, maintenance at most 7 days ahead); 1.0.19 checked only the poll intervals,
+  CPU/RAM sustained times and the CPU/RAM/disk thresholds, and 1.0.18 and older only the CPU/RAM
+  poll interval and threshold and the disk critical threshold. Invalid versions are rejected as
+  a whole, without acknowledgement.
 - Incident events are retried with exponential backoff for up to `EventMaxAgeHours` (168 h)
   instead of a fixed number of attempts.
 
@@ -130,6 +134,27 @@ See "Changed" below.
   longer says "false only when status is Down" (with `ConfigurationError` it is the last
   result's value). The guide no longer says that a portal whose clock is off drops commands
   silently: they get a `Rejected: ...` result.
+
+## 1.0.19 (2026-06-15)
+
+### Added
+
+- `batchId` in metrics batches (gRPC `batch_id`, field 9 of `MetricsBatchPayload`): a random
+  UUID set when the batch is queued, the same on every retry. Marked `x-since: 1.0.19`.
+
+### Changed (agent behaviour within the existing contract)
+
+- A command whose `issuedAt` is older than `MaxCommandAgeSeconds` + `ClockSkewSeconds` (default
+  3600 + 300 s), more than `ClockSkewSeconds` in the future or unparseable is dropped: not
+  stored, acknowledged, executed or answered (only logged by the agent). A command without
+  `issuedAt` is accepted; `MaxCommandAgeSeconds` = 0 turns the check off. The release after
+  1.0.19 answers these commands with a `Rejected: ` result instead (see above).
+- Service and application-pool commands only act on watched names (the watch lists in effect,
+  including lists pushed by the portal). Other names, or a missing `ServiceName` /
+  `AppPoolName`, fail with a result starting `Not authorized: `.
+- Remote configuration validation also checks the disk warning threshold, CPU/RAM sustained
+  times and every poll interval, portal timings included (percentages 1 to 100, intervals at
+  least 1).
 
 ## 1.0.x (up to 1.0.18)
 

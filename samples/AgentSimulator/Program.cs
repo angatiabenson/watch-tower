@@ -234,7 +234,7 @@ internal sealed class Scenarios(
         Expect2xx("POST metrics/batch accepted (2xx)", await PostAsync("metrics/batch", batch, ct));
         Expect2xx("Same batchId again answered 2xx (deduplicate, do not reject)", await PostAsync("metrics/batch", batch, ct));
         var legacy = batch with { BatchId = null!, Agent = null, EndpointStatuses = null };
-        Expect2xx("Batch from a 1.0.x agent (no batchId, agent, endpointStatuses) accepted", await PostAsync("metrics/batch", legacy, ct));
+        Expect2xx("Batch from a 1.0.18 agent (no batchId, agent, endpointStatuses) accepted", await PostAsync("metrics/batch", legacy, ct));
         var future = JsonSerializer.SerializeToNode(batch with { BatchId = Guid.NewGuid().ToString() }, WireJson)!.AsObject();
         future["fieldFromTheFuture"] = new JsonObject { ["value"] = 42 };
         future["agent"]!["capabilityFromTheFuture"] = true;

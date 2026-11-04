@@ -90,7 +90,8 @@ Linux and macOS).
   set them in the agent's console or settings file, and some can be set by your portal (see
   [Remote configuration](09-remote-config.md)).
 - **Since** columns say which agents send a field: `base` means every released v1 agent (up to
-  and including 1.0.18), and `post-1.0.18` means agents built after 1.0.18 (the first release
-  after 1.0.18 and later). Older agents simply omit those fields.
+  and including 1.0.19), `1.0.19` means 1.0.19 and later, and `after-1.0.19` means agents built
+  after 1.0.19 (unreleased: builds from the current source, then the first release after 1.0.19
+  and later). Older agents simply omit those fields.
 - Every JSON example is complete and is validated against the OpenAPI schemas by the
   repository's tests, so the examples cannot drift from the agent.

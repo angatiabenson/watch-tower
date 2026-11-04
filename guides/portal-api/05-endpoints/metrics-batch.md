@@ -85,7 +85,7 @@ left misconfigured for over 10 minutes. Both keep their last reading, marked `is
 }
 ```
 
-Body from a 1.0.x agent (and the smallest body a current agent can send):
+Body from an agent up to 1.0.18 (and the smallest body a current agent can send):
 
 <!-- schema: MetricsBatch -->
 ```json
@@ -107,7 +107,7 @@ Body from a 1.0.x agent (and the smallest body a current agent can send):
 | Field | Type | Unit / range | Present | Meaning | Since |
 | --- | --- | --- | --- | --- | --- |
 | `agentId` | string | | always | The agent's configured AgentId. Informational: identify the agent by its credentials. | base |
-| `batchId` | string (UUID) | | optional | Idempotency key, random, fixed when the batch was queued, the same on every retry. | post-1.0.18 |
+| `batchId` | string (UUID) | | optional | Idempotency key, random, fixed when the batch was queued, the same on every retry. | 1.0.19 |
 | `batchedAt` | string (date-time) | UTC, `Z` | always | When the batch was assembled. Can be minutes to days before arrival. | base |
 | `cpuMetrics[]` | array | 0 to MaxBatchSize | always | New CPU samples, oldest first. | base |
 | `cpuMetrics[].timestamp` | date-time | UTC | always | Sample time. | base |
@@ -137,26 +137,26 @@ Body from a 1.0.x agent (and the smallest body a current agent can send):
 | `applicationPoolStatuses[].status` | string (open enum) | `Started`, `Stopped`, `Starting`, `Stopping`, `Unknown`, `NotFound` | always | IIS state; `Unknown` when it could not be read, `NotFound` when IIS has no pool of that name. | base |
 | `applicationPoolStatuses[].isRunning` | boolean | | always | `status == Started`. | base |
 | `*.timestamp` (snapshots) | date-time | UTC | always | When that resource was last read. | base |
-| `*.isStale` (snapshots, `endpointStatuses[]` included) | boolean | | optional (always from current agents) | `true` when that reading is older than its freshness window at `batchedAt`: max(3 × the monitor's poll interval, 10 min), or for an endpoint check max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min). The reading and `timestamp` are the last ones. **Absent = unknown**: fall back to the `timestamp`. See [Staleness](../06-telemetry-reference.md#staleness-isstale). | post-1.0.18 (later builds only) |
-| `agent` | object | | optional (always from current agents) | Agent self-description, see [telemetry](../06-telemetry-reference.md#the-agent-object). | post-1.0.18 |
-| `agent.version` | string | semver, e.g. `1.6.0` | always in `agent` | Agent version (`0.0.0-dev` for development builds). | post-1.0.18 |
-| `agent.machineName` | string | | always in `agent` | Windows computer name. | post-1.0.18 |
-| `agent.os` | string | | always in `agent` | OS description. | post-1.0.18 |
-| `agent.startedAt` | date-time | `+00:00` offset | always in `agent` | Agent process start. | post-1.0.18 |
-| `agent.uptimeSeconds` | integer | s, ≥ 0 | always in `agent` | Agent process uptime (not the machine's). | post-1.0.18 |
-| `agent.updatePhase` | string (open enum) | `Idle`, `Checking`, `UpToDate`, `Available`, `Downloading`, `ReadyToInstall`, `Installing`, `Failed` | always in `agent` | Self-update state. | post-1.0.18 |
-| `agent.availableVersion` | string | | optional | Newer version offered by the feed. | post-1.0.18 |
-| `agent.lastUpdateResult` | object | | optional | `toVersion`, `success`, `completedAt` (any offset) of the last install. | post-1.0.18 |
-| `agent.maintenance` | object | | optional (always from current agents) | `active` (always), `untilUtc` (optional, `Z`), `reason` (optional, ≤ 500 chars, may be empty). | post-1.0.18 |
-| `endpointStatuses[]` | array | one per endpoint check | optional | Snapshot; absent when no endpoint has a result. | post-1.0.18 |
-| `endpointStatuses[].name` | string | | always | Check name, unique per agent. | post-1.0.18 |
-| `endpointStatuses[].type` | string (open enum) | `Http`, `Tcp`, `Certificate` | always | Check type. | post-1.0.18 |
-| `endpointStatuses[].target` | string | | always | URL or `host:port`, without credentials or query string. | post-1.0.18 |
-| `endpointStatuses[].status` | string (open enum) | `Up`, `Down`, `Expiring`, `ConfigurationError` | always | Result. `ConfigurationError`: the check is configured but invalid and does not run; the entry keeps its last result (`timestamp` included) and `detail` gives the error. | post-1.0.18 |
-| `endpointStatuses[].isUp` | boolean | | always | `false` for `Down`. With `ConfigurationError`, the last result's value (not a current health). | post-1.0.18 |
-| `endpointStatuses[].responseTimeMs` | number | ms, ≥ 0 | optional | Round-trip time. | post-1.0.18 |
-| `endpointStatuses[].certificateDaysLeft` | number | days, 0.1 precision, negative when expired | optional | TLS certificate lifetime left. | post-1.0.18 |
-| `endpointStatuses[].detail` | string | | optional | Human-readable result. | post-1.0.18 |
+| `*.isStale` (snapshots, `endpointStatuses[]` included) | boolean | | optional (always from current agents) | `true` when that reading is older than its freshness window at `batchedAt`: max(3 × the monitor's poll interval, 10 min), or for an endpoint check max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min). The reading and `timestamp` are the last ones. **Absent = unknown**: fall back to the `timestamp`. See [Staleness](../06-telemetry-reference.md#staleness-isstale). | after-1.0.19 (later builds only) |
+| `agent` | object | | optional (always from current agents) | Agent self-description, see [telemetry](../06-telemetry-reference.md#the-agent-object). | after-1.0.19 |
+| `agent.version` | string | semver, e.g. `1.6.0` | always in `agent` | Agent version (`0.0.0-dev` for development builds). | after-1.0.19 |
+| `agent.machineName` | string | | always in `agent` | Windows computer name. | after-1.0.19 |
+| `agent.os` | string | | always in `agent` | OS description. | after-1.0.19 |
+| `agent.startedAt` | date-time | `+00:00` offset | always in `agent` | Agent process start. | after-1.0.19 |
+| `agent.uptimeSeconds` | integer | s, ≥ 0 | always in `agent` | Agent process uptime (not the machine's). | after-1.0.19 |
+| `agent.updatePhase` | string (open enum) | `Idle`, `Checking`, `UpToDate`, `Available`, `Downloading`, `ReadyToInstall`, `Installing`, `Failed` | always in `agent` | Self-update state. | after-1.0.19 |
+| `agent.availableVersion` | string | | optional | Newer version offered by the feed. | after-1.0.19 |
+| `agent.lastUpdateResult` | object | | optional | `toVersion`, `success`, `completedAt` (any offset) of the last install. | after-1.0.19 |
+| `agent.maintenance` | object | | optional (always from current agents) | `active` (always), `untilUtc` (optional, `Z`), `reason` (optional, ≤ 500 chars, may be empty). | after-1.0.19 |
+| `endpointStatuses[]` | array | one per endpoint check | optional | Snapshot; absent when no endpoint has a result. | after-1.0.19 |
+| `endpointStatuses[].name` | string | | always | Check name, unique per agent. | after-1.0.19 |
+| `endpointStatuses[].type` | string (open enum) | `Http`, `Tcp`, `Certificate` | always | Check type. | after-1.0.19 |
+| `endpointStatuses[].target` | string | | always | URL or `host:port`, without credentials or query string. | after-1.0.19 |
+| `endpointStatuses[].status` | string (open enum) | `Up`, `Down`, `Expiring`, `ConfigurationError` | always | Result. `ConfigurationError`: the check is configured but invalid and does not run; the entry keeps its last result (`timestamp` included) and `detail` gives the error. | after-1.0.19 |
+| `endpointStatuses[].isUp` | boolean | | always | `false` for `Down`. With `ConfigurationError`, the last result's value (not a current health). | after-1.0.19 |
+| `endpointStatuses[].responseTimeMs` | number | ms, ≥ 0 | optional | Round-trip time. | after-1.0.19 |
+| `endpointStatuses[].certificateDaysLeft` | number | days, 0.1 precision, negative when expired | optional | TLS certificate lifetime left. | after-1.0.19 |
+| `endpointStatuses[].detail` | string | | optional | Human-readable result. | after-1.0.19 |
 
 Semantics, display and aggregation of every value: [Telemetry reference](../06-telemetry-reference.md).
 
@@ -218,7 +218,8 @@ reach the portal. Delivered and dropped messages are purged from the agent after
 ## Common mistakes
 
 - Answering 400 or 409 to a duplicate `batchId`: the agent retries it five times and logs warnings.
-- Requiring `batchId`, `agent` or `endpointStatuses`: 1.0.x agents don't send them.
+- Requiring `batchId`, `agent` or `endpointStatuses`: agents up to 1.0.18 don't send `batchId`, and
+  no released agent (1.0.19 included) sends `agent` or `endpointStatuses`.
 - Rejecting unknown properties (strict schema validation, `additionalProperties: false`, or
   Jackson `FAIL_ON_UNKNOWN_PROPERTIES`): the next agent version breaks your portal.
 - Rejecting chunked bodies (some WAFs and serverless gateways), or a body limit below a few

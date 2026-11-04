@@ -23,7 +23,7 @@ stateDiagram-v2
 | Property | Metrics batch | Event |
 | --- | --- | --- |
 | Priority | 0 | 1 (sent first) |
-| Idempotency key | `batchId` (post-1.0.18) | `eventId` |
+| Idempotency key | `batchId` (1.0.19) | `eventId` |
 | Backoff after the n-th failure | `RetryBackoffSeconds × n` = 60, 120, 180, 240 s | 30 s × 2ⁿ⁻¹, capped at 15 min |
 | Gives up | after `MaxRetryAttempts` (5) failed attempts | when older than `EventMaxAgeHours` (168 h) |
 | Survives agent restarts | yes | yes |

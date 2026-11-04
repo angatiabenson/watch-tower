@@ -38,16 +38,18 @@ info:
       `x-extensible-enum` and in the description. A portal MUST accept a value it does not know
       and treat it as unrecognised but valid, for example by storing and displaying it.
     * A portal MUST NOT reject a request because an optional property is missing. Older v1
-      agents do not send properties marked `x-since: post-1.0.18`.
+      agents do not send properties marked `x-since: 1.0.19` or `x-since: after-1.0.19`.
     * The agent ignores response properties it does not know, so a portal MAY add its own.
 
     ## Field availability (`x-since`)
 
-    * `base`: sent by every released v1 agent (up to and including 1.0.18).
-    * `post-1.0.18`: added after 1.0.18; sent by agents built from the current source and by
-      the first release after 1.0.18. Not sent by 1.0.18 or earlier. `isStale` on snapshot
-      entries came later than the rest of post-1.0.18, so earlier post-1.0.18 builds omit it
-      too (see SnapshotIsStale): never infer it from the presence of other post-1.0.18 fields.
+    * `base`: sent by every released v1 agent (up to and including 1.0.19).
+    * `1.0.19`: added in 1.0.19 (released 2026-06-15). Not sent by 1.0.18 or earlier.
+    * `after-1.0.19`: added after 1.0.19 (unreleased): sent by agents built from the current
+      source and by the first release after 1.0.19. Not sent by 1.0.19 or earlier. `isStale` on
+      snapshot entries came later than the rest of after-1.0.19, so earlier unreleased builds
+      omit it too (see SnapshotIsStale): never infer it from the presence of other after-1.0.19
+      fields.
 
     ## Status codes
 
@@ -543,8 +545,9 @@ components:
         batch can mark entries read before the restart stale until they are read again.
 
         Optional for portals to rely on: agents built from this version on always send it, older
-        agents never do (including earlier post-1.0.18 builds). A missing `isStale` means
-        UNKNOWN, not fresh: a portal MUST then fall back to the entry's `timestamp`, for example
+        agents never do (1.0.19 and earlier, and unreleased builds from before this field). A
+        missing `isStale` means UNKNOWN, not fresh: a portal MUST then fall back to the entry's
+        `timestamp`, for example
         comparing `batchedAt - timestamp` with the windows above.
 
     MetricsBatch:
@@ -568,8 +571,8 @@ components:
         batchId:
           type: string
           format: uuid
-          description: Idempotency key, a random UUID generated when the batch was queued and kept across retries. Absent from agents up to 1.0.18.
-          x-since: post-1.0.18
+          description: Idempotency key, a random UUID generated when the batch was queued and kept across retries. Added in 1.0.19; absent from agents up to 1.0.18.
+          x-since: 1.0.19
         batchedAt:
           $ref: '#/components/schemas/Timestamp'
           description: When the batch was assembled (UTC).
@@ -620,13 +623,13 @@ components:
           x-since: base
         agent:
           $ref: '#/components/schemas/AgentTelemetry'
-          x-since: post-1.0.18
+          x-since: after-1.0.19
         endpointStatuses:
           type: array
           description: Last-known result per configured endpoint check (snapshot). Absent when no endpoint has a result yet.
           items:
             $ref: '#/components/schemas/EndpointStatus'
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     AgentTelemetry:
       type: object
@@ -749,7 +752,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt (for example a fixed drive that is not ready). Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     DiskQueueMetric:
       type: object
@@ -767,7 +770,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this reading is older than max(3 x Monitoring:Disk:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     NetworkMetric:
       type: object
@@ -785,7 +788,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this reading is older than max(3 x Monitoring:Network:PollIntervalSeconds, 10 min) at batchedAt. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     ServiceStatus:
       type: object
@@ -809,7 +812,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this status is older than max(3 x Monitoring:Services:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     ApplicationPoolStatus:
       type: object
@@ -829,7 +832,7 @@ components:
         isStale:
           $ref: '#/components/schemas/SnapshotIsStale'
           description: True when this status is older than max(3 x Monitoring:ApplicationPools:PollIntervalSeconds, 10 min) at batchedAt; status and isRunning are then the last ones read. Absent from older agents, which means unknown (see SnapshotIsStale).
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     EndpointStatus:
       type: object
@@ -885,7 +888,7 @@ components:
             entries (which keep their status and last result, and turn stale once that result
             is older than the window, as the check does not run). Absent from older agents,
             which means unknown (see SnapshotIsStale).
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     AgentEvent:
       type: object
@@ -919,15 +922,15 @@ components:
           description: |
             The alert this event belongs to. Known shapes: cpu, ram, disk:<drive>, diskqueue:<instance>,
             net:<interface>, svc:<serviceName>, pool:<appPoolName>, endpoint:<name>, reboot. Compare
-            case-insensitively. Absent for incidents outside an alert lifecycle and from agents up to 1.0.18.
-          x-since: post-1.0.18
+            case-insensitively. Absent for incidents outside an alert lifecycle and from agents up to 1.0.19.
+          x-since: after-1.0.19
         resolved:
           type: boolean
           description: |
             false = the alert opened or escalated; true = the alert cleared or was retired.
             Absent for one-shot events (e.g. ServerRestarted with alertKey "reboot") and for
             incidents outside an alert lifecycle.
-          x-since: post-1.0.18
+          x-since: after-1.0.19
 
     IncidentType:
       type: integer
@@ -1194,7 +1197,7 @@ components:
         set locally. untilUtc may be at most 7 days (plus 5 minutes of clock-skew allowance)
         in the future; a past value ends the window; omitting maintenance from a later
         configuration version hands control back to the local setting.
-      x-since: post-1.0.18
+      x-since: after-1.0.19
       properties:
         untilUtc:
           type: [string, 'null']
@@ -1329,7 +1332,7 @@ components:
             detail: 'Configuration error: Monitoring:Endpoints:1:Target must be host:port. Last result: Up: Connected'
             isStale: true
     MetricsBatchMinimal:
-      summary: A batch as sent by a 1.0.x agent (no batchId, agent or endpointStatuses)
+      summary: A batch as sent by an agent up to 1.0.18 (no batchId, agent or endpointStatuses)
       value:
         agentId: SRV-WEB-01
         batchedAt: '2026-11-03T10:15:30.0000000Z'

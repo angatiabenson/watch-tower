@@ -40,7 +40,7 @@ public sealed record MetricsBatch(
     List<NetworkMetric>? NetworkMetrics,
     List<ServiceStatus>? ServiceStatuses,
     List<ApplicationPoolStatus>? ApplicationPoolStatuses,
-    AgentTelemetry? Agent,              // absent from agents up to 1.0.18
+    AgentTelemetry? Agent,              // absent from agents up to 1.0.19
     List<EndpointStatus>? EndpointStatuses);
 
 public sealed record CpuMetric(DateTimeOffset Timestamp, double UsagePercent);

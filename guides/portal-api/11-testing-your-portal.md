@@ -102,7 +102,7 @@ Smoke output:
 ```text
   [PASS] POST metrics/batch accepted (2xx) - HTTP 202
   [PASS] Same batchId again answered 2xx (deduplicate, do not reject) - HTTP 202
-  [PASS] Batch from a 1.0.x agent (no batchId, agent, endpointStatuses) accepted - HTTP 202
+  [PASS] Batch from a 1.0.18 agent (no batchId, agent, endpointStatuses) accepted - HTTP 202
   [PASS] Unknown properties and enum values ignored (forward compatibility) - HTTP 202
   [PASS] POST events accepted (alert opened) - HTTP 202
   [PASS] Same eventId again answered 2xx - HTTP 202

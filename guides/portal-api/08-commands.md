@@ -165,10 +165,10 @@ ignored. Messages are shown exactly as the agent writes them (`<name>` is the tr
 | 204 | AppPoolRecycle | `AppPoolName` (required) | allow-list | base |
 | 301 | ForceMetricSnapshot | none | | base |
 | 302 | ForceConfigSync | none | | base |
-| 303 | AgentRestart | none | | base (a stub answering "reserved and not yet implemented" up to 1.0.18; working post-1.0.18) |
-| 304 | AgentUpdate | `Version` | | post-1.0.18 |
+| 303 | AgentRestart | none | | base (a stub answering "reserved and not yet implemented" up to 1.0.19; working after-1.0.19) |
+| 304 | AgentUpdate | `Version` | | after-1.0.19 |
 | 401 | ApplyConfiguration | `ConfigJson` (required), `Version` | config validation | base |
-| 501 | SendTestNotification | `Channel` | | post-1.0.18 |
+| 501 | SendTestNotification | `Channel` | | after-1.0.19 |
 
 Any other number: failed result `Unknown action type: <n>`.
 

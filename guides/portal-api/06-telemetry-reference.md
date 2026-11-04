@@ -10,7 +10,7 @@ Windows side, the units, how often it changes and how to show it. Two kinds of d
 - **Snapshots** (everything else): the last-known reading of each resource, repeated in every
   batch until a newer reading replaces it. Keep "current state per resource" and append to
   history only when the reading's `timestamp` changes (or, for an endpoint check, its `status`
-  becomes `ConfigurationError`, which keeps the `timestamp`; see [Endpoints](#endpoints-endpointstatuses-post-1018)).
+  becomes `ConfigurationError`, which keeps the `timestamp`; see [Endpoints](#endpoints-endpointstatuses-after-1019)).
   Take the stored `isStale` from the newest batch (latest `batchedAt`), even when the
   `timestamp` is unchanged: it turns `true` without a new reading (see [Staleness](#staleness-isstale)).
 
@@ -79,10 +79,10 @@ How to use it:
   `<timestamp>`". Don't alert on its last reading as if it were current, and don't count it as
   up or down.
 - `isStale: false`: the reading is current as of `batchedAt`.
-- **`isStale` missing: unknown, not fresh.** Agents built before this field (1.0.x, and earlier
-  post-1.0.18 builds) don't send it. Fall back to the timestamp: treat the entry as stale when
-  `batchedAt - timestamp` exceeds the window above (or your own fixed threshold, such as
-  10 minutes, if you don't track the agent's intervals).
+- **`isStale` missing: unknown, not fresh.** Agents built before this field (1.0.x, 1.0.19
+  included, and earlier unreleased builds) don't send it. Fall back to the timestamp: treat the
+  entry as stale when `batchedAt - timestamp` exceeds the window above (or your own fixed
+  threshold, such as 10 minutes, if you don't track the agent's intervals).
 - `isStale` describes the batch when it was built (`batchedAt`). A batch that arrives late
   describes the past, like the rest of it. Just after an agent restart, the first batch can
   mark entries read before the restart as stale until the monitors read them again (seconds
@@ -184,7 +184,7 @@ One entry per name in `Monitoring:ApplicationPools:WatchedApplicationPools`, eve
 | `isRunning` | `true` only for `Started` |
 | `isStale` | `true` once the status is older than its [window](#staleness-isstale): `status` and `isRunning` are the last ones read; absent from older agents |
 
-## Endpoints (`endpointStatuses[]`, post-1.0.18)
+## Endpoints (`endpointStatuses[]`, after-1.0.19)
 
 One entry per configured check (`Monitoring:Endpoints`), each on its own interval (default 60 s).
 Absent from the batch until at least one check produced a result.
@@ -221,7 +221,7 @@ the check's window.
 
 ## The agent object
 
-`agent` (post-1.0.18) describes the agent itself and is in every batch from current agents.
+`agent` (after-1.0.19) describes the agent itself and is in every batch from current agents.
 
 | Field | Notes | Use it for |
 | --- | --- | --- |

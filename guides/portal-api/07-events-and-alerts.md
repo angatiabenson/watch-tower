@@ -38,8 +38,8 @@ portal SHOULD map types to its own severities and can use this table.
 | 15 | CertificateExpiring | Warning | opens `endpoint:<name>` | The certificate is inside `CertificateWarnDays` (21). |
 | 16 | ServerRestarted | Info (clean shutdown) or Warning (unexpected) | one-shot `reboot` | The agent noticed the machine booted since it last ran. |
 
-Types 13 to 16 and all alert keys are post-1.0.18. The `description` is English text written by
-the agent; show it, don't parse it.
+Types 13 to 16 and all alert keys are after-1.0.19 (unreleased). The `description` is English
+text written by the agent; show it, don't parse it.
 
 ## Alert lifecycle
 

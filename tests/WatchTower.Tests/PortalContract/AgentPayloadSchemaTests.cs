@@ -176,13 +176,14 @@ public class AgentPayloadSchemaTests
         }
 
         // Agent to portal: a property the agent can omit must not be required, and a property it always
-        // sends but the spec does not require must be one that older agents (up to 1.0.18) omit.
+        // sends but the spec does not require must be one that older agents omit (x-since 1.0.19 or
+        // after-1.0.19).
         var alwaysSent = AlwaysSent(contract.Type);
         required.Except(alwaysSent).Should().BeEmpty($"the agent may omit these, so {schema} must not require them");
         var optionalButAlwaysSent = alwaysSent.Except(required)
-            .Where(p => (string?)spec["properties"]![p]!["x-since"] != "post-1.0.18");
+            .Where(p => (string?)spec["properties"]![p]!["x-since"] is not ("1.0.19" or "after-1.0.19"));
         optionalButAlwaysSent.Should().BeEmpty(
-            $"the agent always sends these: require them in {schema}, or mark them x-since: post-1.0.18 if older agents omit them");
+            $"the agent always sends these: require them in {schema}, or mark them x-since: 1.0.19 or after-1.0.19 if older agents omit them");
     }
 
     [Fact]
