@@ -26,6 +26,16 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\WatchTower\WatchTower.csproj" />
+    <!-- The contract tests (PortalContract/) host the reference portal in-process. -->
+    <ProjectReference Include="..\..\samples\MinimalPortal\MinimalPortal.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The contract tests read the spec and the guides from the output directory. -->
+    <None Include="..\..\spec\portal-agent-api.v1.openapi.yaml" Link="PortalContract\Spec\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\guides\portal-api\**\*.md" Link="PortalContract\Guides\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!--
