@@ -139,18 +139,36 @@ internal sealed class TestMaintenance : IMaintenanceState
 
 /// <summary>
 /// Captures notifications instead of delivering them. Channels are named <c>ch1</c>..<c>chN</c>;
-/// those in <see cref="Failing"/> report a failed send.
+/// those in <see cref="Failing"/> report a failed send, and so does any send
+/// <see cref="Rejects"/> returns true for.
 /// </summary>
 internal sealed class RecordingDispatcher : INotificationDispatcher
 {
     private readonly List<AlertNotification> _sent = [];
     private readonly List<(string Channel, AlertNotification Notification)> _delivered = [];
+    private readonly List<(string Channel, AlertNotification Notification)> _attempts = [];
 
     /// <summary>How many channels are configured.</summary>
     public int Channels { get; set; } = 1;
 
     /// <summary>Channel names whose sends fail.</summary>
     public HashSet<string> Failing { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Sends (channel, notification) that fail although the channel is not <see cref="Failing"/>.</summary>
+    public Func<string, AlertNotification, bool>? Rejects { get; set; }
+
+    /// <summary>Every channel send, successful or not.</summary>
+    public IReadOnlyList<(string Channel, AlertNotification Notification)> Attempts
+    {
+        get
+        {
+            lock (_sent)
+                return _attempts.ToList();
+        }
+    }
+
+    public IReadOnlyList<string> ChannelsFor(AlertNotification notification) =>
+        Enumerable.Range(1, Channels).Select(i => $"ch{i}").ToList();
 
     /// <summary>Every dispatch call (whether or not any channel delivered it).</summary>
     public IReadOnlyList<AlertNotification> Sent
@@ -173,15 +191,15 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
     }
 
     public Task<DispatchResult> DispatchAsync(
-        AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted, CancellationToken ct)
+        AlertNotification notification, IReadOnlySet<string>? channels, Action<ChannelDelivery>? onChannelCompleted, CancellationToken ct)
     {
-        var results = DispatchCore(notification, skipChannels);
+        var results = DispatchCore(notification, channels);
         foreach (var result in results)
             onChannelCompleted?.Invoke(result);
         return Task.FromResult(new DispatchResult(results));
     }
 
-    private List<ChannelDelivery> DispatchCore(AlertNotification notification, IReadOnlySet<string>? skipChannels)
+    private List<ChannelDelivery> DispatchCore(AlertNotification notification, IReadOnlySet<string>? channels)
     {
         var results = new List<ChannelDelivery>();
         lock (_sent)
@@ -190,9 +208,10 @@ internal sealed class RecordingDispatcher : INotificationDispatcher
             for (var i = 1; i <= Channels; i++)
             {
                 var name = $"ch{i}";
-                if (skipChannels?.Contains(name) == true)
+                if (channels?.Contains(name) == false)
                     continue;
-                var ok = !Failing.Contains(name);
+                _attempts.Add((name, notification));
+                var ok = !Failing.Contains(name) && Rejects?.Invoke(name, notification) != true;
                 results.Add(new ChannelDelivery(name, ok, ok ? "Delivered" : "Rejected with HTTP 503"));
                 if (ok)
                     _delivered.Add((name, notification));
@@ -223,10 +242,15 @@ internal sealed class GatedDispatcher : INotificationDispatcher
         }
     }
 
+    /// <summary>The configured channels (tests complete each call with the channels they choose).</summary>
+    public List<string> Channels { get; } = ["ch1"];
+
+    public IReadOnlyList<string> ChannelsFor(AlertNotification notification) => Channels.ToList();
+
     public Task<DispatchResult> DispatchAsync(
-        AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted, CancellationToken ct)
+        AlertNotification notification, IReadOnlySet<string>? channels, Action<ChannelDelivery>? onChannelCompleted, CancellationToken ct)
     {
-        var call = new GatedCall(notification, skipChannels, onChannelCompleted);
+        var call = new GatedCall(notification, channels, onChannelCompleted);
         lock (_sent)
             _sent.Add(notification);
         ct.Register(() => call.Result.TrySetCanceled(ct));
@@ -254,10 +278,12 @@ internal static class BoundedWait
 
 /// <summary>One dispatch held by <see cref="GatedDispatcher"/>.</summary>
 internal sealed class GatedCall(
-    AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted)
+    AlertNotification notification, IReadOnlySet<string>? channels, Action<ChannelDelivery>? onChannelCompleted)
 {
     public AlertNotification Notification { get; } = notification;
-    public IReadOnlySet<string>? SkipChannels { get; } = skipChannels;
+
+    /// <summary>The channels the manager asked for (null: every eligible channel).</summary>
+    public IReadOnlySet<string>? Channels { get; } = channels;
 
     public TaskCompletionSource<DispatchResult> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

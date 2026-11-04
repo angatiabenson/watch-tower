@@ -175,7 +175,9 @@ public class AlertManagerTests
         await alerts.RaiseAsync(Key, AlertSeverity.Critical, "Disk Critical", DiskIncident(), ct: TestContext.Current.CancellationToken);
         await alerts.RaiseAsync(Key, AlertSeverity.Critical, "Disk Critical", DiskIncident(), ct: TestContext.Current.CancellationToken);
 
-        _dispatcher.Sent.Select(n => n.Kind).Should().Equal(AlertNotificationKind.Opened, AlertNotificationKind.Opened);
+        _dispatcher.Sent.Select(n => n.Kind).Should().Equal([AlertNotificationKind.Opened],
+            "nothing is dispatched while no channel takes it, and it is sent once one does");
+        _dispatcher.Delivered.Should().ContainSingle();
         _metricsStore.Verify(s => s.AddIncident(It.IsAny<Incident>()), Times.Once);
     }
 
@@ -196,6 +198,7 @@ public class AlertManagerTests
     public async Task DispatcherFailure_DoesNotPropagate()
     {
         var dispatcher = new Mock<INotificationDispatcher>();
+        dispatcher.Setup(d => d.ChannelsFor(It.IsAny<AlertNotification>())).Returns(["ch1"]);
         dispatcher.Setup(d => d.DispatchAsync(It.IsAny<AlertNotification>(), It.IsAny<IReadOnlySet<string>?>(),
                 It.IsAny<Action<ChannelDelivery>?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("boom"));

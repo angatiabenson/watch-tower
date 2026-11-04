@@ -149,6 +149,9 @@ public class NotificationDeliveryTests
         _dispatcher.Failing.Clear();
 
         await alerts.ResolveAsync(Key, ct: Ct);
+        _dispatcher.Sent.Should().ContainSingle("the channel just failed: it is tried again after its backoff");
+        _time.Advance(NotificationRetryPolicy.Backoff(1));
+        await alerts.ProcessPendingAsync(Ct);
 
         _dispatcher.Delivered.Should().ContainSingle().Which.Notification.Kind.Should().Be(AlertNotificationKind.Resolved,
             "operators never heard of the alert, so the resolution tells the whole story");
@@ -215,7 +218,10 @@ public class NotificationDeliveryTests
         var notification = new AlertNotification(AlertNotificationKind.Reminder, "svc:W3SVC", AlertSeverity.Critical, "Service Down",
             "failed", "SRV", Now, Now.AddHours(-1), TimeSpan.FromHours(1), Disk(), 3);
         var delivery = new PendingDelivery("id-1", notification, Now, ["teams"], 2, Now.AddMinutes(-3), Now.AddMinutes(2),
-            "slack: Rejected with HTTP 500", Held: true);
+            "slack: Rejected with HTTP 500", Held: true)
+        {
+            ChannelRetries = [new ChannelRetry("slack", 2, Now.AddMinutes(2), "Rejected with HTTP 500")],
+        };
 
         store.UpsertDelivery(delivery);
         store.UpsertDelivery(delivery with { FailedAttempts = 3, ExplicitRecovery = true });

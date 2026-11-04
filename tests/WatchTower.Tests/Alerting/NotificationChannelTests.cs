@@ -123,13 +123,14 @@ public class NotificationChannelTests
     }
 
     [Fact]
-    public async Task Dispatch_SkipsChannelsThatAlreadyDelivered()
+    public async Task Dispatch_SendsOnlyTheChannelsItIsAskedFor()
     {
         var email = new FakeChannel(NotificationChannelType.Email, _ => Task.FromResult(ChannelSendResult.Ok()));
         var teams = new FakeChannel(NotificationChannelType.Teams, _ => Task.FromResult(ChannelSendResult.Ok()));
         var dispatcher = Dispatcher(new NotificationOptions { Teams = new WebhookNotificationSettings { Url = SecretUrl } }, email, teams);
+        dispatcher.ChannelsFor(Notification()).Should().Equal("email", "teams");
 
-        var result = await dispatcher.DispatchAsync(Notification(), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "EMAIL" }, null, Ct);
+        var result = await dispatcher.DispatchAsync(Notification(), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "TEAMS" }, null, Ct);
 
         result.Channels.Should().ContainSingle().Which.Channel.Should().Be("teams");
         email.Calls.Should().BeEmpty();

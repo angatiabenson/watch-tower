@@ -105,14 +105,18 @@ table `alert_state`, untouched by the daily report purge):
   is about). An alert's notices form a queue, ordered by occurrence and then creation, and are
   sent one at a time: a new occurrence never replaces an earlier one's recovery, so every
   opening that may have reached operators gets its own resolved notice, before the next
-  occurrence's opening. A notice still being retried is re-sent ahead of the later ones (each
-  channel gets them in order) without holding them back on the channels that work.
+  occurrence's opening. Each channel goes through the queue on its own: a notice goes to a
+  channel only once every earlier notice of the alert has reached that channel (or was given
+  up), so every channel gets them in order, also across a restart, while the channels that work
+  are never held back by one that fails. An opening that could not go out because its channels
+  keep failing still gets its resolved notice once they work again.
 - **Flapping** — at most 5 notices are queued per alert. When an alert keeps opening and
   clearing faster than its notices can go out (a channel down, a maintenance window), the 3
   oldest are kept, the new notice is the alert's latest state, and everything in between is
   folded into one persisted resolved notice, "Flapping: N occurrences between T1 and T2" (merged
-  with the previous one if the alert keeps flapping). In a maintenance window it becomes a line
-  of the end-of-window summary unless one of the folded occurrences may have reached operators.
+  with the previous one if the alert keeps flapping), sent in their place to every channel that
+  missed one of them. In a maintenance window it becomes a line of the end-of-window summary
+  unless one of the folded occurrences may have reached operators.
 - **Retired** — when a service, application pool or endpoint check is removed from the
   configuration (checked at startup and on every poll, so a config change takes effect
   within one poll interval), its open alert is closed with a retirement reason (e.g.
@@ -132,11 +136,19 @@ default `Info`) the alert meets. Channels are sent in parallel with a short time
 — never its URL — and does not block the others.
 
 Delivery is tracked per channel (SQLite table `alert_delivery`, kept across restarts). A
-channel that failed is retried with backoff (1, 2, 4, 8, 16, then every 30 minutes) — the
-channels that already have the notification never get it twice. Opened and reminder notices
-are retried while their alert stays open; resolved notices and one-shot events for up to 24
-hours. An alert only counts as notified (`notifyCount`, `lastNotifiedAt`) once a notice
-actually reached a channel.
+channel that failed is retried with backoff (1, 2, 4, 8, 16, then every 30 minutes), each
+notification on its own schedule — the channels that already have the notification never get
+it twice, and a new notification never makes a channel retry an earlier one sooner. Opened and
+reminder notices are retried while their alert stays open; resolved notices and one-shot events
+for up to 24 hours. An alert only counts as notified (`notifyCount`, `lastNotifiedAt`) once a
+notice actually reached a channel.
+
+A failing channel is also backed off as a whole, across every alert: after a failure it is not
+attempted at all until its backoff has passed, then with a single probe; a success resumes
+normal delivery. A channel that is down therefore costs at most 9 attempts in its first hour
+and 2 an hour after that, however many alerts open, flap or wait for it (the backoff is kept
+in `agent_state` across restarts). A channel that works takes up to 20 notifications at once
+and one more every 2 seconds, so a backlog drains in order without flooding it.
 
 | Channel | Configure (console: *Notification channels*) | Payload |
 |---|---|---|

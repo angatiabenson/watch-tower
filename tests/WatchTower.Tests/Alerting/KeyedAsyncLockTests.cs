@@ -7,6 +7,7 @@ using Moq;
 using WatchTower.Models;
 using WatchTower.Services.Abstractions;
 using WatchTower.Services.Alerting;
+using WatchTower.Workers;
 
 namespace WatchTower.Tests.Alerting;
 
@@ -156,6 +157,13 @@ public class KeyedAsyncLockTests
 
         alerts.KeyLockCount.Should().Be(0);
         alerts.InFlightCount.Should().Be(0);
+
+        // The clock stood still: what exceeded the channel's burst goes out as its budget refills.
+        for (var i = 0; i < 20 && alerts.GetPendingDeliveries().Count > 0; i++)
+        {
+            time.Advance(NotificationDeliveryWorker.Tick);
+            await alerts.ProcessPendingAsync(Ct).Bounded();
+        }
         alerts.GetPendingDeliveries().Should().BeEmpty("every notice was delivered");
 
         // Each key's notices alternate opened / resolved: none was sent twice or out of order.

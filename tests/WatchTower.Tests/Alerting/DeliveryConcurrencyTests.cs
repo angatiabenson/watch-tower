@@ -87,12 +87,19 @@ public class DeliveryConcurrencyTests
         await alerts.ResolveAsync(Key, ct: Ct).Bounded();
 
         opened.Fail("ch1");
+        await processing.Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse("ch1 just failed: the recovery waits for its backoff");
+        alerts.GetPendingDeliveries().Should().ContainSingle("the failed opened notice was superseded by the recovery")
+            .Which.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
+
+        _time.Advance(NotificationRetryPolicy.Backoff(1));
+        processing = alerts.ProcessPendingAsync(Ct);
         var resolved = await _dispatcher.NextAsync(Ct);
         resolved.Notification.Kind.Should().Be(AlertNotificationKind.Resolved);
         resolved.Deliver("ch1");
         await processing.Bounded();
 
-        alerts.GetPendingDeliveries().Should().BeEmpty("the failed opened notice was superseded by the recovery");
+        alerts.GetPendingDeliveries().Should().BeEmpty();
         _time.Advance(TimeSpan.FromHours(1));
         await alerts.ProcessPendingAsync(Ct).Bounded();
         _dispatcher.Sent.Should().HaveCount(2, "nothing is re-sent: the occurrence is over");
@@ -512,23 +519,24 @@ public class DeliveryConcurrencyTests
     public async Task WindowStartingWhileRetriesAreSent_LeavesTheRemainingRetriesPending()
     {
         var alerts = Alerts();
-        foreach (var name in new[] { "a", "b" })
-        {
-            var raising = alerts.RaiseAsync(AlertKey.Endpoint(name), AlertSeverity.Critical, $"{name} down", Down(), Ct);
-            (await _dispatcher.NextAsync(Ct)).Fail("ch1");
-            await raising.Bounded();
-        }
+        var raising = alerts.RaiseAsync(AlertKey.Endpoint("a"), AlertSeverity.Critical, "a down", Down(), Ct);
+        (await _dispatcher.NextAsync(Ct)).Fail("ch1");
+        await raising.Bounded();
+        await alerts.RaiseAsync(AlertKey.Endpoint("b"), AlertSeverity.Critical, "b down", Down(), Ct).Bounded();
+        _dispatcher.HasWaitingCall.Should().BeFalse("ch1 just failed: b's opening waits for its circuit's probe");
 
         _time.Advance(NotificationRetryPolicy.Backoff(1));
         var processing = alerts.ProcessPendingAsync(Ct);
         var retry = await _dispatcher.NextAsync(Ct);
+        retry.Notification.AlertKey.Should().Be(AlertKey.Endpoint("a").Value, "the probe is a's retry");
         _maintenance.Active = true;
         retry.Deliver("ch1");
         await processing.Bounded();
 
-        _dispatcher.Sent.Should().HaveCount(3, "two first attempts and one retry");
+        _dispatcher.Sent.Should().HaveCount(2, "a's first attempt and its retry");
         var rest = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
-        rest.FailedAttempts.Should().Be(1, "it was not attempted during the window");
+        rest.AlertKey.Should().Be(AlertKey.Endpoint("b").Value);
+        rest.FailedAttempts.Should().Be(0, "it was not attempted during the window");
 
         _maintenance.Active = false;
         processing = alerts.ProcessPendingAsync(Ct);
@@ -581,6 +589,7 @@ public class DeliveryConcurrencyTests
         alerts.InFlightCount.Should().Be(0);
 
         dispatcher.Failing.Clear();
+        _time.Advance(NotificationRetryPolicy.Backoff(1)); // the channel's circuit counted the failure
         await alerts.ProcessPendingAsync(Ct).Bounded();
 
         dispatcher.Sent.Should().HaveCount(2, "the failed attempt is retried");
@@ -736,8 +745,10 @@ public class DeliveryConcurrencyTests
         /// <summary>Most sends that were in progress at the same time (every send is for one key).</summary>
         public int MaxOverlap { get; private set; }
 
+        public IReadOnlyList<string> ChannelsFor(AlertNotification notification) => ["ch1"];
+
         public async Task<DispatchResult> DispatchAsync(
-            AlertNotification notification, IReadOnlySet<string>? skipChannels, Action<ChannelDelivery>? onChannelCompleted,
+            AlertNotification notification, IReadOnlySet<string>? channels, Action<ChannelDelivery>? onChannelCompleted,
             CancellationToken ct)
         {
             lock (_sent)

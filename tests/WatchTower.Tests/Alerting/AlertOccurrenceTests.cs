@@ -217,14 +217,18 @@ public class AlertOccurrenceTests
             .Should().Equal((Resolved, "A down", 1L), (Opened, "B down", 2L));
         persisted.Select(d => d.Sequence).Should().BeInAscendingOrder();
 
-        // New process, the channel is back; B's opening is due before A's recovery retry is.
+        // New process, the channel is back. A's recovery failed twice (its retry is due at
+        // minute 4, and so is the channel's probe, both persisted); B's opening waits behind it.
         var after = new RecordingDispatcher();
         var restarted = Alerts(after, new SqliteAlertStateStore(path));
         _time.Advance(TimeSpan.FromMinutes(1));
         await restarted.ProcessPendingAsync(Ct).Bounded();
+        after.Sent.Should().BeEmpty("A's recovery is not retried before its deadline, and nothing overtakes it");
 
+        _time.Advance(TimeSpan.FromMinutes(1));
+        await restarted.ProcessPendingAsync(Ct).Bounded();
         Kinds(after.Sent).Should().Equal([(Resolved, "A down"), (Opened, "B down")],
-            "A's recovery is sent first, early, rather than overtaken");
+            "A's recovery is sent first, at its retry time, rather than overtaken");
         restarted.GetOpenAlerts().Single().Should().BeEquivalentTo(new { Occurrence = 2L, NotifyCount = 1 });
 
         await Resolve(restarted);
@@ -242,19 +246,23 @@ public class AlertOccurrenceTests
         await Raise(alerts, "A down");
         _time.Advance(TimeSpan.FromMinutes(1));
         await Resolve(alerts);
-        // A's recovery keeps failing on ch2, so its next retry is far off.
+        // A's recovery keeps failing on ch2 (twice; ch2's circuit is open until minute 7).
         _time.Advance(TimeSpan.FromMinutes(2));
         await alerts.ProcessPendingAsync(Ct).Bounded();
         _time.Advance(TimeSpan.FromMinutes(2));
         await alerts.ProcessPendingAsync(Ct).Bounded();
         var recovery = alerts.GetPendingDeliveries().Should().ContainSingle().Subject;
         recovery.DeliveredChannels.Should().BeEquivalentTo("ch1", "ch3");
-        recovery.NextAttemptAt.Should().BeAfter(Now.AddMinutes(2));
+        recovery.ChannelRetries.Should().ContainSingle().Which.Should().BeEquivalentTo(new { Channel = "ch2", Attempts = 2 });
+        _recording.Attempts.Count(a => a is { Channel: "ch2", Notification.Kind: Resolved }).Should().Be(2);
 
         await Raise(alerts, "B down");
         Received(_recording, "ch1").Should().Equal(
             [(Opened, "A down"), (Resolved, "A down"), (Opened, "B down")],
             "B's opening is not held back by a channel that keeps rejecting A's recovery");
+        _recording.Attempts.Where(a => a.Channel == "ch2").Select(a => (a.Notification.Kind, a.Notification.Title))
+            .Should().Equal([(Opened, "A down"), (Resolved, "A down"), (Resolved, "A down")],
+                "ch2 gets B's opening only after A's recovery, and B's opening retries nothing early");
         alerts.GetPendingDeliveries().Select(d => (d.Notification.Kind, d.Occurrence))
             .Should().Equal((Resolved, 1L), (Opened, 2L));
 
@@ -303,9 +311,13 @@ public class AlertOccurrenceTests
             (Resolved, "down #1"), (Resolved, "down #2"), (Resolved, "down #3"), (Resolved, flapping), (Opened, "down #12"));
         var notice = queued.Single(d => d.IsFlapping);
         notice.FlappingCount.Should().Be(8);
-        notice.ExplicitRecovery.Should().BeTrue("the folded occurrences' openings were attempted");
+        notice.ExplicitRecovery.Should().BeFalse(
+            "the folded occurrences' openings never went out: they waited behind #1's recovery on the failing channel");
         notice.Notification.Description.Should().Contain("opened and cleared 8 times");
-        queued.Where(d => d.Notification.Kind == Resolved).Should().OnlyContain(d => d.ExplicitRecovery);
+        queued.Where(d => d.ExplicitRecovery).Select(d => d.Notification.Title).Should().Equal(
+            ["down #1"], "only the first opening was attempted");
+        _recording.Sent.Should().HaveCountLessThanOrEqualTo(ChannelRateLimiter.WorstCaseFirstHourAttempts,
+            "the failing channel is only probed on its backoff schedule, however often the alert flaps");
 
         _recording.Failing.Clear();
         for (var i = 0; i < 60; i++)
@@ -380,6 +392,22 @@ public class AlertOccurrenceTests
             notification TEXT NOT NULL, created_at TEXT NOT NULL, delivered_channels TEXT NOT NULL DEFAULT '[]',
             failed_attempts INTEGER NOT NULL DEFAULT 0, first_attempt_at TEXT, next_attempt_at TEXT NOT NULL,
             last_error TEXT, held INTEGER NOT NULL DEFAULT 0, explicit_recovery INTEGER NOT NULL DEFAULT 0);
+        """;
+
+    /// <summary>The tables as 9af7625 (occurrences, queue order, flapping; one retry time per row) left them.</summary>
+    private const string Schema9af7625 =
+        """
+        CREATE TABLE alert_state (
+            key TEXT PRIMARY KEY COLLATE NOCASE, severity INTEGER NOT NULL, incident_type INTEGER NOT NULL,
+            title TEXT NOT NULL, opened_at TEXT NOT NULL, last_notified_at TEXT, notify_count INTEGER NOT NULL DEFAULT 0,
+            resolved_at TEXT, last_description TEXT NOT NULL, retired_reason TEXT, occurrence INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE agent_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE alert_delivery (
+            id TEXT PRIMARY KEY, alert_key TEXT NOT NULL COLLATE NOCASE, kind INTEGER NOT NULL,
+            notification TEXT NOT NULL, created_at TEXT NOT NULL, delivered_channels TEXT NOT NULL DEFAULT '[]',
+            failed_attempts INTEGER NOT NULL DEFAULT 0, first_attempt_at TEXT, next_attempt_at TEXT NOT NULL,
+            last_error TEXT, held INTEGER NOT NULL DEFAULT 0, explicit_recovery INTEGER NOT NULL DEFAULT 0,
+            occurrence INTEGER NOT NULL DEFAULT 1, seq INTEGER NOT NULL DEFAULT 0, flap_count INTEGER NOT NULL DEFAULT 0);
         """;
 
     private static void Sql(string path, string sql, params (string Name, object Value)[] parameters)
@@ -459,6 +487,65 @@ public class AlertOccurrenceTests
         // The alert's next occurrence is numbered after the migrated one.
         await Raise(alerts, "Endpoint Down: flappy");
         alerts.GetOpenAlerts().Single(s => s.Key == Key.Value).Occurrence.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task UpgradeFromThe9af7625Schema_KeepsDeliveredChannels_AndMakesTheOthersDueNow()
+    {
+        // A queue left by 9af7625: the first occurrence's recovery reached ch1 and kept failing on
+        // ch2 (its row's retry is 16 minutes away), the second occurrence's opening reached ch1.
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var path = dir.Paths.DatabasePath;
+        Sql(path, Schema9af7625);
+        Sql(path,
+            """
+            INSERT INTO alert_state (key, severity, incident_type, title, opened_at, last_notified_at, notify_count,
+                                     resolved_at, last_description, occurrence)
+            VALUES (@key, 2, @type, 'B down', @opened, @opened, 1, NULL, 'last', 2)
+            """,
+            ("@key", Key.Value), ("@type", (int)IncidentType.EndpointDown), ("@opened", Utc(3)));
+        void Row(string id, AlertNotification n, long occurrence, long seq, int failed) =>
+            Sql(path,
+                """
+                INSERT INTO alert_delivery (id, alert_key, kind, notification, created_at, delivered_channels, failed_attempts,
+                                            first_attempt_at, next_attempt_at, last_error, explicit_recovery, occurrence, seq)
+                VALUES (@id, @key, @kind, @notification, @created, '["ch1"]', @failed, @created, @next,
+                        'ch2: Rejected with HTTP 503', @explicit, @occurrence, @seq)
+                """,
+                ("@id", id), ("@key", n.AlertKey), ("@kind", (int)n.Kind),
+                ("@notification", System.Text.Json.JsonSerializer.Serialize(n)), ("@created", Utc((int)seq)),
+                ("@failed", failed), ("@next", Utc(30)), ("@explicit", n.Kind == Resolved ? 1 : 0),
+                ("@occurrence", occurrence), ("@seq", seq));
+        Row("recovery", Legacy(Resolved, Key.Value, "A down", 1, openedAt: 0, notifyCount: 1), occurrence: 1, seq: 1, failed: 5);
+        Row("opened", Legacy(Opened, Key.Value, "B down", 3, openedAt: 3, notifyCount: 1), occurrence: 2, seq: 3, failed: 1);
+
+        _ = new SqliteAlertStateStore(path);
+        var store = new SqliteAlertStateStore(path); // a second start migrates nothing again
+        var rows = store.LoadDeliveries();
+        rows.Select(d => (d.Id, d.Occurrence, d.Sequence, d.FailedAttempts)).Should().Equal(
+            ("recovery", 1L, 1L, 5), ("opened", 2L, 3L, 1));
+        rows.Should().OnlyContain(d => d.DeliveredChannels.SequenceEqual(new[] { "ch1" }) && d.ChannelRetries.Count == 0,
+            "ch1 stays delivered; every other channel is pending, due now");
+        rows.Select(d => d.NextAttemptAt).Should().Equal(At(1), At(3));
+
+        // A row written after the upgrade keeps its own deadlines across another start.
+        var later = rows[0] with { NextAttemptAt = At(40), ChannelRetries = [new ChannelRetry("ch2", 6, At(40), "503")] };
+        store.UpsertDelivery(later);
+        new SqliteAlertStateStore(path).LoadDeliveries()[0].Should().BeEquivalentTo(later);
+        store.UpsertDelivery(rows[0]);
+
+        // Ten minutes in (the old row-level retry was still 20 minutes away): ch2 gets the queue now, in order.
+        _time.Advance(TimeSpan.FromMinutes(10));
+        _recording.Channels = 2;
+        var alerts = Alerts(_recording, new SqliteAlertStateStore(path));
+        await alerts.ProcessPendingAsync(Ct).Bounded();
+
+        Received(_recording, "ch2").Should().Equal((Resolved, "A down"), (Opened, "B down"));
+        Received(_recording, "ch1").Should().BeEmpty("ch1 had both already");
+        alerts.GetPendingDeliveries().Should().BeEmpty();
+        new SqliteAlertStateStore(path).LoadDeliveries().Should().BeEmpty();
+        alerts.GetOpenAlerts().Single().Should().BeEquivalentTo(new { Occurrence = 2L, NotifyCount = 1 });
     }
 
     [Fact]

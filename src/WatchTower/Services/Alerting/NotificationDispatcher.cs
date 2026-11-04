@@ -18,14 +18,17 @@ public sealed class NotificationDispatcher(
     private readonly Dictionary<NotificationChannelType, INotificationChannel> _senders =
         channels.ToDictionary(c => c.Type);
 
+    public IReadOnlyList<string> ChannelsFor(AlertNotification notification) =>
+        Eligible(notification.Severity).Select(t => t.Channel.Name).ToList();
+
     public async Task<DispatchResult> DispatchAsync(
         AlertNotification notification,
-        IReadOnlySet<string>? skipChannels,
+        IReadOnlySet<string>? channels,
         Action<ChannelDelivery>? onChannelCompleted,
         CancellationToken ct)
     {
         var targets = Eligible(notification.Severity)
-            .Where(t => skipChannels is null || !skipChannels.Contains(t.Channel.Name))
+            .Where(t => channels is null || channels.Contains(t.Channel.Name))
             .ToList();
         if (targets.Count == 0)
         {

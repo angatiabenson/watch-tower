@@ -21,7 +21,9 @@ namespace WatchTower.Services.Alerting;
 /// <param name="FirstAttemptAt">First delivery attempt (UTC); null until it is attempted.
 /// Retries of a notification that is not about an open alert stop
 /// <see cref="NotificationRetryPolicy.GiveUpAfter"/> after it.</param>
-/// <param name="NextAttemptAt">Earliest next attempt (UTC).</param>
+/// <param name="NextAttemptAt">Earliest retry deadline of a channel that failed it (UTC), for display;
+/// what is sent when is decided per channel (<see cref="ChannelRetries"/>, the alert's queue and
+/// the channel's circuit).</param>
 /// <param name="LastError">Last failure, per channel (no URLs or secrets).</param>
 /// <param name="Held">Held back by a maintenance window: not attempted until the window ends.</param>
 /// <param name="ExplicitRecovery">Resolved notices only: the alert's opening may have reached
@@ -49,7 +51,31 @@ public sealed record PendingDelivery(
     long Sequence = 0,
     int FlappingCount = 0)
 {
+    /// <summary>
+    /// The channels that failed it and do not have it yet, each with its own attempts and deadline
+    /// (<c>alert_delivery.channel_retries</c>). A channel that is neither delivered nor listed is
+    /// due now: it was never attempted (e.g. it waited behind an earlier notice of the alert).
+    /// </summary>
+    public IReadOnlyList<ChannelRetry> ChannelRetries { get; init; } = [];
+
     public string AlertKey => Notification.AlertKey;
+
+    public bool HasDelivered(string channel) =>
+        DeliveredChannels.Contains(channel, StringComparer.OrdinalIgnoreCase);
+
+    public ChannelRetry? RetryOf(string channel) =>
+        ChannelRetries.FirstOrDefault(r => string.Equals(r.Channel, channel, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Whether <paramref name="channel"/>'s retry deadline (if it failed there) has passed.</summary>
+    public bool IsDueOn(string channel, DateTime now) => RetryOf(channel) is not { } retry || retry.NextAttemptAt <= now;
+
+    /// <summary>
+    /// A resolved notice or one-shot event first attempted <see cref="NotificationRetryPolicy.GiveUpAfter"/>
+    /// ago: given up on every channel that does not have it yet. Opened and reminder notices never
+    /// expire; they are superseded when their occurrence ends.
+    /// </summary>
+    public bool IsExpired(DateTime now) =>
+        !IsAboutOpenAlert && FirstAttemptAt is { } first && now - first >= NotificationRetryPolicy.GiveUpAfter;
 
     /// <summary>An opened or reminder notification: about an alert that is (still) open.</summary>
     public bool IsAboutOpenAlert => Notification.Kind is AlertNotificationKind.Opened or AlertNotificationKind.Reminder;
@@ -79,6 +105,13 @@ public sealed record PendingDelivery(
         new(Guid.NewGuid().ToString("N"), notification, now, [], 0, null, now, null, held, explicitRecovery,
             occurrence, sequence);
 }
+
+/// <summary>Retry state of one channel that failed a delivery.</summary>
+/// <param name="Channel">Channel name (case-insensitive).</param>
+/// <param name="Attempts">Failed attempts on this channel.</param>
+/// <param name="NextAttemptAt">Earliest next attempt on this channel (UTC).</param>
+/// <param name="LastError">Its last failure (no URLs or secrets).</param>
+public sealed record ChannelRetry(string Channel, int Attempts, DateTime NextAttemptAt, string? LastError = null);
 
 /// <summary>When failed notification deliveries are retried.</summary>
 public static class NotificationRetryPolicy

@@ -4,9 +4,16 @@ namespace WatchTower.Services.Alerting;
 public interface INotificationDispatcher
 {
     /// <summary>
-    /// Sends <paramref name="notification"/> to every eligible channel except those named in
-    /// <paramref name="skipChannels"/> (channels that already received it) and reports the outcome
-    /// per channel. No channels in the result means none is configured or available for it.
+    /// Names of the channels <see cref="DispatchAsync"/> would send <paramref name="notification"/>
+    /// to (enabled, available, and its severity meets their <c>MinSeverity</c>). Cheap and
+    /// synchronous: the alert manager asks it while deciding what to send.
+    /// </summary>
+    IReadOnlyList<string> ChannelsFor(AlertNotification notification);
+
+    /// <summary>
+    /// Sends <paramref name="notification"/> to the eligible channels named in
+    /// <paramref name="channels"/> (every eligible channel when null) and reports the outcome
+    /// per channel. No channels in the result means none of them is configured or available.
     /// Never throws for channel failures.
     /// <paramref name="onChannelCompleted"/> is invoked as soon as each channel has its outcome,
     /// before the slower channels finish, and also when <paramref name="ct"/> later cancels the
@@ -15,7 +22,7 @@ public interface INotificationDispatcher
     /// </summary>
     Task<DispatchResult> DispatchAsync(
         AlertNotification notification,
-        IReadOnlySet<string>? skipChannels,
+        IReadOnlySet<string>? channels,
         Action<ChannelDelivery>? onChannelCompleted,
         CancellationToken ct);
 }
