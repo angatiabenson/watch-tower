@@ -45,6 +45,37 @@ public class SqliteCommandStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task TryRecordRejected_StoresAFailedCommandWithAnUnsentResult_ThatCannotBeExecuted()
+    {
+        (await _store.TryRecordRejectedAsync(Command("old"), "Rejected: command is stale")).Should().BeTrue();
+
+        var unsent = (await _store.GetUnsentResultsAsync()).Should().ContainSingle().Subject;
+        unsent.CommandId.Should().Be("old");
+        unsent.Status.Should().Be("Failed");
+        var result = System.Text.Json.JsonSerializer.Deserialize<CommandResultDto>(unsent.ResultJson!)!;
+        result.Success.Should().BeFalse();
+        result.Message.Should().Be("Rejected: command is stale");
+        (await _store.TryBeginExecutionAsync("old")).Should().BeFalse();
+        (await _store.GetDueScheduledCommandsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task TryRecordRejected_KnownCommandId_ChangesNothing()
+    {
+        await _store.SaveCommandAsync(Command("done"));
+        (await _store.TryBeginExecutionAsync("done")).Should().BeTrue();
+        await _store.MarkCompletedAsync("done", new CommandResultDto("done", true, "ok", DateTime.UtcNow.ToString("O")));
+        await _store.MarkResultSentAsync("done");
+
+        (await _store.TryRecordRejectedAsync(Command("done"), "Rejected: command is stale")).Should().BeFalse();
+        (await _store.TryRecordRejectedAsync(Command("twice"), "Rejected: a")).Should().BeTrue();
+        (await _store.TryRecordRejectedAsync(Command("twice"), "Rejected: b")).Should().BeFalse();
+
+        (await _store.GetUnsentResultsAsync()).Should().ContainSingle()
+            .Which.ResultJson.Should().Contain("Rejected: a");
+    }
+
+    [Fact]
     public async Task TryBeginExecution_UnknownCommand_ReturnsFalse()
     {
         (await _store.TryBeginExecutionAsync("does-not-exist")).Should().BeFalse();

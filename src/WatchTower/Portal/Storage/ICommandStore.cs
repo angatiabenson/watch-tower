@@ -5,6 +5,14 @@ namespace WatchTower.Portal.Storage;
 public interface ICommandStore
 {
     Task SaveCommandAsync(AgentCommandDto command);
+
+    /// <summary>
+    /// Stores a command that is refused at receipt (for example a stale <c>issuedAt</c>) directly
+    /// as 'Failed' with an unsent result carrying <paramref name="message"/>, so the result is
+    /// reported and retried like any other. Returns <c>false</c> without changing anything when
+    /// the command id is already known: a re-delivery must not overwrite the earlier outcome.
+    /// </summary>
+    Task<bool> TryRecordRejectedAsync(AgentCommandDto command, string message);
     Task<IReadOnlyList<AgentCommandRecord>> GetPendingCommandsAsync();
     /// <summary>
     /// Atomically transitions a command from Received/Acknowledged to Executing.

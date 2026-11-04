@@ -74,6 +74,30 @@ public class SqliteCommandStore : ICommandStore, IDisposable
         return Task.CompletedTask;
     }
 
+    public Task<bool> TryRecordRejectedAsync(AgentCommandDto command, string message)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                @"INSERT OR IGNORE INTO agent_commands
+                    (command_id, action_type, params_json, status, received_at, scheduled_at, issued_at,
+                     executed_at, result_json)
+                  VALUES (@id, @type, @params, 'Failed', @now, @scheduled, @issued, @now, @result)";
+            var now = DateTime.UtcNow.ToString("O");
+            var result = new CommandResultDto(command.CommandId, false, message, now);
+            cmd.Parameters.AddWithValue("@id", command.CommandId);
+            cmd.Parameters.AddWithValue("@type", command.ActionType);
+            cmd.Parameters.AddWithValue("@params", JsonSerializer.Serialize(command.Parameters));
+            cmd.Parameters.AddWithValue("@now", now);
+            cmd.Parameters.AddWithValue("@scheduled", NormalizeUtc(command.ScheduledAt) ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@issued", NormalizeUtc(command.IssuedAt) ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@result", JsonSerializer.Serialize(result));
+            return Task.FromResult(cmd.ExecuteNonQuery() > 0);
+        }
+    }
+
     private static string? NormalizeUtc(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return value;

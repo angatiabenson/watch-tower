@@ -201,14 +201,13 @@ public class CommandPollingWorker : BackgroundService
             ? received with { Parameters = new Dictionary<string, string>() }
             : received;
 
-        // Replay protection: reject stale commands at receipt (before persisting).
+        // Replay protection: reject stale or future commands at receipt, before they are stored
+        // for execution or acknowledged; the portal gets a failed result with the reason.
         // Validated on IssuedAt, not ScheduledAt, so legitimately deferred commands
-        // (recent IssuedAt, future ScheduledAt) still pass.
+        // (recent IssuedAt, future ScheduledAt) still pass. A missing IssuedAt is accepted.
         if (!IsFresh(command, opts, out var freshnessReason))
         {
-            _logger.LogWarning(
-                "Rejecting command {CommandId} (ActionType={ActionType}): {Reason}",
-                command.CommandId, command.ActionType, freshnessReason);
+            await RejectAsync(command, freshnessReason, ct);
             return;
         }
 
@@ -374,6 +373,40 @@ public class CommandPollingWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Refuses a command at receipt: it is stored as failed and its result ("Rejected: reason")
+    /// is reported (and retried until accepted) like any refused command. It is not
+    /// acknowledged, since it was never accepted. A command id the agent already knows is left
+    /// alone: re-delivery of a command that was executed earlier must not report a failure.
+    /// </summary>
+    private async Task RejectAsync(AgentCommandDto command, string reason, CancellationToken ct)
+    {
+        if (!await _commandStore.TryRecordRejectedAsync(command, $"{RejectedPrefix}{reason}"))
+        {
+            _logger.LogDebug(
+                "Ignoring re-delivered command {CommandId} (ActionType={ActionType}): {Reason}; it was handled before",
+                command.CommandId, command.ActionType, reason);
+            return;
+        }
+
+        _logger.LogWarning(
+            "Rejecting command {CommandId} (ActionType={ActionType}): {Reason}",
+            command.CommandId, command.ActionType, reason);
+        await ReportResultAsync(
+            new CommandResultDto(command.CommandId, false, $"{RejectedPrefix}{reason}", UtcNow.ToString("O")), ct);
+    }
+
+    internal const string RejectedPrefix = "Rejected: ";
+
+    internal const string MissingIssuedAtWarning =
+        "Portal sends commands without issuedAt; replay protection is reduced. Update the portal.";
+
+    /// <summary>
+    /// BaseUrl of the portal session the missing-issuedAt warning was logged for: once per
+    /// session (process lifetime, or until the BaseUrl changes), not once per command.
+    /// </summary>
+    private string? _missingIssuedAtWarnedFor;
+
     private bool IsFresh(AgentCommandDto command, PortalOptions opts, out string reason)
     {
         reason = string.Empty;
@@ -383,30 +416,37 @@ public class CommandPollingWorker : BackgroundService
 
         if (string.IsNullOrWhiteSpace(command.IssuedAt))
         {
-            // Accepting it would let a replayed/forged command without an issue time bypass
-            // the age check entirely.
-            reason = "missing IssuedAt (required while MaxCommandAgeSeconds > 0)";
-            return false;
+            // Portals written before issuedAt existed never send it. Accept such commands so they
+            // keep working; the per-command-id duplicate check still applies, only the age check
+            // cannot. Warn once so the operator knows the protection is reduced.
+            if (!string.Equals(_missingIssuedAtWarnedFor, opts.BaseUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                _missingIssuedAtWarnedFor = opts.BaseUrl;
+                _logger.LogWarning(MissingIssuedAtWarning);
+            }
+            return true;
         }
 
         if (!DateTime.TryParse(command.IssuedAt, CultureInfo.InvariantCulture,
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var issued))
         {
-            reason = $"unparseable IssuedAt '{command.IssuedAt}'";
+            reason = $"unparseable issuedAt '{command.IssuedAt}'";
             return false;
         }
 
         var now = UtcNow;
-        var skew = TimeSpan.FromSeconds(opts.CommandPoll.ClockSkewSeconds);
+        var skewSeconds = opts.CommandPoll.ClockSkewSeconds;
+        var skew = TimeSpan.FromSeconds(skewSeconds);
 
         if (issued > now + skew)
         {
-            reason = $"IssuedAt is in the future ({issued:O})";
+            reason = $"issuedAt {issued:O} is more than {skewSeconds}s in the future (agent time {now:O})";
             return false;
         }
         if (now - issued > TimeSpan.FromSeconds(maxAge) + skew)
         {
-            reason = $"command is stale (issued {issued:O}, max age {maxAge}s)";
+            reason = $"command is stale: issuedAt {issued:O} is more than {maxAge + skewSeconds}s old " +
+                     $"(max age {maxAge}s + {skewSeconds}s clock skew; agent time {now:O})";
             return false;
         }
         return true;
