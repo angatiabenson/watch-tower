@@ -72,6 +72,13 @@ public class CommandPollOptions
     public int RetentionDays { get; set; } = 30;
 
     /// <summary>
+    /// A command result the portal has not accepted is retried with a per-result backoff (1, 2,
+    /// 4… up to 30 minutes) for this many hours after it was produced, then given up on (logged)
+    /// and purged with the command history. Values below 1 count as 1.
+    /// </summary>
+    public int ResultRetryMaxHours { get; set; } = 168;
+
+    /// <summary>
     /// When false (default), service/app-pool commands may only target names on the LOCALLY
     /// configured watch lists; lists pushed by the portal's remote configuration do not widen
     /// what the portal may stop or restart. Set true to let the portal manage both.

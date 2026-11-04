@@ -49,6 +49,10 @@ public class CommandPollingWorkerTests
         _store.Setup(s => s.TryRecordRejectedAsync(It.IsAny<AgentCommandDto>(), It.IsAny<string>())).ReturnsAsync(true);
         _store.Setup(s => s.GetDueScheduledCommandsAsync()).ReturnsAsync(Array.Empty<AgentCommandRecord>());
         _store.Setup(s => s.GetUnsentResultsAsync()).ReturnsAsync(Array.Empty<AgentCommandRecord>());
+        _store.Setup(s => s.GetDueResultsAsync(It.IsAny<DateTime>(), It.IsAny<int>())).ReturnsAsync(Array.Empty<AgentCommandRecord>());
+        _store.Setup(s => s.AbandonUndeliveredResultsAsync(It.IsAny<DateTime>(), It.IsAny<DateTime>()))
+            .ReturnsAsync(Array.Empty<UndeliveredResult>());
+        _store.Setup(s => s.TrimRejectionsAsync(It.IsAny<int>())).ReturnsAsync(new TrimmedRejections(0, []));
         _portal.Setup(p => p.AcknowledgeCommandAsync(It.IsAny<AcknowledgeCommandDto>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
     }
@@ -117,7 +121,7 @@ public class CommandPollingWorkerTests
     {
         Poll();
         var json = System.Text.Json.JsonSerializer.Serialize(new CommandResultDto("c9", true, "done", DateTime.UtcNow.ToString("O")));
-        _store.Setup(s => s.GetUnsentResultsAsync()).ReturnsAsync(new[]
+        _store.Setup(s => s.GetDueResultsAsync(Now, CommandPollingWorker.MaxResultsPerCycle)).ReturnsAsync(new[]
         {
             new AgentCommandRecord("c9", 302, "{}", "Completed", DateTime.UtcNow.ToString("O"), null, null, json),
         });
@@ -310,13 +314,15 @@ public class CommandPollingWorkerTests
             await worker.RunCycleAsync(CancellationToken.None);
             (await store.GetUnsentResultsAsync()).Should().ContainSingle(r => r.CommandId == "stale" && r.Status == "Failed");
 
-            // 2. Portal back, same stale command re-delivered: no second rejection; the stored one is retried.
+            // 2. Portal back, same stale command re-delivered: no second rejection; the stored one is
+            //    retried once its 1-minute backoff has passed.
             ResultAccepted(true);
+            _time.Advance(SqliteCommandStore.ResultRetryBaseDelay);
             await worker.RunCycleAsync(CancellationToken.None);
             (await store.GetUnsentResultsAsync()).Should().BeEmpty();
             _portal.Verify(p => p.ReportCommandResultAsync(
                 It.Is<CommandResultDto>(r => r.CommandId == "stale" && !r.Success && r.Message.StartsWith("Rejected: command is stale")),
-                It.IsAny<CancellationToken>()), Times.Exactly(3), "sent at rejection and by the retry of both cycles");
+                It.IsAny<CancellationToken>()), Times.Exactly(2), "sent at rejection and by the retry after the backoff");
 
             // 3. A command without issuedAt runs once; re-delivered, it is not executed again.
             Poll(Command("legacy") with { IssuedAt = null! });
@@ -530,6 +536,144 @@ public class CommandPollingWorkerTests
         store.GetCommandIdOutcome("legacy").Should().Be("Completed");
     }
 
+    private int Sends(string commandId) => _portal.Invocations.Count(i =>
+        i.Method.Name == nameof(IPortalClient.ReportCommandResultAsync) && i.Arguments[0] is CommandResultDto r && r.CommandId == commandId);
+
+    private void ResultAccepted(Func<CommandResultDto, bool> accept) =>
+        _portal.Setup(p => p.ReportCommandResultAsync(It.IsAny<CommandResultDto>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((CommandResultDto r, CancellationToken _) => accept(r));
+
+    [Fact]
+    public async Task RealStore_RefusedResult_IsRetriedWithBackoff()
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow); // the store stamps rows with the real clock
+        var worker = RealStoreWorker(new SqliteCommandStore(db.Path));
+        ResultAccepted(false);
+
+        Poll(Command("c1"));
+        await worker.RunCycleAsync(CancellationToken.None);
+        Poll();
+        for (var i = 0; i < 20; i++)
+        {
+            _time.Advance(TimeSpan.FromSeconds(30));
+            await worker.RunCycleAsync(CancellationToken.None);
+        }
+
+        // Sent at execution, then 1, 2 and 4 minutes after each failed attempt: at 0, 1, 3 and 7 min.
+        Sends("c1").Should().Be(4);
+    }
+
+    [Fact]
+    public async Task RealStore_PermanentlyRefusedResults_DoNotBlockNewerOnes()
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow);
+        var worker = RealStoreWorker(new SqliteCommandStore(db.Path));
+        var goodAccepted = false;
+        ResultAccepted(r => !r.CommandId.StartsWith("bad-", StringComparison.Ordinal) && (r.CommandId != "good" || goodAccepted));
+
+        // More refused results than one retry cycle sends (50), all older than the next one.
+        Poll(Enumerable.Range(0, 60).Select(i => Command($"bad-{i}")).ToArray());
+        await worker.RunCycleAsync(CancellationToken.None);
+
+        // The portal is briefly down for the next result too.
+        _time.Advance(TimeSpan.FromMinutes(1));
+        Poll(Command("good"));
+        await worker.RunCycleAsync(CancellationToken.None);
+        Sends("good").Should().Be(1);
+
+        _time.Advance(TimeSpan.FromMinutes(1));
+        goodAccepted = true;
+        Poll();
+        await worker.RunCycleAsync(CancellationToken.None);
+
+        Sends("good").Should().Be(2, "due results go out in the order they are due, not by age");
+        var store = new SqliteCommandStore(db.Path);
+        (await store.GetUnsentResultsAsync()).Select(r => r.CommandId).Should().NotContain("good").And.HaveCount(60);
+        Enumerable.Range(0, 60).Sum(i => Sends($"bad-{i}")).Should().Be(60 + 50 + 10,
+            "each was sent once, then retried once after 1 minute (50 in one cycle, 10 in the next)");
+    }
+
+    [Fact]
+    public async Task RealStore_ResultNeverAccepted_IsGivenUpOn_AndLogged()
+    {
+        using var db = new TempDb();
+        _time.SetUtcNow(DateTimeOffset.UtcNow);
+        SetOptions(o => o.CommandPoll.ResultRetryMaxHours = 2);
+        var logs = new RecordingLoggerProvider();
+        var store = new SqliteCommandStore(db.Path);
+        var worker = new CommandPollingWorker(_portal.Object, store,
+            new ActionHandlerRegistry(new[] { _handler.Object }, NullLogger<ActionHandlerRegistry>.Instance),
+            _options.Object, _serviceOptions.Object, _poolOptions.Object, _time, logs.CreateLogger<CommandPollingWorker>());
+        ResultAccepted(false);
+
+        Poll(Command("c1"));
+        await worker.RunCycleAsync(CancellationToken.None);
+        Poll();
+        for (var minutes = 0; minutes < 150; minutes += 5)
+        {
+            _time.Advance(TimeSpan.FromMinutes(5));
+            await worker.RunCycleAsync(CancellationToken.None);
+        }
+
+        (await store.GetUnsentResultsAsync()).Should().BeEmpty();
+        var sends = Sends("c1");
+        sends.Should().BeInRange(6, 9, "1, 2, 4, 8, 16, 30… minutes apart for 2 hours");
+        logs.At(LogLevel.Warning).Should().ContainSingle(e => e.Message.StartsWith("Gave up delivering the result of command c1"));
+
+        for (var i = 0; i < 4; i++)
+        {
+            _time.Advance(TimeSpan.FromMinutes(30));
+            await worker.RunCycleAsync(CancellationToken.None);
+        }
+        Sends("c1").Should().Be(sends, "an abandoned result is not retried");
+        (await store.PurgeFinishedCommandsAsync(DateTime.UtcNow.AddMinutes(1))).Should().Be(1, "abandoned rows are purged with the history");
+    }
+
+    [Fact]
+    public async Task UndeliverableResults_AreSettledEveryCycle()
+    {
+        SetOptions(o => o.CommandPoll.ResultRetryMaxHours = 10);
+        Poll();
+        var worker = CreateWorker();
+
+        await worker.RunCycleAsync(CancellationToken.None);
+        await worker.RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.AbandonUndeliveredResultsAsync(Now - TimeSpan.FromHours(10), Now), Times.Exactly(2));
+        _store.Verify(s => s.TrimRejectionsAsync(CommandPollingWorker.DefaultMaxStoredRejections), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task RealStore_RejectionRows_AreBounded()
+    {
+        using var db = new TempDb();
+        var store = new SqliteCommandStore(db.Path);
+        var worker = new CommandPollingWorker(_portal.Object, store,
+            new ActionHandlerRegistry(new[] { _handler.Object }, NullLogger<ActionHandlerRegistry>.Instance),
+            _options.Object, _serviceOptions.Object, _poolOptions.Object, _time, NullLogger<CommandPollingWorker>.Instance)
+        {
+            MaxStoredRejections = 20,
+        };
+        ResultAccepted(false);
+
+        // A portal that keeps sending stale commands and refusing their results.
+        var stale = Now.AddHours(-5).ToString("O");
+        for (var batch = 0; batch < 4; batch++)
+        {
+            Poll(Enumerable.Range(0, 15).Select(i => Command($"stale-{batch}-{i}") with { IssuedAt = stale }).ToArray());
+            await worker.RunCycleAsync(CancellationToken.None);
+            store.CountRejections().Should().BeLessThanOrEqualTo(20);
+        }
+
+        store.CountRejections().Should().Be(20);
+        (await store.GetUnsentResultsAsync()).Select(r => r.CommandId).Should()
+            .OnlyContain(id => id.StartsWith("stale-3-") || id.StartsWith("stale-2-"), "the newest are kept");
+        store.CountCommandIds().Should().Be(60, "dropped rejections stay known");
+        (await store.TryRecordRejectedAsync(Command("stale-0-0"), "Rejected: again")).Should().BeFalse();
+    }
+
     /// <summary>Delegates to a real store but throws right after <see cref="CrashAfter"/> succeeded, like a crash.</summary>
     private sealed class CrashingStore(SqliteCommandStore inner) : ICommandStore
     {
@@ -551,6 +695,11 @@ public class CommandPollingWorkerTests
         public Task MarkCompletedAsync(string commandId, CommandResultDto result) => inner.MarkCompletedAsync(commandId, result);
         public Task MarkFailedAsync(string commandId, string error) => inner.MarkFailedAsync(commandId, error);
         public Task<IReadOnlyList<AgentCommandRecord>> GetUnsentResultsAsync() => inner.GetUnsentResultsAsync();
+        public Task<IReadOnlyList<AgentCommandRecord>> GetDueResultsAsync(DateTime nowUtc, int limit) => inner.GetDueResultsAsync(nowUtc, limit);
+        public Task<DateTime?> RecordResultAttemptFailedAsync(string commandId, DateTime nowUtc) => inner.RecordResultAttemptFailedAsync(commandId, nowUtc);
+        public Task<IReadOnlyList<UndeliveredResult>> AbandonUndeliveredResultsAsync(DateTime producedBeforeUtc, DateTime nowUtc) =>
+            inner.AbandonUndeliveredResultsAsync(producedBeforeUtc, nowUtc);
+        public Task<TrimmedRejections> TrimRejectionsAsync(int keep) => inner.TrimRejectionsAsync(keep);
         public Task MarkResultSentAsync(string commandId) => inner.MarkResultSentAsync(commandId);
         public Task<IReadOnlyList<AgentCommandRecord>> GetDueScheduledCommandsAsync() => inner.GetDueScheduledCommandsAsync();
         public Task<IReadOnlyList<CommandResultDto>> FailInterruptedCommandsAsync(string message) => inner.FailInterruptedCommandsAsync(message);

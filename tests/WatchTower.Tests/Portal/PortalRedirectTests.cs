@@ -237,7 +237,7 @@ public sealed class PortalRedirectTests : IAsyncLifetime
         store.Setup(s => s.FailInterruptedCommandsAsync(It.IsAny<string>()))
             .ReturnsAsync(new[] { new CommandResultDto("c-1", false, CommandPollingWorker.InterruptedMessage, "t") });
         store.Setup(s => s.GetDueScheduledCommandsAsync()).ReturnsAsync(Array.Empty<AgentCommandRecord>());
-        store.Setup(s => s.GetUnsentResultsAsync()).ReturnsAsync(new[]
+        store.Setup(s => s.GetDueResultsAsync(It.IsAny<DateTime>(), It.IsAny<int>())).ReturnsAsync(new[]
         {
             new AgentCommandRecord("c-1", 302, "{}", "Failed", "t", null, "t",
                 JsonSerializer.Serialize(new CommandResultDto("c-1", false, CommandPollingWorker.InterruptedMessage, "t"))),

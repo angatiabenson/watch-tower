@@ -236,9 +236,12 @@ public class SqliteCommandStoreTests : IDisposable
                         command_id TEXT PRIMARY KEY, action_type INTEGER NOT NULL, params_json TEXT NOT NULL,
                         status TEXT NOT NULL DEFAULT 'Received', received_at TEXT NOT NULL, scheduled_at TEXT,
                         issued_at TEXT, acked_at TEXT, executed_at TEXT, result_json TEXT);
-                      INSERT INTO agent_commands (command_id, action_type, params_json, status, received_at, executed_at)
-                      VALUES ('old-done', 302, '{}', 'Completed', '2026-10-01T00:00:00.0000000Z', '2026-10-01T00:00:01.0000000Z'),
-                             ('old-waiting', 302, '{}', 'Received', '2026-10-02T00:00:00.0000000Z', NULL);";
+                      INSERT INTO agent_commands (command_id, action_type, params_json, status, received_at, executed_at, result_json)
+                      VALUES ('old-done', 302, '{}', 'Completed', '2026-10-01T00:00:00.0000000Z', '2026-10-01T00:00:01.0000000Z', NULL),
+                             ('old-waiting', 302, '{}', 'Received', '2026-10-02T00:00:00.0000000Z', NULL, NULL),
+                             ('old-rejected', 302, '{}', 'Failed', '2026-10-03T00:00:00.0000000Z', '2026-10-03T00:00:00.0000000Z',
+                              '{""CommandId"":""old-rejected"",""Success"":false,""Message"":""Rejected: command is stale"",""ExecutedAt"":""x""}'),
+                             ('old-broken', 302, '{}', 'Failed', '2026-10-04T00:00:00.0000000Z', '2026-10-04T00:00:00.0000000Z', '{not json');";
                 cmd.ExecuteNonQuery();
             }
 
@@ -246,11 +249,14 @@ public class SqliteCommandStoreTests : IDisposable
 
             store.GetCommandIdOutcome("old-done").Should().Be("Completed");
             store.GetCommandIdOutcome("old-waiting").Should().Be("Received");
+            store.CountRejections().Should().Be(1, "a waiting rejection recorded before the flag existed is recognised");
+            (await store.GetDueResultsAsync(DateTime.UtcNow, 10)).Select(r => r.CommandId)
+                .Should().Equal("old-rejected", "old-broken");
             (await store.PurgeFinishedCommandsAsync(DateTime.UtcNow)).Should().Be(1);
             (await store.SaveCommandAsync(Command("old-done"))).Should().BeFalse("its id survived the purge");
             (await store.SaveCommandAsync(Command("old-waiting"))).Should().BeTrue("still waiting to run");
 
-            new SqliteCommandStore(path).CountCommandIds().Should().Be(2, "the backfill is idempotent");
+            new SqliteCommandStore(path).CountCommandIds().Should().Be(4, "the migration is idempotent");
         }
         finally
         {
@@ -260,6 +266,92 @@ public class SqliteCommandStoreTests : IDisposable
                 try { File.Delete(path + ext); } catch (IOException) { /* best effort */ }
             }
         }
+    }
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(3, 4)]
+    [InlineData(4, 8)]
+    [InlineData(5, 16)]
+    [InlineData(6, 30)]
+    [InlineData(1_000, 30)]
+    public void ResultRetryDelay_DoublesFromOneMinuteUpToThirty(int failedAttempts, int minutes)
+    {
+        SqliteCommandStore.ResultRetryDelay(failedAttempts).Should().Be(TimeSpan.FromMinutes(minutes));
+    }
+
+    private async Task Produce(string id)
+    {
+        await _store.SaveCommandAsync(Command(id));
+        await _store.TryBeginExecutionAsync(id);
+        await _store.MarkCompletedAsync(id, new CommandResultDto(id, true, "ok", DateTime.UtcNow.ToString("O")));
+    }
+
+    [Fact]
+    public async Task FailedResultAttempt_IsNotDueUntilItsBackoffHasPassed()
+    {
+        await Produce("c1");
+        var now = DateTime.UtcNow;
+
+        (await _store.RecordResultAttemptFailedAsync("c1", now)).Should().Be(now + TimeSpan.FromMinutes(1));
+        (await _store.GetDueResultsAsync(now.AddSeconds(59), 50)).Should().BeEmpty();
+        (await _store.GetDueResultsAsync(now.AddMinutes(1), 50)).Should().ContainSingle(r => r.CommandId == "c1");
+
+        (await _store.RecordResultAttemptFailedAsync("c1", now.AddMinutes(1))).Should().Be(now + TimeSpan.FromMinutes(3));
+        (await _store.GetUnsentResultsAsync()).Should().ContainSingle("it is still waiting, only not due");
+
+        await _store.MarkResultSentAsync("c1");
+        (await _store.RecordResultAttemptFailedAsync("c1", now)).Should().BeNull("nothing is waiting any more");
+    }
+
+    [Fact]
+    public async Task DueResults_AreTheLongestDueFirst_NotTheOldest()
+    {
+        await Produce("refused");
+        await Produce("newer");
+        var now = DateTime.UtcNow.AddSeconds(1);
+        await _store.RecordResultAttemptFailedAsync("refused", now.AddMinutes(-10));
+
+        (await _store.GetDueResultsAsync(now, 1)).Select(r => r.CommandId).Should().Equal("refused");
+        await _store.RecordResultAttemptFailedAsync("refused", now);
+        (await _store.GetDueResultsAsync(now, 1)).Select(r => r.CommandId).Should().Equal("newer");
+    }
+
+    [Fact]
+    public async Task AbandonedResult_IsNoLongerRetried_AndItsRowIsPurgedWithTheHistory()
+    {
+        await Produce("old");
+        var later = DateTime.UtcNow.AddMinutes(1);
+        await Produce("recent");
+
+        (await _store.AbandonUndeliveredResultsAsync(DateTime.UtcNow.AddDays(-7), later)).Should().BeEmpty();
+        var abandoned = await _store.AbandonUndeliveredResultsAsync(later, later);
+        abandoned.Select(a => a.CommandId).Should().BeEquivalentTo(["old", "recent"]);
+        (await _store.AbandonUndeliveredResultsAsync(later, later)).Should().BeEmpty("only once");
+
+        (await _store.GetDueResultsAsync(later.AddDays(1), 50)).Should().BeEmpty();
+        (await _store.GetUnsentResultsAsync()).Should().BeEmpty();
+        (await _store.PurgeFinishedCommandsAsync(later)).Should().Be(2);
+        (await _store.SaveCommandAsync(Command("old"))).Should().BeFalse("its id is still remembered");
+    }
+
+    [Fact]
+    public async Task TrimRejections_KeepsTheNewest_AndReportsTheUndeliveredOnesDropped()
+    {
+        for (var i = 0; i < 5; i++)
+            await _store.TryRecordRejectedAsync(Command($"r{i}"), "Rejected: x");
+        await _store.MarkResultSentAsync("r0");
+        await Produce("executed"); // not a rejection: never trimmed
+
+        var trimmed = await _store.TrimRejectionsAsync(2);
+
+        trimmed.Deleted.Should().Be(3);
+        trimmed.Undelivered.Select(u => u.CommandId).Should().BeEquivalentTo(["r1", "r2"]);
+        _store.CountRejections().Should().Be(2);
+        (await _store.GetUnsentResultsAsync()).Select(r => r.CommandId).Should().BeEquivalentTo(["r3", "r4", "executed"]);
+        (await _store.TrimRejectionsAsync(2)).Deleted.Should().Be(0);
+        (await _store.TryRecordRejectedAsync(Command("r0"), "Rejected: y")).Should().BeFalse("its id is still remembered");
     }
 
     [Fact]

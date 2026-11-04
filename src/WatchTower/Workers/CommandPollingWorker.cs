@@ -99,7 +99,64 @@ public class CommandPollingWorker : BackgroundService
         await PollAndExecuteCommandsAsync(opts, ct);
         await ExecuteDueScheduledCommandsAsync(opts, ct);
         await RetryUnsentResultsAsync(ct);
+        await SettleUndeliverableResultsAsync(opts);
         await PurgeFinishedCommandsAsync(opts);
+    }
+
+    /// <summary>Results retried per cycle; due ones first, so a refused result cannot starve the rest.</summary>
+    internal const int MaxResultsPerCycle = 50;
+
+    /// <summary>
+    /// Rejected commands kept at most (newest first). A portal that keeps sending invalid
+    /// commands and refusing their results cannot grow the store without bound.
+    /// </summary>
+    internal const int DefaultMaxStoredRejections = 1_000;
+
+    /// <summary>See <see cref="DefaultMaxStoredRejections"/>; lowered by tests.</summary>
+    internal int MaxStoredRejections { get; init; } = DefaultMaxStoredRejections;
+
+    /// <summary>
+    /// Gives up on results that have waited longer than <see cref="CommandPollOptions.ResultRetryMaxHours"/>
+    /// and drops the oldest rejections beyond <see cref="MaxStoredRejections"/>. Both are logged.
+    /// </summary>
+    private async Task SettleUndeliverableResultsAsync(PortalOptions opts)
+    {
+        var maxHours = Math.Max(1, opts.CommandPoll.ResultRetryMaxHours);
+        try
+        {
+            foreach (var result in await _commandStore.AbandonUndeliveredResultsAsync(UtcNow - TimeSpan.FromHours(maxHours), UtcNow) ?? [])
+            {
+                _logger.LogWarning(
+                    "Gave up delivering the result of command {CommandId}: the portal did not accept it in {Attempts} " +
+                    "attempt(s) over {Hours} h (produced {ProducedAt})",
+                    result.CommandId, result.Attempts, maxHours, result.ProducedAt);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to give up on undeliverable command results");
+        }
+
+        try
+        {
+            var trimmed = await _commandStore.TrimRejectionsAsync(MaxStoredRejections);
+            if (trimmed is { Undelivered.Count: > 0 })
+            {
+                _logger.LogWarning(
+                    "More than {Max} rejected commands are stored; dropped the {Count} oldest, including {Undelivered} " +
+                    "whose result was never delivered (e.g. {CommandId})",
+                    MaxStoredRejections, trimmed.Deleted, trimmed.Undelivered.Count, trimmed.Undelivered[0].CommandId);
+            }
+            else if (trimmed is { Deleted: > 0 })
+            {
+                _logger.LogInformation(
+                    "More than {Max} rejected commands are stored; dropped the {Count} oldest", MaxStoredRejections, trimmed.Deleted);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to trim stored rejected commands");
+        }
     }
 
     /// <summary>
@@ -553,10 +610,11 @@ public class CommandPollingWorker : BackgroundService
     /// Reports a command result and marks it sent only when the portal confirms receipt.
     /// <see cref="IPortalClient.ReportCommandResultAsync"/> signals failure by returning
     /// <c>false</c> (it does not throw), so the result must stay pending in that case and be
-    /// picked up by <see cref="RetryUnsentResultsAsync"/>.
+    /// picked up by <see cref="RetryUnsentResultsAsync"/> once its backoff has passed.
     /// </summary>
-    private async Task<bool> ReportResultAsync(CommandResultDto result, CancellationToken ct)
+    private async Task<bool> ReportResultAsync(CommandResultDto result, CancellationToken ct, bool retry = false)
     {
+        Exception? error = null;
         try
         {
             if (await _portalClient.ReportCommandResultAsync(result, ct))
@@ -564,40 +622,68 @@ public class CommandPollingWorker : BackgroundService
                 await _commandStore.MarkResultSentAsync(result.CommandId);
                 return true;
             }
-
-            _logger.LogWarning(
-                "Portal did not accept the result for command {CommandId}; will retry", result.CommandId);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            _logger.LogWarning(ex,
-                "Failed to send result for command {CommandId}, will retry", result.CommandId);
+            error = ex;
         }
+
+        DateTime? next = null;
+        try
+        {
+            next = await _commandStore.RecordResultAttemptFailedAsync(result.CommandId, UtcNow);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to schedule the next attempt for the result of command {CommandId}", result.CommandId);
+        }
+
+        // Retries back off to one attempt per 30 minutes per result, so this stays quiet.
+        _logger.Log(retry ? LogLevel.Debug : LogLevel.Warning, error,
+            "Portal did not accept the result for command {CommandId}; next attempt at {NextAttempt}",
+            result.CommandId, next?.ToString("O") ?? "the next cycle");
         return false;
     }
 
     private async Task RetryUnsentResultsAsync(CancellationToken ct)
     {
+        IReadOnlyList<AgentCommandRecord> due;
         try
         {
-            var unsent = await _commandStore.GetUnsentResultsAsync();
-            foreach (var record in unsent)
-            {
-                if (ct.IsCancellationRequested) break;
-                if (record.ResultJson == null) continue;
-
-                var result = System.Text.Json.JsonSerializer.Deserialize<CommandResultDto>(
-                    record.ResultJson);
-                if (result == null) continue;
-
-                var sent = await _portalClient.ReportCommandResultAsync(result, ct);
-                if (sent)
-                    await _commandStore.MarkResultSentAsync(record.CommandId);
-            }
+            due = await _commandStore.GetDueResultsAsync(UtcNow, MaxResultsPerCycle) ?? [];
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "RetryUnsentResults encountered an error");
+            _logger.LogWarning(ex, "Failed to read the command results waiting for delivery");
+            return;
+        }
+
+        foreach (var record in due)
+        {
+            if (ct.IsCancellationRequested) break;
+            if (record.ResultJson == null) continue;
+
+            CommandResultDto? result;
+            try
+            {
+                result = JsonSerializer.Deserialize<CommandResultDto>(record.ResultJson);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "Stored result of command {CommandId} is unreadable", record.CommandId);
+                result = null;
+            }
+
+            if (result == null)
+            {
+                // Back off like a refused result; it is given up on after ResultRetryMaxHours.
+                try { await _commandStore.RecordResultAttemptFailedAsync(record.CommandId, UtcNow); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Failed to schedule the result of command {CommandId}", record.CommandId); }
+                continue;
+            }
+
+            // Isolated per result: one that throws must not keep the others from being sent.
+            await ReportResultAsync(result, ct, retry: true);
         }
     }
 }

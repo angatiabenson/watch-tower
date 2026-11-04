@@ -494,7 +494,8 @@ All configuration lives in `appsettings.json`. Every value supports **hot-reload
     "CommandPoll": {
       "MaxCommandAgeSeconds": 3600,    // Reject commands whose issuedAt is older (0 = no age check)
       "ClockSkewSeconds": 300,         // Tolerated clock difference for issuedAt
-      "RetentionDays": 30              // Keep finished commands and their results (0 = forever)
+      "RetentionDays": 30,             // Keep finished commands and their results (0 = forever)
+      "ResultRetryMaxHours": 168       // Give up on a result the portal keeps refusing after this long
     },
     "RequireCommandIssuedAt": false,   // true: reject commands without issuedAt ("Rejected: issuedAt is required")
     "CommandIdRetentionDays": 365,     // Never execute a command id seen within this window (0 = no age limit)
@@ -507,6 +508,12 @@ Every command id the agent receives (executed, failed, rejected or not authorize
 in `command_ids` before anything runs, in the same transaction that stores the command. A
 replayed id is never executed again while it is remembered, even after `RetentionDays` has
 purged the command and its result; an id is only forgotten once its command row is gone.
+
+A command result the portal does not accept is retried on its own schedule: 1, 2, 4, 8, 16 and
+then every 30 minutes, the longest-due first, so a result the portal keeps refusing never holds
+back the others (at most 50 are sent per poll). After `ResultRetryMaxHours` the agent gives up
+on it (logged as a warning) and the command is purged with the rest of the history. At most
+1000 rejected commands ("Rejected: …") are kept; older ones are dropped, delivered or not.
 
 ### Gmail Setup
 

@@ -36,7 +36,36 @@ public interface ICommandStore
     Task<bool> TryBeginExecutionAsync(string commandId);
     Task MarkCompletedAsync(string commandId, CommandResultDto result);
     Task MarkFailedAsync(string commandId, string error);
+
+    /// <summary>Every result waiting for delivery (not delivered, not abandoned), due or not.</summary>
     Task<IReadOnlyList<AgentCommandRecord>> GetUnsentResultsAsync();
+
+    /// <summary>
+    /// At most <paramref name="limit"/> results waiting for delivery whose next attempt is due at
+    /// <paramref name="nowUtc"/>, the longest-due first (not the oldest: a result the portal
+    /// keeps refusing waits out its backoff instead of blocking the others).
+    /// </summary>
+    Task<IReadOnlyList<AgentCommandRecord>> GetDueResultsAsync(DateTime nowUtc, int limit);
+
+    /// <summary>
+    /// Counts a failed attempt to deliver the result of <paramref name="commandId"/> and schedules
+    /// the next one after a backoff that doubles from 1 to at most 30 minutes. Returns when the
+    /// next attempt is due, or <c>null</c> if no result is waiting.
+    /// </summary>
+    Task<DateTime?> RecordResultAttemptFailedAsync(string commandId, DateTime nowUtc);
+
+    /// <summary>
+    /// Gives up on results still undelivered that were produced before <paramref name="producedBeforeUtc"/>:
+    /// they are no longer retried and their rows become eligible for <see cref="PurgeFinishedCommandsAsync"/>.
+    /// </summary>
+    Task<IReadOnlyList<UndeliveredResult>> AbandonUndeliveredResultsAsync(DateTime producedBeforeUtc, DateTime nowUtc);
+
+    /// <summary>
+    /// Deletes the oldest rejected commands beyond the newest <paramref name="keep"/>, whether
+    /// their result was delivered or not (their id stays remembered).
+    /// </summary>
+    Task<TrimmedRejections> TrimRejectionsAsync(int keep);
+
     Task MarkResultSentAsync(string commandId);
     Task<IReadOnlyList<AgentCommandRecord>> GetDueScheduledCommandsAsync();
 
@@ -47,11 +76,21 @@ public interface ICommandStore
     Task<IReadOnlyList<CommandResultDto>> FailInterruptedCommandsAsync(string message);
 
     /// <summary>
-    /// Deletes 'Completed'/'Failed' commands that finished before <paramref name="olderThanUtc"/>.
-    /// Returns the number of rows deleted.
+    /// Deletes 'Completed'/'Failed' commands that finished before <paramref name="olderThanUtc"/>
+    /// and whose result was delivered or abandoned. Returns the number of rows deleted.
     /// </summary>
     Task<int> PurgeFinishedCommandsAsync(DateTime olderThanUtc);
 }
+
+/// <summary>A command result that was never delivered.</summary>
+/// <param name="Attempts">Failed delivery attempts so far.</param>
+/// <param name="ProducedAt">When the result was produced (UTC, round-trip format).</param>
+public record UndeliveredResult(string CommandId, int Attempts, string ProducedAt);
+
+/// <summary>Outcome of <see cref="ICommandStore.TrimRejectionsAsync"/>.</summary>
+/// <param name="Deleted">Rejected commands deleted.</param>
+/// <param name="Undelivered">Those of them whose result had not been delivered.</param>
+public record TrimmedRejections(int Deleted, IReadOnlyList<UndeliveredResult> Undelivered);
 
 public record AgentCommandRecord(
     string CommandId,

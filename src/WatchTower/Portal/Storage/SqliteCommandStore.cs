@@ -33,7 +33,11 @@ public class SqliteCommandStore : ICommandStore, IDisposable
                 issued_at    TEXT,
                 acked_at     TEXT,
                 executed_at  TEXT,
-                result_json  TEXT
+                result_json  TEXT,
+                result_attempts         INTEGER NOT NULL DEFAULT 0,
+                result_next_attempt_utc TEXT,
+                result_abandoned_utc    TEXT,
+                rejected                INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_commands_status
                 ON agent_commands(status, received_at);
@@ -54,7 +58,73 @@ public class SqliteCommandStore : ICommandStore, IDisposable
                 SELECT command_id, received_at, status FROM agent_commands;
             ";
         cmd.ExecuteNonQuery();
+
+        // Databases created before result retries were scheduled per result.
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var info = conn.CreateCommand())
+        {
+            info.CommandText = "PRAGMA table_info(agent_commands)";
+            using var reader = info.ExecuteReader();
+            while (reader.Read())
+                columns.Add(reader.GetString(1));
+        }
+        foreach (var (column, definition) in new[]
+                 {
+                     ("result_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                     ("result_next_attempt_utc", "TEXT"),
+                     ("result_abandoned_utc", "TEXT"),
+                     ("rejected", "INTEGER NOT NULL DEFAULT 0"),
+                 })
+        {
+            if (columns.Contains(column))
+                continue;
+            using var alter = conn.CreateCommand();
+            alter.CommandText = $"ALTER TABLE agent_commands ADD COLUMN {column} {definition}";
+            alter.ExecuteNonQuery();
+
+            if (column == "rejected")
+            {
+                // Rejections recorded before the flag existed whose result is still waiting.
+                using var flag = conn.CreateCommand();
+                flag.CommandText =
+                    @"UPDATE agent_commands SET rejected = 1
+                      WHERE status = 'Failed' AND result_json IS NOT NULL
+                        AND CASE WHEN json_valid(result_json) THEN json_extract(result_json, '$.Message') END
+                            LIKE 'Rejected: %'";
+                flag.ExecuteNonQuery();
+            }
+        }
+
+        using var index = conn.CreateCommand();
+        index.CommandText =
+            @"CREATE INDEX IF NOT EXISTS idx_commands_results_due
+                ON agent_commands(result_next_attempt_utc)
+                WHERE result_json IS NOT NULL AND result_abandoned_utc IS NULL;
+              CREATE INDEX IF NOT EXISTS idx_commands_rejected
+                ON agent_commands(rejected, executed_at);";
+        index.ExecuteNonQuery();
     }
+
+    /// <summary>Delay before the first retry of an undelivered result; doubled after every failed attempt.</summary>
+    public static readonly TimeSpan ResultRetryBaseDelay = TimeSpan.FromMinutes(1);
+
+    /// <summary>Longest delay between two attempts to deliver the same result.</summary>
+    public static readonly TimeSpan ResultRetryMaxDelay = TimeSpan.FromMinutes(30);
+
+    /// <summary>1, 2, 4, 8, 16, 30, 30… minutes after the 1st, 2nd, 3rd… failed attempt.</summary>
+    public static TimeSpan ResultRetryDelay(int failedAttempts)
+    {
+        var doublings = Math.Clamp(failedAttempts - 1, 0, 30);
+        var delay = ResultRetryBaseDelay * Math.Pow(2, doublings);
+        return delay < ResultRetryMaxDelay ? delay : ResultRetryMaxDelay;
+    }
+
+    /// <summary>A result is waiting for delivery: stored, not delivered and not given up on.</summary>
+    private const string ResultPending = "result_json IS NOT NULL AND result_abandoned_utc IS NULL";
+
+    /// <summary>A fresh result starts its own retry schedule.</summary>
+    private const string ResetResultRetry =
+        "result_attempts = 0, result_next_attempt_utc = NULL, result_abandoned_utc = NULL";
 
     /// <summary>
     /// Records <paramref name="commandId"/> as seen. Returns <c>false</c> when it already was.
@@ -151,8 +221,8 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             cmd.CommandText =
                 @"INSERT OR IGNORE INTO agent_commands
                     (command_id, action_type, params_json, status, received_at, scheduled_at, issued_at,
-                     executed_at, result_json)
-                  VALUES (@id, @type, @params, 'Failed', @now, @scheduled, @issued, @now, @result)";
+                     executed_at, result_json, rejected)
+                  VALUES (@id, @type, @params, 'Failed', @now, @scheduled, @issued, @now, @result, 1)";
             var result = new CommandResultDto(command.CommandId, false, message, now);
             cmd.Parameters.AddWithValue("@id", command.CommandId);
             cmd.Parameters.AddWithValue("@type", command.ActionType);
@@ -228,8 +298,8 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText =
-                @"UPDATE agent_commands
-                  SET status='Completed', executed_at=@now, result_json=@result
+                $@"UPDATE agent_commands
+                  SET status='Completed', executed_at=@now, result_json=@result, {ResetResultRetry}
                   WHERE command_id=@id";
             cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
             cmd.Parameters.AddWithValue("@result", JsonSerializer.Serialize(result));
@@ -250,9 +320,9 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText =
-                @"UPDATE agent_commands
+                $@"UPDATE agent_commands
                   SET status='Failed', executed_at=@now,
-                      result_json=@result
+                      result_json=@result, {ResetResultRetry}
                   WHERE command_id=@id";
             var failResult = new CommandResultDto(commandId, false, error, DateTime.UtcNow.ToString("O"));
             cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
@@ -273,17 +343,155 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             using var conn = Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                @"SELECT command_id, action_type, params_json, status, received_at, scheduled_at, issued_at, result_json
+                $@"SELECT command_id, action_type, params_json, status, received_at, scheduled_at, issued_at, result_json
                   FROM agent_commands
-                  WHERE status IN ('Completed','Failed') AND result_json IS NOT NULL
-                  ORDER BY executed_at ASC
-                  LIMIT 50";
+                  WHERE status IN ('Completed','Failed') AND {ResultPending}
+                  ORDER BY COALESCE(result_next_attempt_utc, executed_at, received_at) ASC, rowid ASC";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
                 results.Add(ReadRecord(reader));
         }
         return Task.FromResult<IReadOnlyList<AgentCommandRecord>>(results);
+    }
+
+    public Task<IReadOnlyList<AgentCommandRecord>> GetDueResultsAsync(DateTime nowUtc, int limit)
+    {
+        var results = new List<AgentCommandRecord>();
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            // Ordered by when each result is due, not by age: a result the portal keeps refusing
+            // waits out its backoff and cannot hold back the results behind it.
+            cmd.CommandText =
+                $@"SELECT command_id, action_type, params_json, status, received_at, scheduled_at, issued_at, result_json
+                  FROM agent_commands
+                  WHERE status IN ('Completed','Failed') AND {ResultPending}
+                    AND (result_next_attempt_utc IS NULL OR result_next_attempt_utc <= @now)
+                  ORDER BY COALESCE(result_next_attempt_utc, executed_at, received_at) ASC, rowid ASC
+                  LIMIT @limit";
+            cmd.Parameters.AddWithValue("@now", nowUtc.ToUniversalTime().ToString("O"));
+            cmd.Parameters.AddWithValue("@limit", Math.Max(0, limit));
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(ReadRecord(reader));
+        }
+        return Task.FromResult<IReadOnlyList<AgentCommandRecord>>(results);
+    }
+
+    public Task<DateTime?> RecordResultAttemptFailedAsync(string commandId, DateTime nowUtc)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            using var read = conn.CreateCommand();
+            read.Transaction = tx;
+            read.CommandText = $"SELECT result_attempts FROM agent_commands WHERE command_id = @id AND {ResultPending}";
+            read.Parameters.AddWithValue("@id", commandId);
+            if (read.ExecuteScalar() is not long attempts)
+                return Task.FromResult<DateTime?>(null);
+
+            var next = nowUtc.ToUniversalTime() + ResultRetryDelay((int)Math.Min(attempts + 1, int.MaxValue));
+            using var update = conn.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText =
+                @"UPDATE agent_commands
+                  SET result_attempts = result_attempts + 1, result_next_attempt_utc = @next
+                  WHERE command_id = @id";
+            update.Parameters.AddWithValue("@id", commandId);
+            update.Parameters.AddWithValue("@next", next.ToString("O"));
+            update.ExecuteNonQuery();
+            tx.Commit();
+            return Task.FromResult<DateTime?>(next);
+        }
+    }
+
+    public Task<IReadOnlyList<UndeliveredResult>> AbandonUndeliveredResultsAsync(DateTime producedBeforeUtc, DateTime nowUtc)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            var abandoned = ReadUndelivered(conn, tx,
+                $@"SELECT command_id, result_attempts, COALESCE(executed_at, received_at) FROM agent_commands
+                   WHERE {ResultPending} AND COALESCE(executed_at, received_at) < @cutoff",
+                ("@cutoff", producedBeforeUtc.ToUniversalTime().ToString("O")));
+
+            using var update = conn.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = "UPDATE agent_commands SET result_abandoned_utc = @now WHERE command_id = @id";
+            update.Parameters.AddWithValue("@now", nowUtc.ToUniversalTime().ToString("O"));
+            var id = update.Parameters.Add("@id", SqliteType.Text);
+            foreach (var result in abandoned)
+            {
+                id.Value = result.CommandId;
+                update.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            return Task.FromResult<IReadOnlyList<UndeliveredResult>>(abandoned);
+        }
+    }
+
+    public Task<TrimmedRejections> TrimRejectionsAsync(int keep)
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+
+            // Rejected commands never ran: their row only carries the result, and their id row
+            // (command_ids) keeps them from being executed later, so the oldest can go.
+            const string Excess =
+                @"SELECT command_id FROM agent_commands WHERE rejected = 1
+                  ORDER BY COALESCE(executed_at, received_at) DESC, rowid DESC
+                  LIMIT -1 OFFSET @keep";
+            var keepValue = Math.Max(0, keep);
+
+            var undelivered = ReadUndelivered(conn, tx,
+                $@"SELECT command_id, result_attempts, COALESCE(executed_at, received_at) FROM agent_commands
+                   WHERE {ResultPending} AND command_id IN ({Excess})",
+                ("@keep", keepValue));
+
+            using var delete = conn.CreateCommand();
+            delete.Transaction = tx;
+            delete.CommandText = $"DELETE FROM agent_commands WHERE command_id IN ({Excess})";
+            delete.Parameters.AddWithValue("@keep", keepValue);
+            var deleted = delete.ExecuteNonQuery();
+
+            tx.Commit();
+            return Task.FromResult(new TrimmedRejections(deleted, undelivered));
+        }
+    }
+
+    private static List<UndeliveredResult> ReadUndelivered(
+        SqliteConnection conn, SqliteTransaction tx, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        foreach (var (name, value) in parameters)
+            cmd.Parameters.AddWithValue(name, value);
+        var results = new List<UndeliveredResult>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            results.Add(new UndeliveredResult(reader.GetString(0), reader.GetInt32(1), reader.GetString(2)));
+        return results;
+    }
+
+    /// <summary>Number of stored rejected commands. For tests and diagnostics.</summary>
+    internal int CountRejections()
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM agent_commands WHERE rejected = 1";
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
     }
 
     public Task MarkResultSentAsync(string commandId)
@@ -348,8 +556,8 @@ public class SqliteCommandStore : ICommandStore, IDisposable
                 using var update = conn.CreateCommand();
                 update.Transaction = tx;
                 update.CommandText =
-                    @"UPDATE agent_commands
-                      SET status = 'Failed', executed_at = @now, result_json = @result
+                    $@"UPDATE agent_commands
+                      SET status = 'Failed', executed_at = @now, result_json = @result, {ResetResultRetry}
                       WHERE command_id = @id AND status = 'Executing'";
                 update.Parameters.AddWithValue("@now", now);
                 update.Parameters.AddWithValue("@result", JsonSerializer.Serialize(result));
@@ -374,12 +582,13 @@ public class SqliteCommandStore : ICommandStore, IDisposable
             using var cmd = conn.CreateCommand();
             // executed_at/received_at are stored as UTC "O" strings, so lexicographic order is
             // chronological. Rows that never recorded executed_at fall back to received_at.
-            // Rows whose result has not been accepted by the portal yet (result_json still set)
-            // are kept: results are retried until delivered, however old they are.
+            // Rows whose result is still being retried are kept; once it was delivered or given
+            // up on (result_abandoned_utc), the row goes like any other, rejections included.
+            // The command id itself stays remembered in command_ids.
             cmd.CommandText =
                 @"DELETE FROM agent_commands
                   WHERE status IN ('Completed', 'Failed')
-                    AND result_json IS NULL
+                    AND (result_json IS NULL OR result_abandoned_utc IS NOT NULL)
                     AND COALESCE(executed_at, received_at) < @cutoff";
             cmd.Parameters.AddWithValue("@cutoff", olderThanUtc.ToUniversalTime().ToString("O"));
             return Task.FromResult(cmd.ExecuteNonQuery());
