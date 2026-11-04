@@ -47,6 +47,7 @@ Options (command-line `--Name value`, or environment variables):
 | `--PathBase` | none | Serve everything below a path prefix, e.g. `/watchtower`; the public URL then ends with it. Requests outside the prefix get 404, as they would behind a reverse proxy. |
 | `--AgentId` | `agent-01` | ID of the agent created at start-up. |
 | `--AdminKey` | random | Key for the `/admin` API. |
+| `--AcceptCompressedRequests` | `true` | Decode `Content-Encoding: gzip` and `br` request bodies and put `"acceptsGzip": true` in enrollment codes. `false` answers every compressed request 415, like a portal without support, to try the agent's fallback. |
 
 ### HTTPS
 
@@ -107,6 +108,10 @@ curl -s -X PUT -H "X-Admin-Key: $KEY" -H "Content-Type: application/json" \
   and compared in constant time; 401 with `WWW-Authenticate: Bearer` on failure.
 - Deduplication on `batchId`, `eventId` and `commandId`; 2xx for duplicates so the agent stops
   retrying.
+- Compressed request bodies (agents with `VisibilityPortal:CompressRequests=Gzip`): gzip and br
+  decoded before parsing, with the decompressed size capped at 16 MB (413 past it, so a small
+  body can't inflate without limit) and 400 for damaged data; 415 with `Accept-Encoding` for any
+  other encoding, which makes the agent resend uncompressed and stop compressing.
 - CPU and RAM samples stored by timestamp (also deduplicates batches from older agents without
   `batchId`); snapshots keep the newest reading even when an old batch arrives late, and are
   keyed case-insensitively (the agent may report a resource under a new letter case).

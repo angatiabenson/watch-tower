@@ -34,6 +34,7 @@ lines to search for:
 | `More than 1000 rejected commands are stored; dropped the N oldest ...` | The portal keeps sending commands the agent rejects; the oldest rejections (and their results, if undelivered) are deleted |
 | `Portal sends commands without issuedAt; replay protection is reduced. Update the portal.` | Commands without `issuedAt` (accepted; logged once per process or BaseUrl) |
 | `Portal redirected {path} to {Location}; update VisibilityPortal:BaseUrl. ...` | The portal answered 3xx; the call failed (at most once per 15 min per endpoint) |
+| `Portal does not accept compressed requests; sending uncompressed (the portal answered {status} to a compressed request) ...` | `CompressRequests=Gzip`, but the portal refused a gzip body (415, a 400 the plain body didn't get, or gRPC UNIMPLEMENTED). That request was resent uncompressed; compression stays off until a restart or a change of the setting or BaseUrl. Fix the portal or set `CompressRequests=Off` |
 | `Ignoring command without a CommandId` | Missing or wrongly cased `commandId` |
 | `Refusing unauthorized command ...` | Allow-list refusal (a result is sent) |
 | `Remote config version {v} failed validation: ...` | Configuration rejected (no acknowledgement) |

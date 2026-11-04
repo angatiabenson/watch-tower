@@ -192,6 +192,10 @@ public static class UiEndpoints
                 ["VisibilityPortal:AgentToken"] = System.Text.Json.JsonSerializer.SerializeToElement(code.Token),
                 ["VisibilityPortal:Tls:RequireTls"] = System.Text.Json.JsonSerializer.SerializeToElement(code.RequireTls),
             };
+            // Only ever turned on: a code that doesn't say acceptsGzip leaves the operator's choice.
+            if (code.AcceptsGzip)
+                changes["VisibilityPortal:CompressRequests"] =
+                    System.Text.Json.JsonSerializer.SerializeToElement(Configuration.RequestCompressionModes.Gzip);
             var result = await config.ApplyAsync(new ConfigUpdateRequest { Changes = changes }, ct);
             return result.Success
                 ? Results.Ok(new

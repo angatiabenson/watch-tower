@@ -188,6 +188,20 @@ public sealed class PortalOptions
 
     /// <summary>Upper bound on stored samples, events and batch ids per agent (memory safety).</summary>
     public int MaxItemsPerAgent { get; set; } = 10_000;
+
+    /// <summary>
+    /// Accept request bodies with <c>Content-Encoding: gzip</c> or <c>br</c> (agents send them with
+    /// <c>VisibilityPortal:CompressRequests=Gzip</c>) and say so in enrollment codes
+    /// (<c>acceptsGzip</c>). False answers every compressed request 415, like a portal without
+    /// support, which makes the agent fall back to uncompressed requests.
+    /// </summary>
+    public bool AcceptCompressedRequests { get; set; } = true;
+
+    /// <summary>
+    /// Largest request body after decompression; a larger one is refused with 413 before it is
+    /// parsed (a small compressed body can inflate to gigabytes). Same as the uncompressed limit.
+    /// </summary>
+    public long MaxDecompressedBodyBytes { get; set; } = MinimalPortalApp.MaxRequestBodyBytes;
 }
 
 /// <summary>
@@ -238,7 +252,9 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
 
     /// <summary>
     /// "WT1." + base64url (RFC 4648 §5, no padding) of the UTF-8 JSON
-    /// {"v":1,"url":…,"agentId":…,"token":…,"requireTls":…}.
+    /// {"v":1,"url":…,"agentId":…,"token":…,"requireTls":…,"acceptsGzip":true}. acceptsGzip is
+    /// optional (only when this portal accepts compressed requests); agents that know it turn on
+    /// VisibilityPortal:CompressRequests, older ones ignore it.
     /// </summary>
     public string EnrollmentCode(string agentId, string token, bool? requireTls)
     {
@@ -250,8 +266,10 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             ["agentId"] = agentId,
             ["token"] = token,
             ["requireTls"] = requireTls ?? url.StartsWith("https://", StringComparison.OrdinalIgnoreCase),
-        }.ToJsonString();
-        return "WT1." + Base64Url(Encoding.UTF8.GetBytes(json));
+        };
+        if (options.AcceptCompressedRequests)
+            json["acceptsGzip"] = true;
+        return "WT1." + Base64Url(Encoding.UTF8.GetBytes(json.ToJsonString()));
     }
 
     public AgentRecord? Find(string agentId) => _agents.GetValueOrDefault(agentId);
@@ -660,6 +678,83 @@ public static class PortalApi
     };
 
     private const string AgentItem = "watchtower.agent";
+
+    /// <summary>The request encodings this portal can read (besides identity).</summary>
+    public static readonly string[] RequestEncodings = ["gzip", "br"];
+
+    /// <summary>
+    /// Compressed request bodies (opt-in on the agent: VisibilityPortal:CompressRequests=Gzip).
+    /// Decodes Content-Encoding gzip or br before the body is parsed, refusing a body that
+    /// inflates past <see cref="PortalOptions.MaxDecompressedBodyBytes"/> with 413 and a damaged
+    /// one with 400. Any other encoding, or every one with AcceptCompressedRequests=false, gets
+    /// 415 with an Accept-Encoding header (RFC 7694): that 415 is what makes an agent resend the
+    /// request uncompressed and stop compressing, so a portal without support MUST answer it
+    /// rather than try to parse the compressed bytes.
+    /// </summary>
+    public static IApplicationBuilder UseRequestDecompression(this IApplicationBuilder app) => app.Use(async (context, next) =>
+    {
+        var header = context.Request.Headers.ContentEncoding.ToString().Trim();
+        if (header.Length == 0 || header.Equals("identity", StringComparison.OrdinalIgnoreCase))
+        {
+            await next(context);
+            return;
+        }
+
+        var options = context.RequestServices.GetRequiredService<PortalOptions>();
+        var encoding = header.ToLowerInvariant();
+        if (!options.AcceptCompressedRequests || !RequestEncodings.Contains(encoding))
+        {
+            context.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+            context.Response.Headers.AcceptEncoding = options.AcceptCompressedRequests
+                ? string.Join(", ", RequestEncodings)
+                : "identity";
+            await context.Response.WriteAsJsonAsync(new { error = $"Content-Encoding '{header}' is not supported" });
+            return;
+        }
+
+        // Buffered: simple for a sample. Kestrel's MaxRequestBodySize bounds the compressed body,
+        // MaxDecompressedBodyBytes the decoded one.
+        var raw = new MemoryStream();
+        await context.Request.Body.CopyToAsync(raw, context.RequestAborted);
+        raw.Position = 0;
+        var body = new MemoryStream();
+        try
+        {
+            await using Stream decoder = encoding == "gzip"
+                ? new System.IO.Compression.GZipStream(raw, System.IO.Compression.CompressionMode.Decompress, leaveOpen: true)
+                : new System.IO.Compression.BrotliStream(raw, System.IO.Compression.CompressionMode.Decompress, leaveOpen: true);
+            var chunk = new byte[81_920];
+            int read;
+            while ((read = await decoder.ReadAsync(chunk, context.RequestAborted)) > 0)
+            {
+                if (body.Length + read > options.MaxDecompressedBodyBytes)
+                {
+                    context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                    await context.Response.WriteAsJsonAsync(new
+                    {
+                        error = $"the decompressed body exceeds {options.MaxDecompressedBodyBytes} bytes",
+                    });
+                    return;
+                }
+                body.Write(chunk, 0, read);
+            }
+        }
+        catch (InvalidDataException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new { error = $"the body is not valid {encoding} data" });
+            return;
+        }
+
+        context.RequestServices.GetRequiredService<ILogger<PortalState>>().LogInformation(
+            "{Path}: {Encoding} body, {Compressed} bytes on the wire, {Decompressed} decoded",
+            context.Request.Path.Value, encoding, raw.Length, body.Length);
+        body.Position = 0;
+        context.Request.Body = body;
+        context.Request.Headers.ContentEncoding = Microsoft.Extensions.Primitives.StringValues.Empty;
+        context.Request.ContentLength = body.Length;
+        await next(context);
+    });
 
     public static void MapAgentApi(this IEndpointRouteBuilder app)
     {

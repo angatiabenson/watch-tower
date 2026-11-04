@@ -38,6 +38,9 @@ public static class Program
           --pools <a,b>              Locally watched application pools (default DefaultAppPool).
           --allow-portal-managed-targets  Let portal-pushed watch lists widen the command allow-list.
           --require-issued-at        Reject commands without issuedAt, like VisibilityPortal:RequireCommandIssuedAt.
+          --gzip                     Gzip metrics batches and events, like VisibilityPortal:CompressRequests=Gzip
+                                     (default: on when the enrollment code says acceptsGzip, as on the agent).
+          --no-gzip                  Send everything uncompressed even if the code says acceptsGzip.
           --verbose                  Log every HTTP request.
 
         Scenarios:
@@ -80,6 +83,10 @@ public static class Program
             AgentId = code.AgentId,
             AgentToken = code.Token,
             Tls = new TlsOptions { RequireTls = code.RequireTls },
+            // `WatchTower.exe enroll` turns compression on for a code with acceptsGzip; so does this.
+            CompressRequests = !opts.Has("no-gzip") && (opts.Has("gzip") || code.AcceptsGzip)
+                ? RequestCompressionModes.Gzip
+                : RequestCompressionModes.Off,
         };
 
         var settings = new SimulatorSettings
@@ -116,8 +123,8 @@ public static class Program
             ConfigInterval = TimeSpan.FromSeconds(opts.Int("config-interval", 30)),
         };
 
-        log.LogInformation("Agent '{AgentId}' -> {Url} (RequireTls={RequireTls}), scenario {Scenario}",
-            code.AgentId, code.Url, code.RequireTls, opts.Get("scenario") ?? "smoke");
+        log.LogInformation("Agent '{AgentId}' -> {Url} (RequireTls={RequireTls}, CompressRequests={Compress}), scenario {Scenario}",
+            code.AgentId, code.Url, code.RequireTls, portalOptions.CompressRequests, opts.Get("scenario") ?? "smoke");
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

@@ -22,6 +22,7 @@ agent speaks v1:
 | New action types | none until the portal sends them; older agents answer `Unknown action type` |
 | New optional properties in portal responses that the agent understands (commands, config) | none: older agents ignore them |
 | New remote-config fields | none; older agents ignore them |
+| Opt-in request encodings (`Content-Encoding: gzip`, after 1.0.20) | none unless the operator, or your enrollment code's `acceptsGzip`, turns it on; a portal that can't read it answers 415 and the agent falls back |
 | Behaviour changes inside the agent (thresholds, retry timings, descriptions) | none; they are not part of the contract |
 | Stricter agent-side checks of what a portal sends (command freshness, never re-executing a known command ID, configuration validation, the command allow-list, refusing redirects) | none for a portal that follows these docs; one that relied on the old leniency sees failed results, rejected configurations or failed deliveries. Listed under "Changed" in the [CHANGELOG](CHANGELOG.md) |
 
@@ -101,6 +102,17 @@ without answering it), validate remote configuration yourself (those agents chec
 values), and gate service and pool commands in the portal: 1.0.18 and older act on any name,
 and 1.0.19 accepts any name on a watch list your portal pushed.
 
+### After 1.0.20 (unreleased)
+
+| Feature | ≤ 1.0.20 | after-1.0.20 |
+| --- | --- | --- |
+| Gzip-compressed `metrics/batch` and `events` bodies (`Content-Encoding: gzip`; gRPC `grpc-encoding: gzip`), opt-in with `VisibilityPortal:CompressRequests=Gzip`, with the 415 fallback | ✗ (always plain JSON) | ✓ (off by default) |
+| `acceptsGzip` in enrollment codes turns compression on | ✗ (ignored like any unknown property) | ✓ |
+
+A portal can't tell from a request whether the agent would compress: it sees `Content-Encoding`
+only when compression is on. Put `"acceptsGzip": true` in codes only if you decode gzip; the same
+code works for older agents, which ignore the flag and keep sending plain JSON.
+
 ## The gRPC alternative
 
 An operator can set `VisibilityPortal:Protocol = Grpc`. The agent then calls the same seven
@@ -139,5 +151,10 @@ Differences from the JSON API:
 - **TLS**: same `RequireTls` rule. `Tls:AllowUntrustedCert` is honoured only by the gRPC transport
   and only outside the Production environment. HTTP/2 is required. `EnableMultipleHttp2Connections`
   is on.
+- **Compression** (after 1.0.20): with `CompressRequests=Gzip`, `SendMetricsBatch` and `SendEvent`
+  use gRPC message compression (`grpc-encoding: gzip`, compressed-flag set on the message), which
+  ASP.NET Core gRPC and most gRPC servers read out of the box. A server that doesn't answers
+  `UNIMPLEMENTED` with a message naming the encoding; the agent then resends the call once without
+  compression and stops compressing, as for an HTTPS 415.
 
 New v1 fields are added to both transports with new field numbers. Field numbers are never reused.

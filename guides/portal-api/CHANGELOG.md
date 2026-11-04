@@ -10,6 +10,29 @@ contract aren't listed. Versioning rules: [Versioning and compatibility](12-vers
 
 Everything here is marked `x-since: after-1.0.20` in the spec.
 
+### Added
+
+- Opt-in compressed request bodies. With the new agent option `VisibilityPortal:CompressRequests`
+  set to `Gzip` (default `Off`), `POST metrics/batch` and `POST events` carry
+  `Content-Encoding: gzip` (body: the gzip of the same JSON, still chunked). A typical batch
+  shrinks about five-fold. Acknowledgements and command results stay uncompressed. Over gRPC the
+  same option turns on `grpc-encoding: gzip` for `SendMetricsBatch` and `SendEvent`. Spec: the
+  `Content-Encoding` header parameter on both operations and "Compressed request bodies" in the
+  description.
+- Fallback for portals without support: a 415 to a compressed request (or a 400 that the same body
+  sent uncompressed doesn't get, before any compressed request was accepted; gRPC: `UNIMPLEMENTED`
+  for the encoding) is answered by one uncompressed resend, one warning and no compression until
+  the agent restarts or the setting or BaseUrl changes. A 413 is resent uncompressed once and
+  compression stays on. Portals without support SHOULD answer 415 and MUST NOT store a body they
+  could not read. Nothing changes for a portal whose agents keep the default.
+- `acceptsGzip` (optional boolean) in the enrollment code payload: `true` makes `enroll` and the
+  console's enrollment panel set `CompressRequests=Gzip`; absent or `false` leaves the setting
+  as it is. Agents up to 1.0.20 ignore it, so a code with it works for every agent.
+- MinimalPortal decodes gzip and br request bodies (decompressed size capped, 413 past it; 415
+  for other encodings, or for all of them with `--AcceptCompressedRequests false`) and puts
+  `acceptsGzip` in its codes. AgentSimulator follows the code's `acceptsGzip` and has `--gzip` and
+  `--no-gzip`.
+
 ## 1.0.20 (2026-11-04)
 
 Everything here is marked `x-since: 1.0.20` in the spec: 1.0.20 and later agents send it, 1.0.19

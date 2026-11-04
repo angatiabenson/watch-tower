@@ -10,6 +10,22 @@ public class PortalOptions
     public string BaseUrl { get; set; } = string.Empty;
     public string Protocol { get; set; } = "Https";
 
+    /// <summary>
+    /// <c>Off</c> (default) sends request bodies uncompressed. <c>Gzip</c> gzips the metrics
+    /// batches and events (HTTPS: <c>Content-Encoding: gzip</c>; gRPC: <c>grpc-encoding: gzip</c>);
+    /// the small acknowledgements and command results are always sent uncompressed. Only enable it
+    /// for a portal that accepts compressed requests: if the portal refuses one (HTTPS 415, or a 400
+    /// that the same body sent uncompressed does not get; gRPC UNIMPLEMENTED for the encoding), the
+    /// request is resent uncompressed and compression stays off until the next restart or change of
+    /// this setting or <see cref="BaseUrl"/>. A 413 to a compressed request is resent uncompressed
+    /// with compression left on. Enrollment codes with <c>acceptsGzip</c> set it to Gzip.
+    /// Case-insensitive.
+    /// </summary>
+    public string CompressRequests { get; set; } = RequestCompressionModes.Off;
+
+    /// <summary>True when <see cref="CompressRequests"/> asks for gzip.</summary>
+    public bool GzipRequests => RequestCompressionModes.IsGzip(CompressRequests);
+
     public TlsOptions Tls { get; set; } = new();
     public OutboxOptions Outbox { get; set; } = new();
     public CommandPollOptions CommandPoll { get; set; } = new();
@@ -32,6 +48,21 @@ public class PortalOptions
 
     /// <summary>At most this many command ids are remembered; the oldest are forgotten first. 0 removes the limit.</summary>
     public int CommandIdMaxCount { get; set; } = 200_000;
+}
+
+/// <summary>The values of <see cref="PortalOptions.CompressRequests"/>.</summary>
+public static class RequestCompressionModes
+{
+    public const string Off = "Off";
+    public const string Gzip = "Gzip";
+
+    public static IReadOnlyList<string> All { get; } = [Off, Gzip];
+
+    /// <summary>Empty counts as <see cref="Off"/>.</summary>
+    public static bool IsValid(string? value) =>
+        string.IsNullOrWhiteSpace(value) || All.Any(v => v.Equals(value.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsGzip(string? value) => Gzip.Equals(value?.Trim(), StringComparison.OrdinalIgnoreCase);
 }
 
 public class TlsOptions

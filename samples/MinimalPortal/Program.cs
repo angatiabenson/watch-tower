@@ -40,6 +40,9 @@ public static class Program
 
 public static class MinimalPortalApp
 {
+    /// <summary>Request body limit (Kestrel), and by default the limit after decompression.</summary>
+    public const long MaxRequestBodyBytes = 16 * 1024 * 1024;
+
     /// <summary>
     /// Builds the portal. Tests pass <paramref name="configure"/> to swap Kestrel for an in-memory
     /// TestServer; everything else is identical to what <c>dotnet run</c> serves.
@@ -54,8 +57,9 @@ public static class MinimalPortalApp
 
         // A default batch (500 CPU + 500 RAM samples plus snapshots) is well under 1 MB; the
         // agent's Outbox:MaxBatchSize can be raised by operators, so leave generous headroom.
-        // A 413 is a failure to the agent: it retries and finally drops the batch.
-        builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = 16 * 1024 * 1024);
+        // A 413 is a failure to the agent (a compressed request is resent uncompressed first): it
+        // retries and finally drops the batch.
+        builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = MaxRequestBodyBytes);
 
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
@@ -69,6 +73,10 @@ public static class MinimalPortalApp
         options.PublicUrl = builder.Configuration["PublicUrl"] ?? urls.Split(';')[0].TrimEnd('/') + pathBase;
         if (builder.Configuration["AdminKey"] is { Length: > 0 } adminKey)
             options.AdminKey = adminKey;
+        // AcceptCompressedRequests=false: refuse compressed requests with 415, as a portal without
+        // support does (to try the agent's fallback).
+        if (builder.Configuration["AcceptCompressedRequests"] is { Length: > 0 } acceptCompressed)
+            options.AcceptCompressedRequests = bool.Parse(acceptCompressed);
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(TimeProvider.System);
@@ -93,6 +101,7 @@ public static class MinimalPortalApp
             app.UsePathBase(pathBase);
             app.UseRouting(); // after UsePathBase, so routes match below the prefix
         }
+        app.UseRequestDecompression();
         app.MapGet("/", () => Results.Text(
             "WatchTower MinimalPortal. Agent API under /api/v1/agent/, admin API under /admin/ (see README.md)."));
         app.MapAgentApi();

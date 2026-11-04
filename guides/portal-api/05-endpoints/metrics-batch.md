@@ -32,6 +32,11 @@ Content-Type: application/json; charset=utf-8
 Transfer-Encoding: chunked
 ```
 
+With `VisibilityPortal:CompressRequests=Gzip` (opt-in, after 1.0.20) the request also carries
+`Content-Encoding: gzip` and the body is the gzip of the same JSON; a portal that can't read it
+answers 415 and the agent resends it uncompressed. See
+[Compressed request bodies](../04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020).
+
 No query parameters. Body from a current agent. Drive `D:\` is still listed but hasn't been
 read since 1 November (a fixed drive that is not ready), and the check `status-api` has been
 left misconfigured for over 10 minutes. Both keep their last reading, marked `isStale: true`:
@@ -167,6 +172,7 @@ Semantics, display and aggregation of every value: [Telemetry reference](../06-t
 | any 2xx (200, 201, 202, 204) | Delivered. The body is ignored. |
 | 401 | Failure; logged at Error ("Check AgentToken"). Retried as below. |
 | 3xx, 400, 403, 404, 413, 429, other 4xx, 5xx | Failure; logged at Warning with the status (redirects are not followed; the warning includes the `Location`). Retried as below. |
+| 415, 413, or 400 before any compressed request was accepted, to a **compressed** request | Resent once at once, uncompressed; that answer counts. 415 (and a 400 the uncompressed body doesn't get) switches compression off, see [Compressed request bodies](../04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020). |
 | timeout (30 s), DNS, TCP or TLS error | Failure; retried as below. |
 
 Retry: the first failed message ends the cycle (the rest stay queued without counting an

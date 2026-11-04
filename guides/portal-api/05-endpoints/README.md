@@ -30,6 +30,7 @@ The intervals are the agent's defaults. Operators can change them, and so can yo
 | other 4xx | failure, retried | as "nothing new" | ignored | failure, retried |
 | 5xx | failure, retried | as "nothing new" | ignored | failure, retried |
 | timeout (30 s), connection error | failure, retried | as "nothing new" | ignored | failure, retried |
+| 415 (413, early 400) to a compressed request | resent once uncompressed at once, then as above for that answer ([details](../04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020)) | (never compressed) | (never compressed) | (never compressed) |
 
 A 3xx (any, 304 included) is never followed. The agent logs at most once per 15 minutes per
 endpoint: `Portal redirected <path> to <absolute Location>; update VisibilityPortal:BaseUrl. The redirect

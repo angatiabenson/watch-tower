@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
 
+using WatchTower.Configuration;
+
 namespace WatchTower.Ui;
 
 /// <summary>Kinds of editor the UI renders for a field.</summary>
@@ -281,6 +283,11 @@ public static class ConfigSchema
             new("VisibilityPortal:AgentId", "Agent ID", FieldType.String, "Identifier issued by the portal for this server."),
             new("VisibilityPortal:AgentToken", "Agent token", FieldType.Secret, "Stored encrypted (Windows DPAPI)."),
             new("VisibilityPortal:Protocol", "Protocol", FieldType.Enum, Options: ["Https", "Grpc"], RestartRequired: true),
+            new("VisibilityPortal:CompressRequests", "Compress requests", FieldType.Enum,
+                "Gzip shrinks the metrics batches and events about five-fold. Only for a portal that accepts " +
+                "compressed requests; if it refuses one, the agent resends it uncompressed and stays uncompressed " +
+                "until this setting changes or the service restarts.",
+                Options: [.. RequestCompressionModes.All]),
             new("VisibilityPortal:RemoteConfig:Enabled", "Allow the portal to manage settings", FieldType.Bool,
                 "Portal-managed values override the ones set here.", RestartRequired: true),
             new("VisibilityPortal:Tls:RequireTls", "Require HTTPS (recommended)", FieldType.Bool,

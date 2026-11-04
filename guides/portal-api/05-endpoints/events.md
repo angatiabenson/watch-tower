@@ -21,6 +21,9 @@ Content-Type: application/json; charset=utf-8
 Transfer-Encoding: chunked
 ```
 
+With `VisibilityPortal:CompressRequests=Gzip` (opt-in, after 1.0.20) the request also carries
+`Content-Encoding: gzip`, as for [metrics batches](metrics-batch.md#request).
+
 An alert opening, with the busiest processes:
 
 <!-- schema: AgentEvent -->
@@ -101,6 +104,7 @@ A one-shot event (an alert key, no `resolved`):
 | --- | --- |
 | any 2xx | Delivered; body ignored. |
 | 401 | Failure, logged at Error; retried. |
+| 415, 413, or 400 before any compressed request was accepted, to a **compressed** request | Resent once at once, uncompressed; that answer counts. 415 (and a 400 the uncompressed body doesn't get) switches compression off, see [Compressed request bodies](../04-transport-and-security.md#compressed-request-bodies-opt-in-after-1020). |
 | any other status, timeout, network error | Failure, logged at Warning; retried. |
 
 Retry: exponential backoff per event, 30 s, 60 s, 120 s, ... capped at 15 minutes, **without an

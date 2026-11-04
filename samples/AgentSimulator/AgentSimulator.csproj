@@ -36,6 +36,7 @@
     <Compile Include="..\..\src\WatchTower\Portal\Clients\HttpsPortalClient.cs" Link="Agent\HttpsPortalClient.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Clients\IPortalClient.cs" Link="Agent\IPortalClient.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Clients\PortalTls.cs" Link="Agent\PortalTls.cs" />
+    <Compile Include="..\..\src\WatchTower\Portal\Clients\RequestCompression.cs" Link="Agent\RequestCompression.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Contracts\AgentEventDto.cs" Link="Agent\AgentEventDto.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Contracts\CommandDtos.cs" Link="Agent\CommandDtos.cs" />
     <Compile Include="..\..\src\WatchTower\Portal\Contracts\MetricsBatchDto.cs" Link="Agent\MetricsBatchDto.cs" />

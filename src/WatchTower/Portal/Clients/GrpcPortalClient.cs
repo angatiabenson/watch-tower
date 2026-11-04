@@ -10,19 +10,39 @@ using WatchTower.Portal.Contracts.Protobuf;
 
 namespace WatchTower.Portal.Clients;
 
+/// <remarks>
+/// With <c>CompressRequests=Gzip</c> the metrics batch and event calls are sent with
+/// <c>grpc-encoding: gzip</c> (gRPC's own message compression). A server that does not support the
+/// encoding answers UNIMPLEMENTED naming it, before running the call: the call is resent once
+/// uncompressed and compression is switched off (see <see cref="RequestCompression"/>).
+/// </remarks>
 public class GrpcPortalClient : IPortalClient, IDisposable
 {
     private const int DeadlineSeconds = 30;
+
+    /// <summary>Grpc.Net.Client's call header that selects the request message encoding.</summary>
+    internal const string RequestEncodingHeader = "grpc-internal-encoding-request";
 
     private readonly GrpcChannel _channel;
     private readonly WatchTowerPortalService.WatchTowerPortalServiceClient _client;
     private readonly IOptionsMonitor<PortalOptions> _options;
     private readonly ILogger<GrpcPortalClient> _logger;
+    private readonly RequestCompression _compression;
 
     public GrpcPortalClient(
         IOptionsMonitor<PortalOptions> options,
         IHostEnvironment environment,
         ILogger<GrpcPortalClient> logger)
+        : this(options, environment, logger, httpHandler: null)
+    {
+    }
+
+    /// <param name="httpHandler">Replaces the portal TLS handler (tests only).</param>
+    internal GrpcPortalClient(
+        IOptionsMonitor<PortalOptions> options,
+        IHostEnvironment environment,
+        ILogger<GrpcPortalClient> logger,
+        HttpMessageHandler? httpHandler)
     {
         _options = options;
         _logger = logger;
@@ -48,26 +68,66 @@ public class GrpcPortalClient : IPortalClient, IDisposable
 
         // Throws a descriptive InvalidOperationException if ClientCertThumbprint is set but the
         // certificate cannot be loaded, rather than silently connecting without mutual TLS.
-        var handler = PortalTls.CreateHandler(opts.Tls, allowUntrustedServerCert: opts.Tls.AllowUntrustedCert);
-        if (handler.SslOptions.ClientCertificates is { Count: > 0 })
-            _logger.LogInformation("Presenting client certificate {Thumbprint} to the portal (gRPC)",
-                PortalTls.NormalizeThumbprint(opts.Tls.ClientCertThumbprint!));
+        var handler = httpHandler;
+        if (handler is null)
+        {
+            var tlsHandler = PortalTls.CreateHandler(opts.Tls, allowUntrustedServerCert: opts.Tls.AllowUntrustedCert);
+            if (tlsHandler.SslOptions.ClientCertificates is { Count: > 0 })
+                _logger.LogInformation("Presenting client certificate {Thumbprint} to the portal (gRPC)",
+                    PortalTls.NormalizeThumbprint(opts.Tls.ClientCertThumbprint!));
+            handler = tlsHandler;
+        }
 
-        var channelOptions = new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true };
+        var channelOptions = new GrpcChannelOptions
+        {
+            HttpHandler = handler,
+            DisposeHttpClient = true,
+            CompressionProviders = [new Grpc.Net.Compression.GzipCompressionProvider(RequestCompression.Level)],
+        };
         _channel = GrpcChannel.ForAddress(opts.BaseUrl, channelOptions);
         _client = new WatchTowerPortalService.WatchTowerPortalServiceClient(_channel);
+        _compression = new RequestCompression(options, logger);
     }
+
+    /// <summary>
+    /// Runs a compressible call: gzip while compression is on; when the server refuses the
+    /// encoding, once more uncompressed (the refused call never ran, so nothing is duplicated).
+    /// </summary>
+    private async Task<TReply> CallCompressibleAsync<TReply>(Func<Metadata, Task<TReply>> call)
+    {
+        var gzip = _compression.Enabled;
+        try
+        {
+            var reply = await call(BuildMetadata(gzip));
+            if (gzip)
+                _compression.MarkAccepted();
+            return reply;
+        }
+        catch (RpcException ex) when (gzip && RefusesEncoding(ex))
+        {
+            _compression.Disable($"{ex.StatusCode} \"{ex.Status.Detail}\"");
+            return await call(BuildMetadata(compress: false));
+        }
+    }
+
+    /// <summary>gRPC servers answer an encoding they cannot read with UNIMPLEMENTED, naming the encoding.</summary>
+    private static bool RefusesEncoding(RpcException ex) =>
+        ex.StatusCode == StatusCode.Unimplemented &&
+        ex.Status.Detail?.Contains("encoding", StringComparison.OrdinalIgnoreCase) == true;
 
     private static DateTime Deadline() => DateTime.UtcNow.AddSeconds(DeadlineSeconds);
 
-    private Metadata BuildMetadata()
+    private Metadata BuildMetadata(bool compress = false)
     {
         var opts = _options.CurrentValue;
-        return new Metadata
+        var metadata = new Metadata
         {
             { "x-agent-id", opts.AgentId },
             { "authorization", $"Bearer {opts.AgentToken}" },
         };
+        if (compress)
+            metadata.Add(RequestEncodingHeader, "gzip");
+        return metadata;
     }
 
     private AgentIdentity BuildIdentity()
@@ -131,8 +191,8 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                 payload.EndpointStatuses.AddRange(endpoints.Select(ToProto));
 
             var req = new MetricsBatchRequest { Identity = BuildIdentity(), Batch = payload };
-            var reply = await _client.SendMetricsBatchAsync(req, headers: BuildMetadata(), deadline: Deadline(),
-                cancellationToken: ct);
+            var reply = await CallCompressibleAsync(metadata => _client.SendMetricsBatchAsync(
+                req, headers: metadata, deadline: Deadline(), cancellationToken: ct).ResponseAsync);
             return reply.Accepted;
         }
         catch (RpcException ex)
@@ -169,8 +229,8 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                     }));
 
             var req = new AgentEventRequest { Identity = BuildIdentity(), Event = protoEvt };
-            var reply = await _client.SendEventAsync(req, headers: BuildMetadata(), deadline: Deadline(),
-                cancellationToken: ct);
+            var reply = await CallCompressibleAsync(metadata => _client.SendEventAsync(
+                req, headers: metadata, deadline: Deadline(), cancellationToken: ct).ResponseAsync);
             return reply.Accepted;
         }
         catch (RpcException ex)
@@ -440,5 +500,10 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         };
     }
 
-    public void Dispose() => _channel.Dispose();
+    public void Dispose()
+    {
+        _compression.Dispose();
+        _channel.Dispose();
+        GC.SuppressFinalize(this);
+    }
 }

@@ -250,6 +250,15 @@ as a warning, because the token then travels unencrypted. An optional client cer
 `VisibilityPortal:Protocol` can switch to gRPC for portals that offer it (enrollment codes
 always use HTTPS/JSON).
 
+**Compressed requests** (`VisibilityPortal:CompressRequests`, console *Compress requests*):
+`Off` by default; `Gzip` gzips the metrics batches and events (`Content-Encoding: gzip`, or gRPC's
+`grpc-encoding: gzip`), about five times smaller (a typical 30-second batch goes from ~7 KB to
+~1.3 KB, ~21 MB to ~4 MB a day). Enrolling with a code that says `acceptsGzip` turns it on; no
+code turns it off. Only enable it for a portal that accepts compressed requests. If the portal
+refuses one (415), the agent resends it uncompressed, logs *Portal does not accept compressed
+requests; sending uncompressed* once and stays uncompressed until the service restarts or the
+setting changes; nothing is lost or sent twice.
+
 Portal commands: start, stop and restart services and pools (only those watched in the
 agent's own settings, unless `VisibilityPortal:CommandPoll:AllowPortalManagedTargets` is on;
 never WatchTower itself), recycle a pool, force a metrics snapshot or a configuration sync,

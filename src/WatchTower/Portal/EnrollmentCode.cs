@@ -7,9 +7,14 @@ namespace WatchTower.Portal;
 /// <summary>
 /// Pairing payload issued by the portal's "Add server" dialog, so connecting an agent is one
 /// paste instead of four settings. Format: <c>WT1.</c> + base64url (no padding) of UTF-8 JSON
-/// <c>{"v":1,"url":"…","agentId":"…","token":"…","requireTls":true}</c>.
+/// <c>{"v":1,"url":"…","agentId":"…","token":"…","requireTls":true,"acceptsGzip":true}</c>.
+/// Unknown properties are ignored, so a newer portal can add some without a new version.
 /// </summary>
-public sealed record EnrollmentCode(string Url, string AgentId, string Token, bool RequireTls)
+/// <param name="AcceptsGzip">
+/// Optional <c>acceptsGzip</c>: the portal accepts gzip-compressed request bodies. Only a JSON
+/// <c>true</c> counts; absent or any other value means "not said".
+/// </param>
+public sealed record EnrollmentCode(string Url, string AgentId, string Token, bool RequireTls, bool AcceptsGzip = false)
 {
     public const string Prefix = "WT1.";
 
@@ -25,6 +30,7 @@ public sealed record EnrollmentCode(string Url, string AgentId, string Token, bo
         int? version;
         string? url, agentId, token;
         bool? requireTlsField;
+        bool acceptsGzip;
         try
         {
             var payload = text[Prefix.Length..].Replace('-', '+').Replace('_', '/');
@@ -36,6 +42,7 @@ public sealed record EnrollmentCode(string Url, string AgentId, string Token, bo
             agentId = json["agentId"]?.GetValue<string>()?.Trim();
             token = json["token"]?.GetValue<string>()?.Trim();
             requireTlsField = json["requireTls"]?.GetValue<bool>();
+            acceptsGzip = json["acceptsGzip"] is JsonValue gzipValue && gzipValue.TryGetValue<bool>(out var gzip) && gzip;
         }
         catch (Exception ex) when (ex is FormatException or JsonException or InvalidOperationException)
         {
@@ -51,7 +58,7 @@ public sealed record EnrollmentCode(string Url, string AgentId, string Token, bo
             return Fail("The enrollment code is missing the agent ID or token.", out error);
 
         var requireTls = requireTlsField ?? uri.Scheme == Uri.UriSchemeHttps;
-        code = new EnrollmentCode(uri.AbsoluteUri.TrimEnd('/'), agentId, token, requireTls);
+        code = new EnrollmentCode(uri.AbsoluteUri.TrimEnd('/'), agentId, token, requireTls, acceptsGzip);
         return true;
     }
 
@@ -65,15 +72,22 @@ public sealed record EnrollmentCode(string Url, string AgentId, string Token, bo
             ["agentId"] = AgentId,
             ["token"] = Token,
             ["requireTls"] = RequireTls,
-        }.ToJsonString();
-        return Prefix + Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+        };
+        if (AcceptsGzip)
+            json["acceptsGzip"] = true;
+        var text = json.ToJsonString();
+        return Prefix + Convert.ToBase64String(Encoding.UTF8.GetBytes(text))
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
 
-    /// <summary>The operator-settings patch that connects this agent to the portal.</summary>
-    public JsonObject ToSettingsPatch() => new()
+    /// <summary>
+    /// The operator-settings patch that connects this agent to the portal. With
+    /// <see cref="AcceptsGzip"/> it also turns request compression on; without it
+    /// <c>CompressRequests</c> is left as it is, so a code never turns compression off.
+    /// </summary>
+    public JsonObject ToSettingsPatch()
     {
-        ["VisibilityPortal"] = new JsonObject
+        var portal = new JsonObject
         {
             ["Enabled"] = true,
             // Portals pair agents over the HTTPS/JSON transport; never leave an agent on gRPC.
@@ -82,8 +96,11 @@ public sealed record EnrollmentCode(string Url, string AgentId, string Token, bo
             ["AgentId"] = AgentId,
             ["AgentToken"] = Token,
             ["Tls"] = new JsonObject { ["RequireTls"] = RequireTls },
-        },
-    };
+        };
+        if (AcceptsGzip)
+            portal["CompressRequests"] = Configuration.RequestCompressionModes.Gzip;
+        return new JsonObject { ["VisibilityPortal"] = portal };
+    }
 
     private static bool Fail(string message, out string error)
     {

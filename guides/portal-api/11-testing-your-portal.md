@@ -17,6 +17,7 @@ sync. Run them if you change any of them.
 
 - [ ] MUST serve HTTP/1.1 over TLS 1.2+ with a certificate the agent's Windows trusts (or plain HTTP only for `requireTls: false` lab setups).
 - [ ] MUST accept chunked request bodies without `Content-Length`.
+- [ ] MUST answer 415 to a `Content-Encoding` it cannot read (never 2xx, never store the body). If it accepts `gzip`: MUST decode it before parsing, SHOULD cap the decompressed size (413), and MAY then put `"acceptsGzip": true` in enrollment codes. Test with `AgentSimulator --gzip`.
 - [ ] MUST NOT redirect agent API requests, and MUST NOT compress responses.
 - [ ] MUST serve the API under `BaseUrl` + `/api/v1/agent/` including any path prefix.
 - [ ] MUST authenticate `X-Agent-Id` + `Authorization: Bearer` on every request and answer 401 on failure.
