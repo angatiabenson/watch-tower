@@ -4,7 +4,14 @@ namespace WatchTower.Portal.Storage;
 
 public interface ICommandStore
 {
-    Task SaveCommandAsync(AgentCommandDto command);
+    /// <summary>
+    /// Records the command id as seen and, if it is new, stores the command as 'Received', in
+    /// one transaction, before anything executes it. A known id (see <see cref="PruneCommandIdsAsync"/>)
+    /// is never stored again, even after its command row has been purged. Returns <c>true</c>
+    /// while the command is waiting to be executed (new, or a re-delivery of one not claimed
+    /// yet); <c>false</c> when it is executing, finished, rejected or only remembered by id.
+    /// </summary>
+    Task<bool> SaveCommandAsync(AgentCommandDto command);
 
     /// <summary>
     /// Stores a command that is refused at receipt (for example a stale <c>issuedAt</c>) directly
@@ -13,6 +20,13 @@ public interface ICommandStore
     /// the command id is already known: a re-delivery must not overwrite the earlier outcome.
     /// </summary>
     Task<bool> TryRecordRejectedAsync(AgentCommandDto command, string message);
+
+    /// <summary>
+    /// Forgets remembered command ids first seen before <paramref name="seenBeforeUtc"/> (null:
+    /// no age limit), then the oldest ones beyond <paramref name="maxCount"/> (0 or less: no
+    /// limit). Ids whose command row still exists are kept. Returns the number forgotten.
+    /// </summary>
+    Task<int> PruneCommandIdsAsync(DateTime? seenBeforeUtc, int maxCount);
     Task<IReadOnlyList<AgentCommandRecord>> GetPendingCommandsAsync();
     /// <summary>
     /// Atomically transitions a command from Received/Acknowledged to Executing.

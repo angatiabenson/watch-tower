@@ -44,6 +44,7 @@ public class CommandPollingWorkerTests
         _handler.Setup(h => h.ExecuteAsync(It.IsAny<IReadOnlyDictionary<string, string>>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new ActionResult(true, "ok"));
 
+        _store.Setup(s => s.SaveCommandAsync(It.IsAny<AgentCommandDto>())).ReturnsAsync(true);
         _store.Setup(s => s.TryBeginExecutionAsync(It.IsAny<string>())).ReturnsAsync(true);
         _store.Setup(s => s.TryRecordRejectedAsync(It.IsAny<AgentCommandDto>(), It.IsAny<string>())).ReturnsAsync(true);
         _store.Setup(s => s.GetDueScheduledCommandsAsync()).ReturnsAsync(Array.Empty<AgentCommandRecord>());
@@ -404,5 +405,185 @@ public class CommandPollingWorkerTests
 
         _store.Verify(s => s.MarkFailedAsync("broken", It.Is<string>(m => m.Contains("unreadable"))), Times.Once);
         _store.Verify(s => s.MarkCompletedAsync("fine", It.IsAny<CommandResultDto>()), Times.Once);
+    }
+
+    private void SetOptions(Action<PortalOptions> configure)
+    {
+        var opts = new PortalOptions
+        {
+            Enabled = true,
+            CommandPoll = new CommandPollOptions { PollIntervalSeconds = 30, MaxCommandAgeSeconds = 3600 },
+        };
+        configure(opts);
+        _options.Setup(o => o.CurrentValue).Returns(opts);
+    }
+
+    [Theory]
+    [InlineData("", 3600)]
+    [InlineData(null, 3600)]
+    [InlineData("  ", 0)]
+    public async Task RequireCommandIssuedAt_RejectsCommandsWithoutIt(string? issuedAt, int maxAge)
+    {
+        SetOptions(o =>
+        {
+            o.RequireCommandIssuedAt = true;
+            o.CommandPoll.MaxCommandAgeSeconds = maxAge;
+        });
+        Poll(Command("c1") with { IssuedAt = issuedAt! }, Command("c2"));
+        ResultAccepted(true);
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _store.Verify(s => s.TryRecordRejectedAsync(
+            It.Is<AgentCommandDto>(c => c.CommandId == "c1"), "Rejected: issuedAt is required"), Times.Once);
+        _portal.Verify(p => p.ReportCommandResultAsync(
+            It.Is<CommandResultDto>(r => r.CommandId == "c1" && !r.Success && r.Message == "Rejected: issuedAt is required"),
+            It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.SaveCommandAsync(It.Is<AgentCommandDto>(c => c.CommandId == "c1")), Times.Never);
+        _store.Verify(s => s.MarkCompletedAsync("c1", It.IsAny<CommandResultDto>()), Times.Never);
+        // A command that carries issuedAt is unaffected.
+        _store.Verify(s => s.MarkCompletedAsync("c2", It.IsAny<CommandResultDto>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task KnownCommand_IsAcknowledgedButNotExecuted()
+    {
+        _store.Setup(s => s.SaveCommandAsync(It.IsAny<AgentCommandDto>())).ReturnsAsync(false);
+        Poll(Command("c1"));
+
+        await CreateWorker().RunCycleAsync(CancellationToken.None);
+
+        _portal.Verify(p => p.AcknowledgeCommandAsync(It.Is<AcknowledgeCommandDto>(a => a.CommandId == "c1"), It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.TryBeginExecutionAsync(It.IsAny<string>()), Times.Never);
+        _store.Verify(s => s.MarkFailedAsync(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        _handler.Verify(h => h.ExecuteAsync(It.IsAny<IReadOnlyDictionary<string, string>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CommandIds_ArePrunedHourly_WithTheConfiguredWindowAndCap()
+    {
+        SetOptions(o =>
+        {
+            o.CommandIdRetentionDays = 100;
+            o.CommandIdMaxCount = 5000;
+        });
+        Poll();
+        var worker = CreateWorker();
+
+        await worker.RunCycleAsync(CancellationToken.None);
+        await worker.RunCycleAsync(CancellationToken.None);
+        _store.Verify(s => s.PruneCommandIdsAsync(Now - TimeSpan.FromDays(100), 5000), Times.Once);
+
+        // No age limit: only the cap applies. Pruned even when the result retention is off.
+        SetOptions(o =>
+        {
+            o.CommandIdRetentionDays = 0;
+            o.CommandPoll.RetentionDays = 0;
+        });
+        _time.Advance(CommandPollingWorker.PurgeInterval);
+        await worker.RunCycleAsync(CancellationToken.None);
+        _store.Verify(s => s.PruneCommandIdsAsync(null, 200_000), Times.Once);
+    }
+
+    private sealed class TempDb : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"watchtower_cmd_{Guid.NewGuid()}.db");
+
+        public void Dispose()
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            foreach (var ext in new[] { "", "-wal", "-shm" })
+            {
+                try { File.Delete(Path + ext); } catch (IOException) { /* best effort */ }
+            }
+        }
+    }
+
+    private CommandPollingWorker RealStoreWorker(ICommandStore store) => new(
+        _portal.Object, store,
+        new ActionHandlerRegistry(new[] { _handler.Object }, NullLogger<ActionHandlerRegistry>.Instance),
+        _options.Object, _serviceOptions.Object, _poolOptions.Object, _time, NullLogger<CommandPollingWorker>.Instance);
+
+    private int Executions() => _handler.Invocations.Count(i => i.Method.Name == nameof(IActionHandler.ExecuteAsync));
+
+    [Fact]
+    public async Task RealStore_ReplayWithoutIssuedAt_AfterResultRetention_IsNotExecutedAgain()
+    {
+        using var db = new TempDb();
+        var store = new SqliteCommandStore(db.Path);
+        ResultAccepted(true);
+
+        Poll(Command("legacy") with { IssuedAt = null! });
+        await RealStoreWorker(store).RunCycleAsync(CancellationToken.None);
+        Executions().Should().Be(1);
+
+        // The default 30-day result retention deletes the finished command row...
+        (await store.PurgeFinishedCommandsAsync(DateTime.UtcNow.AddMinutes(1))).Should().Be(1);
+
+        // ...and the same id replayed without issuedAt (so no age check applies) is still known.
+        _portal.Invocations.Clear();
+        await RealStoreWorker(new SqliteCommandStore(db.Path)).RunCycleAsync(CancellationToken.None);
+
+        Executions().Should().Be(1, "a command id is never executed twice");
+        _portal.Verify(p => p.ReportCommandResultAsync(It.IsAny<CommandResultDto>(), It.IsAny<CancellationToken>()), Times.Never);
+        (await store.TryBeginExecutionAsync("legacy")).Should().BeFalse("no command row was stored again");
+        store.GetCommandIdOutcome("legacy").Should().Be("Completed");
+    }
+
+    /// <summary>Delegates to a real store but throws right after <see cref="CrashAfter"/> succeeded, like a crash.</summary>
+    private sealed class CrashingStore(SqliteCommandStore inner) : ICommandStore
+    {
+        public string? CrashAfter { get; set; }
+
+        private async Task<T> Then<T>(string method, Task<T> call)
+        {
+            var result = await call;
+            if (CrashAfter == method)
+                throw new InvalidOperationException($"simulated crash after {method}");
+            return result;
+        }
+
+        public Task<bool> SaveCommandAsync(AgentCommandDto command) => Then(nameof(SaveCommandAsync), inner.SaveCommandAsync(command));
+        public Task<bool> TryRecordRejectedAsync(AgentCommandDto command, string message) => inner.TryRecordRejectedAsync(command, message);
+        public Task<int> PruneCommandIdsAsync(DateTime? seenBeforeUtc, int maxCount) => inner.PruneCommandIdsAsync(seenBeforeUtc, maxCount);
+        public Task<IReadOnlyList<AgentCommandRecord>> GetPendingCommandsAsync() => inner.GetPendingCommandsAsync();
+        public Task<bool> TryBeginExecutionAsync(string commandId) => Then(nameof(TryBeginExecutionAsync), inner.TryBeginExecutionAsync(commandId));
+        public Task MarkCompletedAsync(string commandId, CommandResultDto result) => inner.MarkCompletedAsync(commandId, result);
+        public Task MarkFailedAsync(string commandId, string error) => inner.MarkFailedAsync(commandId, error);
+        public Task<IReadOnlyList<AgentCommandRecord>> GetUnsentResultsAsync() => inner.GetUnsentResultsAsync();
+        public Task MarkResultSentAsync(string commandId) => inner.MarkResultSentAsync(commandId);
+        public Task<IReadOnlyList<AgentCommandRecord>> GetDueScheduledCommandsAsync() => inner.GetDueScheduledCommandsAsync();
+        public Task<IReadOnlyList<CommandResultDto>> FailInterruptedCommandsAsync(string message) => inner.FailInterruptedCommandsAsync(message);
+        public Task<int> PurgeFinishedCommandsAsync(DateTime olderThanUtc) => inner.PurgeFinishedCommandsAsync(olderThanUtc);
+    }
+
+    [Theory]
+    [InlineData(nameof(ICommandStore.TryBeginExecutionAsync), 0, "claimed, then the agent died before the action ran")]
+    [InlineData(nameof(ICommandStore.SaveCommandAsync), 1, "recorded but never claimed: its first and only execution")]
+    public async Task RealStore_CrashBetweenRecordAndExecute_NeverLeadsToADoubleExecution(
+        string crashAfter, int expectedExecutions, string because)
+    {
+        using var db = new TempDb();
+        ResultAccepted(true);
+        var command = Command("c1") with { IssuedAt = null! };
+        Poll(command);
+
+        // First process: records the command, then "crashes" before executing it.
+        var crashing = new CrashingStore(new SqliteCommandStore(db.Path)) { CrashAfter = crashAfter };
+        await RealStoreWorker(crashing).RunCycleAsync(CancellationToken.None);
+        Executions().Should().Be(0);
+
+        // Restarted process; the portal replays the same command on every poll.
+        var store = new SqliteCommandStore(db.Path);
+        var restarted = RealStoreWorker(store);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        await restarted.RunCycleAsync(CancellationToken.None);
+        Executions().Should().Be(expectedExecutions, because);
+
+        // Still not after the result retention removed the command row.
+        await store.PurgeFinishedCommandsAsync(DateTime.UtcNow.AddMinutes(1));
+        await RealStoreWorker(new SqliteCommandStore(db.Path)).RunCycleAsync(CancellationToken.None);
+        Executions().Should().Be(expectedExecutions, because);
+        store.GetCommandIdOutcome("c1").Should().Be(expectedExecutions == 0 ? "Failed" : "Completed");
     }
 }

@@ -487,9 +487,26 @@ All configuration lives in `appsettings.json`. Every value supports **hot-reload
   },
 
   // Maintenance window (see "Maintenance windows")
-  "Maintenance": { "Until": "", "Reason": "" }
+  "Maintenance": { "Until": "", "Reason": "" },
+
+  // Visibility Portal: commands (connection settings omitted; see "Build your own portal")
+  "VisibilityPortal": {
+    "CommandPoll": {
+      "MaxCommandAgeSeconds": 3600,    // Reject commands whose issuedAt is older (0 = no age check)
+      "ClockSkewSeconds": 300,         // Tolerated clock difference for issuedAt
+      "RetentionDays": 30              // Keep finished commands and their results (0 = forever)
+    },
+    "RequireCommandIssuedAt": false,   // true: reject commands without issuedAt ("Rejected: issuedAt is required")
+    "CommandIdRetentionDays": 365,     // Never execute a command id seen within this window (0 = no age limit)
+    "CommandIdMaxCount": 200000        // ...and remember at most this many ids, oldest forgotten first (0 = no limit)
+  }
 }
 ```
+
+Every command id the agent receives (executed, failed, rejected or not authorized) is recorded
+in `command_ids` before anything runs, in the same transaction that stores the command. A
+replayed id is never executed again while it is remembered, even after `RetentionDays` has
+purged the command and its result; an id is only forgotten once its command row is gone.
 
 ### Gmail Setup
 

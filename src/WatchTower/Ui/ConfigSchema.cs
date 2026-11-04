@@ -288,6 +288,15 @@ public static class ConfigSchema
             new("VisibilityPortal:RemoteConfig:PollIntervalSeconds", "Fetch remote settings every (s)", FieldType.Int, null, 1, 86_400, Advanced: true),
             new("VisibilityPortal:CommandPoll:MaxCommandAgeSeconds", "Reject commands older than (s)", FieldType.Int,
                 "Replay protection. 0 disables.", 0, 86_400, Advanced: true),
+            new("VisibilityPortal:RequireCommandIssuedAt", "Require issuedAt on commands", FieldType.Bool,
+                "On: commands without an issuedAt time are rejected (\"Rejected: issuedAt is required\"). " +
+                "Off: they are accepted for older portals; their age cannot be checked, but a command id is never run twice.",
+                Advanced: true),
+            new("VisibilityPortal:CommandIdRetentionDays", "Remember command ids for (days)", FieldType.Int,
+                "A replayed command id is never executed again while it is remembered, even after its history is purged. " +
+                "0 removes the age limit.", 0, 3_650, Advanced: true),
+            new("VisibilityPortal:CommandIdMaxCount", "Remember at most (command ids)", FieldType.Int,
+                "The oldest ids are forgotten first. 0 removes the limit.", 0, 10_000_000, Advanced: true),
             new("VisibilityPortal:CommandPoll:AllowPortalManagedTargets", "Let the portal choose command targets", FieldType.Bool,
                 "Off: portal commands may only start/stop services and pools watched in THIS server's settings. On: lists pushed by the portal count too.",
                 Advanced: true),

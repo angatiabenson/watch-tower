@@ -131,20 +131,40 @@ public class CommandPollingWorker : BackgroundService
 
     private async Task PurgeFinishedCommandsAsync(PortalOptions opts)
     {
-        var retentionDays = opts.CommandPoll.RetentionDays;
-        if (retentionDays <= 0 || UtcNow - _lastPurge < PurgeInterval)
+        if (UtcNow - _lastPurge < PurgeInterval)
             return;
 
         _lastPurge = UtcNow;
+        var retentionDays = opts.CommandPoll.RetentionDays;
+        if (retentionDays > 0)
+        {
+            try
+            {
+                var purged = await _commandStore.PurgeFinishedCommandsAsync(UtcNow - TimeSpan.FromDays(retentionDays));
+                if (purged > 0)
+                    _logger.LogInformation("Purged {Count} finished command(s) older than {Days} days", purged, retentionDays);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to purge finished commands");
+            }
+        }
+
+        // The remembered ids outlive the command rows (replay protection) but are bounded too.
         try
         {
-            var purged = await _commandStore.PurgeFinishedCommandsAsync(UtcNow - TimeSpan.FromDays(retentionDays));
-            if (purged > 0)
-                _logger.LogInformation("Purged {Count} finished command(s) older than {Days} days", purged, retentionDays);
+            DateTime? seenBefore = opts.CommandIdRetentionDays > 0
+                ? UtcNow - TimeSpan.FromDays(opts.CommandIdRetentionDays)
+                : null;
+            var forgotten = await _commandStore.PruneCommandIdsAsync(seenBefore, opts.CommandIdMaxCount);
+            if (forgotten > 0)
+                _logger.LogInformation(
+                    "Forgot {Count} command id(s) seen more than {Days} days ago or beyond the newest {Max}",
+                    forgotten, opts.CommandIdRetentionDays, opts.CommandIdMaxCount);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to purge finished commands");
+            _logger.LogWarning(ex, "Failed to prune remembered command ids");
         }
     }
 
@@ -204,17 +224,20 @@ public class CommandPollingWorker : BackgroundService
         // Replay protection: reject stale or future commands at receipt, before they are stored
         // for execution or acknowledged; the portal gets a failed result with the reason.
         // Validated on IssuedAt, not ScheduledAt, so legitimately deferred commands
-        // (recent IssuedAt, future ScheduledAt) still pass. A missing IssuedAt is accepted.
+        // (recent IssuedAt, future ScheduledAt) still pass. A missing IssuedAt is accepted unless
+        // VisibilityPortal:RequireCommandIssuedAt is set.
         if (!IsFresh(command, opts, out var freshnessReason))
         {
             await RejectAsync(command, freshnessReason, ct);
             return;
         }
 
-        // INSERT OR IGNORE: duplicate delivery is silently discarded
-        await _commandStore.SaveCommandAsync(command);
+        // Records the id before anything runs; a known id is never stored (or executed) again,
+        // even once its command row has been purged by the result retention.
+        var pending = await _commandStore.SaveCommandAsync(command);
 
-        // Acknowledge receipt immediately (fire-and-forget on failure)
+        // Acknowledge receipt immediately (fire-and-forget on failure). Re-deliveries are
+        // acknowledged too: the portal may re-send a command because the first ack was lost.
         try
         {
             var ack = new AcknowledgeCommandDto(command.CommandId, UtcNow.ToString("O"));
@@ -225,6 +248,14 @@ public class CommandPollingWorker : BackgroundService
             _logger.LogWarning(ex,
                 "Failed to acknowledge command {CommandId} to portal (non-fatal)",
                 command.CommandId);
+        }
+
+        if (!pending)
+        {
+            _logger.LogDebug(
+                "Command {CommandId} (ActionType={ActionType}) was received before; not executing it again",
+                command.CommandId, command.ActionType);
+            return;
         }
 
         // Check scheduled execution (parse as UTC regardless of portal formatting)
@@ -407,9 +438,17 @@ public class CommandPollingWorker : BackgroundService
     /// </summary>
     private string? _missingIssuedAtWarnedFor;
 
+    internal const string IssuedAtRequiredReason = "issuedAt is required";
+
     private bool IsFresh(AgentCommandDto command, PortalOptions opts, out string reason)
     {
         reason = string.Empty;
+        if (opts.RequireCommandIssuedAt && string.IsNullOrWhiteSpace(command.IssuedAt))
+        {
+            reason = IssuedAtRequiredReason;
+            return false;
+        }
+
         var maxAge = opts.CommandPoll.MaxCommandAgeSeconds;
         if (maxAge <= 0)
             return true; // freshness check disabled
@@ -417,8 +456,9 @@ public class CommandPollingWorker : BackgroundService
         if (string.IsNullOrWhiteSpace(command.IssuedAt))
         {
             // Portals written before issuedAt existed never send it. Accept such commands so they
-            // keep working; the per-command-id duplicate check still applies, only the age check
-            // cannot. Warn once so the operator knows the protection is reduced.
+            // keep working; the per-command-id duplicate check (remembered for
+            // CommandIdRetentionDays) still applies, only the age check cannot. Warn once so the
+            // operator knows the protection is reduced.
             if (!string.Equals(_missingIssuedAtWarnedFor, opts.BaseUrl, StringComparison.OrdinalIgnoreCase))
             {
                 _missingIssuedAtWarnedFor = opts.BaseUrl;

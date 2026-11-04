@@ -14,6 +14,24 @@ public class PortalOptions
     public OutboxOptions Outbox { get; set; } = new();
     public CommandPollOptions CommandPoll { get; set; } = new();
     public RemoteConfigOptions RemoteConfig { get; set; } = new();
+
+    /// <summary>
+    /// When true, commands without <c>issuedAt</c> are rejected ("Rejected: issuedAt is
+    /// required"). False (default) accepts them, for portals written before <c>issuedAt</c>
+    /// existed; their age cannot be checked, but a command id is still never executed twice.
+    /// </summary>
+    public bool RequireCommandIssuedAt { get; set; }
+
+    /// <summary>
+    /// How long every command id seen (executed, failed, rejected or not authorized) is
+    /// remembered so a replay of it is never executed, independently of
+    /// <see cref="CommandPollOptions.RetentionDays"/>. 0 removes the age limit
+    /// (<see cref="CommandIdMaxCount"/> still applies).
+    /// </summary>
+    public int CommandIdRetentionDays { get; set; } = 365;
+
+    /// <summary>At most this many command ids are remembered; the oldest are forgotten first. 0 removes the limit.</summary>
+    public int CommandIdMaxCount { get; set; } = 200_000;
 }
 
 public class TlsOptions
