@@ -1,5 +1,8 @@
 using System.Text.Json;
 
+using Microsoft.Extensions.Options;
+
+using WatchTower.Configuration;
 using WatchTower.Hosting;
 using WatchTower.Portal.Contracts;
 using WatchTower.Portal.Storage;
@@ -8,8 +11,13 @@ namespace WatchTower.Portal.Actions.Handlers;
 
 public class ApplyConfigurationHandler : IActionHandler
 {
+    /// <summary>The result when the operator turned off portal-managed settings.</summary>
+    public const string DisabledMessage =
+        "Rejected: this server does not let the portal manage its settings (VisibilityPortal:RemoteConfig:Enabled is false)";
+
     private readonly IRemoteConfigStore _configStore;
     private readonly WatchTowerPaths _paths;
+    private readonly IOptionsMonitor<PortalOptions> _portal;
     private readonly ILogger<ApplyConfigurationHandler> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -22,16 +30,26 @@ public class ApplyConfigurationHandler : IActionHandler
     public ApplyConfigurationHandler(
         IRemoteConfigStore configStore,
         WatchTowerPaths paths,
+        IOptionsMonitor<PortalOptions> portal,
         ILogger<ApplyConfigurationHandler> logger)
     {
         _configStore = configStore;
         _paths = paths;
+        _portal = portal;
         _logger = logger;
     }
 
     public async Task<ActionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, CancellationToken ct)
     {
+        // "Allow the portal to manage settings" covers both ways the portal can push settings:
+        // config polling and this command.
+        if (!_portal.CurrentValue.RemoteConfig.Enabled)
+        {
+            _logger.LogWarning("ApplyConfiguration refused: the portal may not manage this server's settings");
+            return new ActionResult(false, DisabledMessage);
+        }
+
         if (!parameters.TryGetValue("ConfigJson", out var configJson) ||
             string.IsNullOrWhiteSpace(configJson))
             return new ActionResult(false, "Missing ConfigJson parameter");

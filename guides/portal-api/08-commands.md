@@ -273,7 +273,9 @@ when the download starts. Follow the rest in the batches: `agent.updatePhase`
 
 ### 401 ApplyConfiguration
 
-Pushes a remote configuration through the command channel instead of `GET config`.
+Pushes a remote configuration through the command channel instead of `GET config`. Refused when
+the operator turned off portal-managed settings (`VisibilityPortal:RemoteConfig:Enabled = false`),
+the same switch that stops config polling (agents after 1.0.19; earlier ones applied it anyway).
 
 - `ConfigJson` (required): a **string** containing a JSON [remote configuration](09-remote-config.md)
   object, camelCase and case-sensitive like `GET config`.
@@ -287,7 +289,7 @@ Pushes a remote configuration through the command channel instead of `GET config
 | `success` | `message` |
 | --- | --- |
 | true | `Configuration applied (version <Version>)` |
-| false | `Missing ConfigJson parameter`, `Invalid ConfigJson: <parser error>`, `ConfigJson deserialised to null` |
+| false | `Rejected: this server does not let the portal manage its settings (VisibilityPortal:RemoteConfig:Enabled is false)`, `Missing ConfigJson parameter`, `Invalid ConfigJson: <parser error>`, `ConfigJson deserialised to null` |
 | false | the first validation error, e.g. `Cpu.ThresholdPercent must be between 1 and 100` |
 
 The applied version is then acknowledged through
