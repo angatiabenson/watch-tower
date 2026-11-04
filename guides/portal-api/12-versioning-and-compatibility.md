@@ -151,6 +151,16 @@ Differences from the JSON API:
 - **TLS**: same `RequireTls` rule. `Tls:AllowUntrustedCert` is honoured only by the gRPC transport
   and only outside the Production environment. HTTP/2 is required. `EnableMultipleHttp2Connections`
   is on.
+- **Settings changes** (after 1.0.20): a change of BaseUrl, agent id, token or any `Tls` setting
+  while the agent runs applies from the next call. The agent opens a new channel for the new
+  settings and closes the old one once the calls still running on it have finished (they finish
+  on their old portal, with its credentials). The metadata, the `AgentIdentity` and the
+  destination of a call always come from one snapshot of the settings, and the credentials are
+  only sent to that snapshot's BaseUrl origin (scheme, host and port). If the new settings can't
+  be connected with (for example `http://` under `RequireTls`), calls fail unsent and are retried
+  until they're fixed; the agent never falls back to the old channel. Up to 1.0.20 the channel
+  was built once at startup, so after a BaseUrl change calls kept going to the old portal, with
+  the new token.
 - **Compression** (after 1.0.20): with `CompressRequests=Gzip`, `SendMetricsBatch` and `SendEvent`
   use gRPC message compression (`grpc-encoding: gzip`, compressed-flag set on the message), which
   ASP.NET Core gRPC and most gRPC servers read out of the box. A server that doesn't answers

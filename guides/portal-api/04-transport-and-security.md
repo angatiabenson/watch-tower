@@ -18,7 +18,7 @@ The agent uses .NET's `HttpClient` with a `SocketsHttpHandler` (`PortalTls.Creat
 | Request bodies | `Content-Type: application/json; charset=utf-8`, **chunked** (no `Content-Length`) | MUST accept chunked request bodies (check your reverse proxy and WAF) |
 | Response bodies | Read as UTF-8 JSON; the `Content-Type` is not checked | SHOULD send `application/json`; MUST NOT compress (the agent sends no `Accept-Encoding` and does not decompress) |
 | Redirects | Never followed (all transports). Any 3xx, 304 included, fails the call: POSTs count as not delivered (batches and events retried with backoff, results with their own backoff for up to 7 days; command acknowledgements are not retried, config acknowledgements retry each config cycle while that version is current), `GET commands/pending` counts as no commands, `GET config` as no change. A warning names the target, at most once per 15 min per endpoint | MUST NOT redirect agent API requests (for example http→https or a trailing slash); publish the final URL as BaseUrl |
-| Credentials scope | The bearer token and `X-Agent-Id` are only sent to URLs below BaseUrl (same scheme, host, port and path prefix); anything else is refused and logged | Serve the whole API below the published BaseUrl |
+| Credentials scope | The bearer token and `X-Agent-Id` are only sent to URLs below BaseUrl (same scheme, host, port and path prefix); anything else is refused and logged. gRPC: only to the scheme, host and port of the BaseUrl the credentials were read with, on a channel built for it (see [gRPC](12-versioning-and-compatibility.md#the-grpc-alternative)) | Serve the whole API below the published BaseUrl |
 | Proxies | The .NET default proxy: `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` environment variables of the service, otherwise the Windows proxy settings of the service account. No agent-specific proxy setting | Nothing; mention it to users behind proxies |
 | User-Agent | None sent | Identify agents by credentials and `agent.version` in batches, not by headers |
 
@@ -136,7 +136,9 @@ and `eventId` deduplicate as always. Never answer 2xx to a body you couldn't rea
 
 The gRPC transport uses gRPC's own message compression (`grpc-encoding: gzip`) under the same
 setting, for the same two calls. A server without gzip answers `UNIMPLEMENTED` naming the encoding,
-and the agent falls back as for 415.
+and the agent falls back as for 415. The resend goes over the same channel, to the same portal with
+the same credentials, as the refused call; a refusal by a portal the agent has since been moved away
+from (BaseUrl changed while the call ran) doesn't turn compression off for the new one.
 
 ## Rate limiting and backpressure
 

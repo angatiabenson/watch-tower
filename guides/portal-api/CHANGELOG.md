@@ -33,6 +33,18 @@ Everything here is marked `x-since: after-1.0.20` in the spec.
   `acceptsGzip` in its codes. AgentSimulator follows the code's `acceptsGzip` and has `--gzip` and
   `--no-gzip`.
 
+### Fixed
+
+- gRPC: the channel was built once at startup, while each call's metadata was read at call time,
+  so after a runtime change of `VisibilityPortal:BaseUrl` calls kept going to the old portal with
+  the new portal's token (and the old portal's encoding refusal could turn compression off for
+  the new one). Now each call takes its destination, metadata, `AgentIdentity` and compression
+  state from one snapshot of the settings; a change of BaseUrl, agent id, token or TLS settings
+  opens a new channel for the next call, and calls running on the old one finish there. The
+  credentials are only sent to the snapshot's BaseUrl origin. Settings the agent can't connect
+  with make calls fail unsent (retried as usual) instead of falling back to the old channel. A
+  portal sees no wire change.
+
 ## 1.0.20 (2026-11-04)
 
 Everything here is marked `x-since: 1.0.20` in the spec: 1.0.20 and later agents send it, 1.0.19

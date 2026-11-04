@@ -46,7 +46,7 @@ public class GrpcCompressionTests
         var server = new FakeGrpcServer(serverAcceptsGzip);
         var logs = new RecordingLoggerProvider();
         var client = new GrpcPortalClient(new StaticOptionsMonitor<PortalOptions>(options), env.Object,
-            logs.CreateLogger<GrpcPortalClient>(), server);
+            logs.CreateLogger<GrpcPortalClient>(), _ => server);
         return (client, server, logs);
     }
 
