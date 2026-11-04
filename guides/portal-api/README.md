@@ -35,8 +35,8 @@ You also issue **enrollment codes** (`WT1.…`) so an operator can connect a ser
 3. Any 2xx means "done". Everything else (3xx, 4xx, 5xx, timeouts after 30 s) is a failure the agent retries; no status means "reject permanently".
 4. Metrics batches arrive every 30 s, events as they happen, both from a durable outbox: at-least-once, deduplicate on `batchId` and `eventId`.
 5. JSON property names are camelCase and the agent matches them case-sensitively; it omits nulls; you MUST ignore unknown properties and enum values.
-6. Commands: return unacknowledged ones from `GET commands/pending` (200 array or 204) with a unique `commandId`, an `actionType` number, string-only `parameters` and a recent `issuedAt`.
-7. The agent acknowledges a command once (not retried), executes it, and retries the result until you answer 2xx; first result wins.
+6. Commands: return unacknowledged ones from `GET commands/pending` (200 array or 204) with a globally unique, never reused `commandId` (the agent never executes a known one), an `actionType` number, string-only `parameters` and a recent `issuedAt`.
+7. The agent acknowledges a command once (not retried), executes it, and retries the result with backoff until you answer 2xx, for up to 7 days; first result wins.
 8. Service and app-pool commands only work on names the operator watches locally; the agent refuses the rest with a failed result.
 9. Config: answer `GET config?version=v` with 204 when `v` is current, else 200 `{config, version}`; the agent validates, applies, then retries `POST config/acknowledge` until 2xx while that version is its current one (a newer applied version supersedes it). An invalid config is never acknowledged.
 10. v1 only grows by optional additions; anything breaking becomes v2 under a new path, with both served side by side during a transition.

@@ -23,7 +23,7 @@ agent speaks v1:
 | New optional properties in portal responses that the agent understands (commands, config) | none: older agents ignore them |
 | New remote-config fields | none; older agents ignore them |
 | Behaviour changes inside the agent (thresholds, retry timings, descriptions) | none; they are not part of the contract |
-| Stricter agent-side checks of what a portal sends (command freshness, configuration validation, the command allow-list, refusing redirects) | none for a portal that follows these docs; one that relied on the old leniency sees failed results, rejected configurations or failed deliveries. Listed under "Changed" in the [CHANGELOG](CHANGELOG.md) |
+| Stricter agent-side checks of what a portal sends (command freshness, never re-executing a known command ID, configuration validation, the command allow-list, refusing redirects) | none for a portal that follows these docs; one that relied on the old leniency sees failed results, rejected configurations or failed deliveries. Listed under "Changed" in the [CHANGELOG](CHANGELOG.md) |
 
 The agent MUST NOT start depending on a new endpoint, or on a new response property, within v1.
 Anything a portal must implement to keep working is a breaking change.
@@ -73,7 +73,11 @@ after 1.0.18 and later (and builds from current source).
 | `endpointStatuses`, incident types 13 to 15 | ✗ | ✓ |
 | ServerRestarted (16) | ✗ | ✓ |
 | `alertKey` / `resolved` alert lifecycle | ✗ | ✓ |
-| Command freshness check on `issuedAt` (stale, future or unparseable: failed result; absent: accepted with a warning) | ✗ (any `issuedAt`, even none, accepted) | ✓ |
+| Command freshness check on `issuedAt` (stale, future or unparseable: failed result; absent: accepted with a warning, or rejected with `RequireCommandIssuedAt`) | ✗ (any `issuedAt`, even none, accepted) | ✓ |
+| A known `commandId` is never executed again | ✓ (command records kept forever) | ✓ (IDs kept 365 days, at most 200 000, by default) |
+| Command results retried with backoff, given up after `ResultRetryMaxHours` (168 h) | ✗ (every cycle, without limit) | ✓ |
+| `ConfigurationError` endpoint status (invalid check keeps its last result) | ✗ (no `endpointStatuses`) | ✓ |
+| Snapshot entries removed only when the resource is gone (absent past the grace period, or removed from the configuration; names compared case-insensitively) and kept through the daily report purge | ✗ (every snapshot row deleted by the daily report purge, then read again) | ✓ |
 | 3xx answered as a failure, redirects not followed | ✗ (followed by .NET, dropping the token) | ✓ |
 | Local allow-list for service and pool commands | ✗ (any service or pool name is acted on) | ✓ (`AllowPortalManagedTargets` opt-in) |
 | Remote configuration validation of every field (ranges, names, list sizes, all or nothing) | partial (CPU/RAM poll interval and threshold, disk critical threshold only) | ✓ |
@@ -81,7 +85,8 @@ after 1.0.18 and later (and builds from current source).
 | 303 AgentRestart | stub ("reserved and not yet implemented") | ✓ |
 | 304 AgentUpdate, 501 SendTestNotification | ✗ (`Unknown action type`) | ✓ |
 | Enrollment codes (`WT1.`, `enroll`, `install.ps1 -EnrollmentCode`) | ✗ (seed file or manual settings) | ✓ |
-| Results for commands interrupted by a restart | ✗ | ✓ |
+| Results for commands interrupted by a restart (`Interrupted: ...`) | ✗ | ✓ |
+| Commands stored but not started before a restart run afterwards, or expire (`Rejected: command expired before it could run (agent restarted)`) | ✗ (never run, no result) | ✓ |
 
 Consequences for portals with 1.0.x agents in the fleet: send a current `issuedAt` anyway (it
 becomes REQUIRED in v2), validate

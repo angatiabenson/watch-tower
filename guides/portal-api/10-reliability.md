@@ -84,7 +84,8 @@ long periods.
 | --- | --- | --- |
 | command poll | next cycle | commands issued during the outage are picked up afterwards; one whose `issuedAt` is older than 3600 + 300 s is not executed and gets a failed result giving the reason |
 | command acknowledgement | no | lost; the result still comes |
-| command result | every poll cycle, no limit, survives restarts | delivered afterwards |
+| command result | with a per-result backoff (1, 2, 4, 8, 16, then every 30 min), at most 50 due results per cycle, survives restarts; given up after `CommandPoll:ResultRetryMaxHours` (168 h) | delivered within 30 minutes after the outage ends; a result produced more than 168 h earlier is lost (logged by the agent). At most 1000 rejected commands are kept, so in a long outage the oldest `Rejected: ...` results can be lost too |
+| command IDs | not a message: remembered for `CommandIdRetentionDays` (365 days), at most `CommandIdMaxCount` (200 000) | none; a command re-delivered after the outage is acknowledged but not executed again |
 | config fetch | next cycle | applied afterwards |
 | config acknowledgement | every config cycle until 2xx, survives restarts, but only while that version is the agent's current one | delivered afterwards; if a newer version was applied meanwhile, only the newer one is acknowledged |
 
@@ -96,10 +97,20 @@ not applied: the `version` query parameter of the next `GET config` says what th
 ## Agent restarts
 
 Restarts (updates, AgentRestart, reboots, crashes) lose nothing that was queued: the outbox,
-command records and results, and the applied configuration version are in the agent's database.
+command records and results (with their retry schedule), the command IDs seen, and the applied
+configuration version are in the agent's database.
 
 - `agent.startedAt` and `agent.uptimeSeconds` reset.
-- A command that was executing when the agent stopped is reported as failed at the next start.
+- A command that was executing when the agent stopped is never run again; it is reported at the
+  next start as failed: `Interrupted: the agent stopped while this command was running; its
+  outcome is unknown`.
+- A command that was stored but not started yet is picked up at the start of every poll cycle:
+  run if still within `MaxCommandAgeSeconds` + `ClockSkewSeconds` of its `issuedAt` (or of when
+  it was received), otherwise failed with `Rejected: command expired before it could run (agent
+  restarted)`. Its result can come long after the command was sent, and after its
+  acknowledgement.
+- Snapshot entries survive restarts and the agent's daily purge (which deletes only history):
+  the first batch after a restart repeats the last readings with their old timestamps.
 - After a machine reboot the agent sends a ServerRestarted event (type 16).
 - The CPU and RAM samples taken while the agent was stopped don't exist: expect a gap.
 
@@ -112,8 +123,9 @@ All timestamps come from the server's clock, which can be wrong.
   for being "in the future". Clamp for display if needed.
 - Portal-generated timestamps the agent checks: `issuedAt` (rejected when more than 300 s in the
   future or older than 3600 + 300 s by the agent's clock) and `scheduledAt` (run when the agent's
-  clock reaches it). A server whose clock is off by more than 5 minutes drops every command
-  silently. Detect it by comparing `agent.startedAt + uptimeSeconds` or `batchedAt` with your
+  clock reaches it). If the portal's clock is more than 5 minutes ahead of the agent's, the agent
+  refuses every command (`Rejected: issuedAt <t> is more than 300s in the future ...`); if it is
+  more than an hour behind, every command is stale. Detect it by comparing `agent.startedAt + uptimeSeconds` or `batchedAt` with your
   receive time (allowing for delivery delay), and warn the user.
 - `maintenance.untilUtc` is evaluated with the agent's clock.
 

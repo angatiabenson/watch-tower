@@ -9,7 +9,8 @@ Windows side, the units, how often it changes and how to show it. Two kinds of d
   series keyed by timestamp.
 - **Snapshots** (everything else): the last-known reading of each resource, repeated in every
   batch until a newer reading replaces it. Keep "current state per resource" and append to
-  history only when the reading's `timestamp` changes.
+  history only when the reading's `timestamp` changes (or, for an endpoint check, its `status`
+  becomes `ConfigurationError`, which keeps the `timestamp`; see [Endpoints](#endpoints-endpointstatuses-post-1018)).
 
 A snapshot entry is the resource's last-known reading, repeated until a newer reading replaces it
 or the resource is removed:
@@ -20,11 +21,17 @@ or the resource is removed:
   network-interface listing does).
 - **Services, application pools, endpoint checks**: removed on the agent's next poll after the
   name leaves `Monitoring:Services:WatchedServices`,
-  `Monitoring:ApplicationPools:WatchedApplicationPools` or the valid `Monitoring:Endpoints`
-  (locally or through [remote config](09-remote-config.md)). Names match exactly: renaming
-  only the letter case replaces the entry.
+  `Monitoring:ApplicationPools:WatchedApplicationPools` or `Monitoring:Endpoints` (locally or
+  through [remote config](09-remote-config.md)). Every configured endpoint check counts, valid or
+  not. Names are compared case-insensitively: renaming only the letter case keeps the entry, its
+  last reading and its schedule, and the entry is reported under the new spelling. Key these
+  resources case-insensitively.
 - The next batch is built from what remains, and a resource that comes back starts a fresh
   entry. Do not expect a resource to vanish from the very next batch.
+- Nothing else removes an entry: the agent's daily report purge deletes only history
+  (delivered CPU/RAM samples and incidents). A resource that is still present but can't be read
+  (for example a fixed drive that is not ready) keeps its last reading and `timestamp`
+  indefinitely, so the `timestamp` is the freshness indicator: show old readings as stale.
 
 All timestamps are the agent's clock in UTC. See [clock skew](10-reliability.md#clock-skew).
 
@@ -126,14 +133,26 @@ Absent from the batch until at least one check produced a result.
 | `name` | | unique per agent; the alert key is `endpoint:<name>` |
 | `type` | | `Http` (status code and optional body match), `Tcp` (connect), `Certificate` (TLS handshake and certificate lifetime) |
 | `target` | | URL or `host:port`, credentials and query string removed |
-| `status` | | `Up`; `Down` (failed, or certificate expired or invalid); `Expiring` (reachable, certificate inside its warning window, default 21 days) |
-| `isUp` | | `false` only for `Down` |
+| `status` | | `Up`; `Down` (failed, or certificate expired or invalid); `Expiring` (reachable, certificate inside its warning window, default 21 days); `ConfigurationError` (the check is still configured but its configuration is invalid, so it does not run; see below). Open set: accept others |
+| `isUp` | | `false` for `Down`; for `ConfigurationError`, the value of the last result |
 | `responseTimeMs` | ms | absent when the check didn't get far enough to measure |
 | `certificateDaysLeft` | days, 0.1 precision | absent when no certificate was inspected; negative when expired |
-| `detail` | | e.g. `HTTP 200`, `Connection refused`, certificate summary |
+| `detail` | | e.g. `HTTP 200`, `Connection refused`, certificate summary; for `ConfigurationError`, `Configuration error: <error> Last result: <status>[: <detail>]` |
 
 The agent alerts only after `FailuresBeforeAlert` (default 2) consecutive failures, but every
 single result is reported here.
+
+**`ConfigurationError`.** When an operator (or your remote configuration) leaves a check
+configured but invalid, even only for a moment while editing it, the check stops running, its
+open `endpoint:<name>` alert is retired and its entry keeps the **last result**: `timestamp`,
+`type`, `target`, `isUp`, `responseTimeMs` and `certificateDaysLeft` stay as they were, `status`
+becomes `ConfigurationError` and `detail` carries the error and the last result, for example
+`Configuration error: Monitoring:Endpoints:0:Target must be an absolute http(s) URL. Last result:
+Down: HTTP 503`. A check that never produced a result gets no entry. Once the check is fixed it
+runs at once and reports a real result with a new `timestamp`; once it is removed, its entry
+goes. Display: grey or "not checked", with the detail. Don't treat it as up or down, and don't
+alert on `isUp` for it. Because the `timestamp` doesn't change, a portal that keeps the newest
+entry per name must let an equal `timestamp` from a later batch (`batchedAt`) replace it.
 
 ## The agent object
 

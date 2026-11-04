@@ -22,7 +22,7 @@ stateDiagram-v2
     Pending --> Expired: no ack within ~50 min (the agent rejects commands older than 65 min)
     Acknowledged --> Succeeded: result success=true
     Acknowledged --> Failed: result success=false
-    Acknowledged --> Unknown: no result for a long time (agent offline)
+    Acknowledged --> Unknown: no result for a long time (agent offline, or result given up after 168 h)
     Unknown --> Succeeded: late result
     Unknown --> Failed: late result
     Succeeded --> [*]
@@ -36,10 +36,14 @@ As the agent handles it (each command independently, in the order received):
 flowchart TD
     R[Command in poll response] --> B{commandId blank?}
     B -- yes --> X1[ignored, logged]
-    B -- no --> F{issuedAt fresh?<br/>within max age + skew}
-    F -- no --> X2[not executed: failed result with the reason]
-    F -- yes --> S[stored; INSERT OR IGNORE by commandId]
-    S --> A[POST acknowledge, once, not retried]
+    B -- no --> F{issuedAt fresh?<br/>within max age + skew,<br/>present if required}
+    F -- no --> K1{commandId known?}
+    K1 -- yes --> X4[ignored: the earlier outcome stands]
+    K1 -- no --> X2[id recorded; not executed:<br/>failed result with the reason]
+    F -- yes --> S{commandId known?}
+    S -- no --> N[id recorded and command stored,<br/>in one transaction]
+    S -- yes --> AK[POST acknowledge again;<br/>not executed again<br/>a deferred one still runs once, when due]
+    N --> A[POST acknowledge, once, not retried]
     A --> D{scheduledAt more than 10 s ahead?}
     D -- yes --> W[deferred; runs on the first poll cycle after scheduledAt]
     D -- no --> Z{allowed target?}
@@ -48,7 +52,11 @@ flowchart TD
     Z -- yes --> C{already claimed or finished?}
     C -- yes --> X3[skipped: repeat delivery]
     C -- no --> E[execute, timeout ExecutionTimeoutSeconds]
-    E --> RS[POST result; retried every poll until 2xx]
+    E --> RS[POST result; retried with backoff until 2xx,<br/>for up to ResultRetryMaxHours]
+    U[stored, not started when the agent stopped;<br/>picked up at the start of each cycle] --> UA{within max age + skew<br/>of issuedAt or receipt?}
+    UA -- yes --> Z
+    UA -- no --> X5[result: Rejected: command expired<br/>before it could run]
+    I[running when the agent stopped] --> X6[at start-up, result: Interrupted: ...<br/>never run again]
 ```
 
 Details that matter to a portal:
@@ -57,20 +65,31 @@ Details that matter to a portal:
   `CommandPoll:ClockSkewSeconds` (300) in the future and at most `MaxCommandAgeSeconds` (3600) +
   `ClockSkewSeconds` old **when the agent receives it** (exactly 3900 s old or exactly 300 s ahead
   is accepted). Otherwise the command is rejected: never acknowledged or executed, stored as
-  failed, and reported with `success: false` and one of these messages, retried until you answer
-  2xx:
+  failed, and reported with `success: false` and one of these messages, retried like every
+  result (see below):
   - `Rejected: command is stale: issuedAt <t> is more than 3900s old (max age 3600s + 300s clock skew; agent time <now>)`
   - `Rejected: issuedAt <t> is more than 300s in the future (agent time <now>)`
   - `Rejected: unparseable issuedAt '<value>'`
+  - `Rejected: issuedAt is required` (no `issuedAt` while the operator set
+    `VisibilityPortal:RequireCommandIssuedAt = true`; this applies even when
+    `MaxCommandAgeSeconds = 0`)
 
   If the agent already knows the `commandId`, a rejected re-delivery reports nothing (the earlier
-  outcome stands). A command without `issuedAt` is accepted, acknowledged and executed; the agent
-  logs once per process (and after a BaseUrl change) `Portal sends commands without issuedAt;
-  replay protection is reduced. Update the portal.` Portals SHOULD always send it (REQUIRED in
-  v2). Operators can set `MaxCommandAgeSeconds = 0` to disable the check. Don't count on that.
-- **Deduplication**: by `commandId`, for as long as the agent keeps the record
-  (`CommandPoll:RetentionDays`, 30 days after it finished; records whose result is not delivered
-  yet are never purged). A repeat is acknowledged again but not executed again.
+  outcome stands). By default (`RequireCommandIssuedAt = false`) a command without `issuedAt` is
+  accepted, acknowledged and executed; the agent logs once per process (and after a BaseUrl
+  change) `Portal sends commands without issuedAt; replay protection is reduced. Update the
+  portal.` Portals SHOULD always send it (REQUIRED in v2), and MUST send it to agents whose
+  operators require it. Operators can set `MaxCommandAgeSeconds = 0` to disable the age check.
+  Don't count on that.
+- **Replay protection by ID**: every `commandId` the agent receives (executed, failed, rejected
+  or not authorized) is recorded before anything runs, in the same transaction that stores or
+  rejects the command. A known ID is never stored or executed again, even after
+  `CommandPoll:RetentionDays` (30 days after a command finished) purged the command and its
+  result. A repeat that passes the freshness check is acknowledged again. IDs are remembered for
+  `VisibilityPortal:CommandIdRetentionDays` (365 days; 0 = no age limit), at most
+  `VisibilityPortal:CommandIdMaxCount` (200 000; 0 = no limit; the oldest are forgotten first),
+  pruned hourly, and never while the command itself is still stored. A `commandId` MUST be
+  globally unique and never reused.
 - **Scheduling**: `scheduledAt` more than 10 s in the future defers the command. It runs on the
   first poll cycle at or after that time (so up to one poll interval late), and only if the agent
   is running then. Freshness is checked at receipt, so a command can be scheduled days ahead as
@@ -78,10 +97,27 @@ Details that matter to a portal:
 - **Execution**: commands run one at a time inside the poll loop. A long command (up to
   `ExecutionTimeoutSeconds`, default 120 s) delays the next poll. On timeout the result is
   `Command timed out after 120s`, but the underlying Windows operation may still complete.
-- **Interrupted**: commands that were executing when the agent stopped are reported at the next
-  start as failed: *Agent stopped while the command was executing; its outcome is unknown*.
-- **Results** are stored and retried every poll cycle until the portal answers 2xx, without
-  limit.
+- **After an agent restart** (crash, kill, reboot, update) the agent settles what it had stored:
+  - a command that was **running** is never run again (it may have had effects) and is reported
+    at start-up as failed: `Interrupted: the agent stopped while this command was running; its
+    outcome is unknown`;
+  - a command stored but **not started** (no `scheduledAt`) is picked up at the start of every
+    poll cycle. Within the age limit (`MaxCommandAgeSeconds` + `ClockSkewSeconds` from
+    `issuedAt`, or from when the agent received it if `issuedAt` was absent; no limit when
+    `MaxCommandAgeSeconds = 0`) it goes through the normal path: freshness, claim, execution,
+    result. Older, it is failed with `Rejected: command expired before it could run (agent
+    restarted)`, reported and retried like every rejection, usually after an acknowledgement;
+  - a deferred command runs when due.
+
+  Expect results, including these, to arrive long after you sent a command.
+- **Results** are stored (surviving restarts) and retried until the portal answers 2xx, each on
+  its own backoff: 1, 2, 4, 8 and 16 minutes after the 1st to 5th failed attempt, then every 30
+  minutes, at most 50 due results per poll cycle, the longest-due first. A result not accepted
+  within `VisibilityPortal:CommandPoll:ResultRetryMaxHours` (168 h) of being produced is given up
+  on (`Gave up delivering the result of command <id>: ...` in the agent log). At most 1000
+  rejected commands are kept; the oldest are deleted, delivered or not. In both cases the ID
+  stays known, so the command never runs later. Details:
+  [result](05-endpoints/command-result.md).
 - **Maintenance windows don't block commands.** A portal that wants that MUST check
   `agent.maintenance.active` before issuing.
 - Commands run with the rights of the agent's service account (LocalSystem by default).
@@ -271,7 +307,8 @@ when every channel succeeded. With no matching channel: `No notification channel
 
 ## Portal checklist for commands
 
-- Generate a new UUID `commandId` per command; never reuse one, not even to retry.
+- Generate a new UUID `commandId` per command; never reuse one, not even to retry. The agent
+  remembers IDs for a year by default and silently skips a known one.
 - Set `issuedAt` to the current UTC time when the agent can first receive the command. For
   commands held back by your own workflow (approvals), set it when releasing them.
 - Return every unacknowledged command on every poll; stop after the acknowledgement.

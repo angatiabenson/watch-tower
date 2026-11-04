@@ -55,8 +55,8 @@ info:
 
     The agent does NOT follow redirects. Any 3xx (304 included) fails that call: a POST counts
     as not delivered (metrics batches and events stay in the outbox and are retried with
-    backoff, command results are retried on every poll cycle, acknowledgements are never
-    retried), `GET commands/pending` counts as no commands and `GET config` as no change. The
+    backoff, command results are retried with their own backoff for up to a week,
+    acknowledgements are never retried), `GET commands/pending` counts as no commands and `GET config` as no change. The
     agent logs, at most once per 15 minutes per endpoint: "Portal redirected <path> to
     <absolute Location>; update VisibilityPortal:BaseUrl. The redirect (<status>) was not
     followed and the call counts as failed (<n> more redirect(s) of this endpoint since the
@@ -128,9 +128,17 @@ paths:
           listing (an empty network-interface listing does).
         * Services, application pools and endpoint checks are removed on the next poll after the
           name leaves Monitoring:Services:WatchedServices,
-          Monitoring:ApplicationPools:WatchedApplicationPools or the valid Monitoring:Endpoints. Names match exactly, so renaming only the letter case replaces the entry.
+          Monitoring:ApplicationPools:WatchedApplicationPools or Monitoring:Endpoints (every
+          configured check, valid or not; an invalid one is reported with status
+          ConfigurationError, see EndpointStatus). Names are compared case-insensitively:
+          renaming only the letter case keeps the entry and its last reading, reported under the
+          new spelling. Portals SHOULD key these resources case-insensitively.
         * The next batch is built from what remains; a resource that comes back starts a fresh
           entry. A portal MUST NOT expect a resource to vanish from the very next batch.
+        * Nothing else removes an entry (the agent's daily report purge deletes only history).
+          A resource that is still present but cannot be read (for example a fixed drive that is
+          not ready) keeps its last reading and `timestamp` indefinitely, so the entry's
+          `timestamp`, not its presence in the batch, says how fresh it is.
 
         Deduplicate on `batchId` (when present). The same `batchId` MUST produce the same
         stored result however many times it arrives.
@@ -211,25 +219,37 @@ paths:
         `commandId`, so returning a command again until it is acknowledged is safe and is the
         RECOMMENDED way to survive a lost acknowledgement.
 
+        Replay protection by id: the agent records every `commandId` it receives (executed,
+        failed, rejected or not authorized) before anything runs. A known id is never stored or
+        executed again; an accepted re-delivery is acknowledged again. Ids are remembered for
+        VisibilityPortal:CommandIdRetentionDays (default 365; 0 = no age limit), at most
+        VisibilityPortal:CommandIdMaxCount of them (default 200000; 0 = no limit; the oldest are
+        forgotten first), pruned hourly, and never while the agent still keeps the command
+        itself. This is independent of CommandPoll:RetentionDays. A `commandId` MUST therefore be
+        globally unique and never reused: a reused id is silently not executed.
+
         The whole response is parsed as one JSON array. If it cannot be parsed (for example
         one command has a numeric `parameters` value or a string `actionType`), the agent
         logs a warning and processes NONE of the commands in that response. Property names that
         do not match exactly (such as PascalCase `CommandId`) are ignored instead, so such a
         command parses with defaults and is then dropped on its own (no `commandId`).
 
-        `issuedAt` protects against replays (unless the agent sets
-        CommandPoll:MaxCommandAgeSeconds to 0, which disables the check):
+        `issuedAt` also protects against replays, by age (unless the agent sets
+        CommandPoll:MaxCommandAgeSeconds to 0, which disables the age check):
 
-        * Absent: the command is accepted, acknowledged and executed. The agent logs once per
-          process (and again after a BaseUrl change): "Portal sends commands without issuedAt;
-          replay protection is reduced. Update the portal."
+        * Absent, by default: the command is accepted, acknowledged and executed. The agent logs
+          once per process (and again after a BaseUrl change): "Portal sends commands without
+          issuedAt; replay protection is reduced. Update the portal."
+        * Absent, when the operator sets VisibilityPortal:RequireCommandIssuedAt to true
+          (default false): the command is rejected with the reason "issuedAt is required". This
+          applies even when MaxCommandAgeSeconds is 0.
         * Present: the command is rejected when it is older than MaxCommandAgeSeconds +
           ClockSkewSeconds (3600 + 300 s by default), more than ClockSkewSeconds (300 s) in the
           future, or unparseable. Exactly 3900 s old or exactly 300 s ahead is accepted.
         * A rejected command is never acknowledged or executed. The agent stores it as failed and
           POSTs its result (`success: false`, `message` "Rejected: <reason>"), retried like every
-          result until the portal answers 2xx. If the commandId is already known to the agent,
-          nothing is reported: the earlier outcome stands.
+          result (see `POST commands/{commandId}/result`). If the commandId is already known to
+          the agent, nothing is reported: the earlier outcome stands.
       x-agent-behaviour:
         frequency: every CommandPoll.PollIntervalSeconds (default 30 s); disabled when that value is 0 or less
         success: 200 with a JSON array (an empty array or a JSON null means no commands) or 204
@@ -266,8 +286,14 @@ paths:
         The acknowledgement is NOT retried when it fails; the command is executed anyway. A
         portal MUST therefore accept a result for a command it never saw acknowledged.
 
-        A command the agent rejects for its `issuedAt` (stale, from the future or unparseable;
-        see `GET commands/pending`) is never acknowledged: it gets a failed result instead.
+        A re-delivered command whose `commandId` the agent already knows is acknowledged again
+        (the first acknowledgement may have been lost) but not executed again.
+
+        A command the agent rejects for its `issuedAt` (stale, from the future, unparseable, or
+        missing while the agent requires it; see `GET commands/pending`) is never acknowledged:
+        it gets a failed result instead. A command that was acknowledged can still end with a
+        `Rejected: ` result: one the agent stored but could not run before it stopped, and that
+        was too old to run after the restart (see `POST commands/{commandId}/result`).
       x-agent-behaviour:
         frequency: once per accepted command delivery (again for a re-delivered command)
         success: any 2xx
@@ -298,15 +324,45 @@ paths:
       summary: Record the outcome of a command
       description: |
         Sent when a command finished, failed, was refused (for example "Not authorized", or
-        "Rejected: <reason>" for an `issuedAt` that is stale, in the future or unparseable), timed
-        out, or was found interrupted after an agent restart. Results are stored by the agent
-        and retried on every command-poll cycle until the portal answers 2xx, without a
-        retry limit. The same result can therefore arrive more than once: the first accepted
-        result for a `commandId` SHOULD win, and later copies MUST still be answered 2xx.
+        "Rejected: <reason>" for an `issuedAt` that is stale, in the future, unparseable or
+        missing while the agent requires it), timed out, or was cut short by an agent restart.
+        Results are stored by the agent (surviving restarts) and retried until the portal
+        answers 2xx.
+
+        After a restart (crash, kill, reboot, update) the agent settles the commands it had
+        stored, so their results can arrive long after the portal sent them:
+
+        * A command left running is never run again (it may have had effects); at start-up it
+          is reported failed with "Interrupted: the agent stopped while this command was
+          running; its outcome is unknown".
+        * A command stored but not yet started (status Received, no `scheduledAt`) is picked up
+          at the start of every poll cycle. If it is still within the age limit
+          (MaxCommandAgeSeconds + ClockSkewSeconds from `issuedAt`, or from when the agent
+          received it if `issuedAt` was absent; no limit when MaxCommandAgeSeconds is 0) it
+          runs through the normal path and reports its result. Otherwise it is failed with
+          "Rejected: command expired before it could run (agent restarted)", retried like
+          every rejection. Such a command was usually acknowledged already.
+        * Deferred commands (with a `scheduledAt`) run when due, as before.
+
+        Delivery of every result:
+
+        * Each undelivered result has its own schedule: after the 1st, 2nd, 3rd, 4th and 5th
+          failed attempt it is due again 1, 2, 4, 8 and 16 minutes later, then every 30
+          minutes. Due results are sent on the next command-poll cycle, at most 50 per cycle,
+          the longest-due first, so a result the portal keeps refusing does not hold back
+          newer ones.
+        * A result still not accepted VisibilityPortal:CommandPoll:ResultRetryMaxHours after
+          it was produced (default 168 h, minimum 1) is given up on and logged as a warning
+          ("Gave up delivering the result of command <id>: ...").
+        * At most 1000 rejected commands ("Rejected: ...") are kept; beyond that the oldest are
+          deleted, delivered or not. Their ids stay known, so they are never executed later.
+
+        The same result can therefore arrive more than once: the first accepted result for a
+        `commandId` SHOULD win, and later copies MUST still be answered 2xx.
       x-agent-behaviour:
-        frequency: once when the command ends, then on every poll cycle (default 30 s) until accepted
+        frequency: once when the command ends, then with a per-result backoff (1, 2, 4, 8, 16, then every 30 min) until accepted
         success: any 2xx
-        failure: any other status, a timeout or a network error; retried on the next poll cycle, indefinitely
+        failure: any other status, a timeout or a network error; retried after the backoff, on the first poll cycle when due, for up to ResultRetryMaxHours (default 168 h), then given up
       parameters:
         - $ref: '#/components/parameters/CommandId'
       requestBody:
@@ -732,11 +788,24 @@ components:
           description: URL or host:port, without credentials or query string.
         status:
           type: string
-          x-extensible-enum: [Up, Down, Expiring]
-          description: Expiring means reachable, but the TLS certificate is inside its warning window. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Up, Down, Expiring, ConfigurationError]
+          description: |
+            Expiring means reachable, but the TLS certificate is inside its warning window.
+            ConfigurationError means the check is still configured but its configuration is
+            invalid, so it does not run: the entry keeps its last result (timestamp, type,
+            target, isUp, responseTimeMs, certificateDaysLeft unchanged) and `detail` is
+            "Configuration error: <error> Last result: <status>[: <detail>]". A check that never
+            produced a result has no entry. As the timestamp does not change, a portal that
+            keeps the latest entry per name MUST let an entry with an equal timestamp from a
+            newer batch (later `batchedAt`) replace the stored one. When the check is fixed it
+            runs at once and reports a new result. Known values are listed in
+            x-extensible-enum; accept others.
         isUp:
           type: boolean
-          description: False only when status is Down.
+          description: |
+            False when status is Down. With ConfigurationError it is the value of the last
+            result (true unless that result was Down), so it does not mean the check is healthy
+            now.
         responseTimeMs:
           type: number
           minimum: 0
@@ -847,9 +916,11 @@ components:
           type: string
           minLength: 1
           description: |
-            Unique per agent, forever (the agent keeps finished commands for
-            CommandPoll:RetentionDays, default 30, and ignores repeats). A UUID is RECOMMENDED.
-            A missing or blank commandId makes the agent ignore the command.
+            MUST be globally unique and never reused, not even to retry a failed command. The
+            agent remembers every id it has received (by default for 365 days and up to 200000
+            ids, independently of CommandPoll:RetentionDays) and never executes a known id
+            again, so a reused id is acknowledged but silently not executed. A UUID is
+            RECOMMENDED. A missing or blank commandId makes the agent ignore the command.
         actionType:
           $ref: '#/components/schemas/ActionType'
         parameters:
@@ -880,8 +951,10 @@ components:
             "command is stale: issuedAt <t> is more than 3900s old (...)", "issuedAt <t> is more
             than 300s in the future (...)" or "unparseable issuedAt '<value>'". When absent, the
             command is accepted, acknowledged and executed, with a one-time warning in the
-            agent log (see `GET commands/pending`). Generate it when the command is created,
-            never from a fixed literal.
+            agent log (see `GET commands/pending`), unless the operator set
+            VisibilityPortal:RequireCommandIssuedAt to true: the command is then rejected the
+            same way with "Rejected: issuedAt is required", even when MaxCommandAgeSeconds is 0.
+            Generate it when the command is created, never from a fixed literal.
 
     AcknowledgeCommand:
       type: object
@@ -906,7 +979,7 @@ components:
           type: boolean
         message:
           type: string
-          description: 'Human-readable outcome written by the agent (English). Do not parse it, except that a message starting with "Rejected: " means the command was refused for its issuedAt and never ran.'
+          description: 'Human-readable outcome written by the agent (English). Do not parse it, except that a message starting with "Rejected: " means the command never ran (refused for its issuedAt, or expired before it could run after an agent restart), and one starting with "Interrupted: " means it was running when the agent stopped and its outcome is unknown.'
         executedAt:
           $ref: '#/components/schemas/Timestamp'
           description: When execution started (or when the command was refused or found interrupted).
@@ -1164,6 +1237,14 @@ components:
             responseTimeMs: 182
             certificateDaysLeft: 61.4
             detail: HTTP 200
+          - timestamp: '2026-11-03T09:58:41.0000000Z'
+            name: sql-port
+            type: Tcp
+            target: sql01.corp.local:1433
+            status: ConfigurationError
+            isUp: true
+            responseTimeMs: 3.1
+            detail: 'Configuration error: Monitoring:Endpoints:1:Target must be host:port. Last result: Up: Connected'
     MetricsBatchMinimal:
       summary: A batch as sent by a 1.0.x agent (no batchId, agent or endpointStatuses)
       value:
@@ -1267,7 +1348,7 @@ components:
       value:
         commandId: d2b4f6a8-0c1e-4a3b-8d5f-7e9a1c3b5d54
         success: false
-        message: Agent stopped while the command was executing; its outcome is unknown
+        message: 'Interrupted: the agent stopped while this command was running; its outcome is unknown'
         executedAt: '2026-11-03T10:50:03.0000000Z'
     ConfigThresholds:
       summary: Tighter thresholds and a portal-managed service list

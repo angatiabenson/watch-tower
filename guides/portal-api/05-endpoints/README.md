@@ -13,7 +13,7 @@ Every request carries `Authorization: Bearer <token>` and `X-Agent-Id: <agentId>
 | [`POST /api/v1/agent/events`](events.md) | agent → portal | when an incident happens (sent on the next 30 s cycle) | yes, for up to 7 days |
 | [`GET /api/v1/agent/commands/pending`](commands-pending.md) | portal → agent | every 30 s | next poll |
 | [`POST /api/v1/agent/commands/{commandId}/acknowledge`](command-acknowledge.md) | agent → portal | once per received command | no |
-| [`POST /api/v1/agent/commands/{commandId}/result`](command-result.md) | agent → portal | when a command ends | yes, every 30 s, indefinitely |
+| [`POST /api/v1/agent/commands/{commandId}/result`](command-result.md) | agent → portal | when a command ends | yes, backing off from 1 min to every 30 min, for up to 7 days |
 | [`GET /api/v1/agent/config`](config.md) | portal → agent | every 300 s, and right after command 302 | next poll |
 | [`POST /api/v1/agent/config/acknowledge`](config-acknowledge.md) | agent → portal | after applying a version | yes, every 300 s, while that version is the current one (a newer applied version supersedes it) |
 

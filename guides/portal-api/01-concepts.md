@@ -64,9 +64,9 @@ flowchart LR
 | Keeps a `batchId` / `eventId` stable across retries of the same message. | Deduplicate on `batchId` and `eventId` and answer 2xx to duplicates. |
 | Delivers batches and events at least once while within retry limits. | Accept late data (old timestamps) and out-of-order data. |
 | Omits nulls and only adds optional fields within v1. | Ignore unknown JSON properties and unknown enum values. |
-| Deduplicates commands by `commandId` and refuses stale ones. | Give every command a unique `commandId` and a current `issuedAt`, and expire commands the agent never acknowledged. |
+| Never executes a `commandId` twice (it remembers IDs for a year by default) and refuses stale ones. | Give every command a globally unique, never reused `commandId` and a current `issuedAt`, and expire commands the agent never acknowledged. |
 | Only touches services and application pools the operator allowed locally. | Not rely on a command succeeding; show the reported result. |
-| Retries command results and config acknowledgements until 2xx. | Answer 2xx to repeated results and acknowledgements, even for IDs it no longer knows. |
+| Retries command results (with backoff, for up to 7 days) and config acknowledgements until 2xx. | Answer 2xx to repeated results and acknowledgements, even for IDs it no longer knows. |
 | Validates every remote configuration and applies all or nothing. | Track which version each agent acknowledged, and which version it reports in `GET config?version=`. A missing acknowledgement is not proof that a version was not applied: a newer applied version supersedes an older unacknowledged one. |
 | Uses HTTPS and validates the certificate, unless the operator opted into plain HTTP. | Serve a certificate the agent's Windows trusts; never redirect agent API calls. |
 

@@ -17,7 +17,7 @@ The agent uses .NET's `HttpClient` with a `SocketsHttpHandler` (`PortalTls.Creat
 | Timeout | 30 s per request, including the response body | SHOULD answer well within 30 s; a timeout counts as a failure and is retried |
 | Request bodies | `Content-Type: application/json; charset=utf-8`, **chunked** (no `Content-Length`) | MUST accept chunked request bodies (check your reverse proxy and WAF) |
 | Response bodies | Read as UTF-8 JSON; the `Content-Type` is not checked | SHOULD send `application/json`; MUST NOT compress (the agent sends no `Accept-Encoding` and does not decompress) |
-| Redirects | Never followed (all transports). Any 3xx, 304 included, fails the call: POSTs count as not delivered (batches and events retried with backoff, results every poll cycle, acknowledgements never), `GET commands/pending` counts as no commands, `GET config` as no change. A warning names the target, at most once per 15 min per endpoint | MUST NOT redirect agent API requests (for example http→https or a trailing slash); publish the final URL as BaseUrl |
+| Redirects | Never followed (all transports). Any 3xx, 304 included, fails the call: POSTs count as not delivered (batches and events retried with backoff, results with their own backoff for up to 7 days, acknowledgements never), `GET commands/pending` counts as no commands, `GET config` as no change. A warning names the target, at most once per 15 min per endpoint | MUST NOT redirect agent API requests (for example http→https or a trailing slash); publish the final URL as BaseUrl |
 | Credentials scope | The bearer token and `X-Agent-Id` are only sent to URLs below BaseUrl (same scheme, host, port and path prefix); anything else is refused and logged | Serve the whole API below the published BaseUrl |
 | Proxies | The .NET default proxy: `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` environment variables of the service, otherwise the Windows proxy settings of the service account. No agent-specific proxy setting | Nothing; mention it to users behind proxies |
 | User-Agent | None sent | Identify agents by credentials and `agent.version` in batches, not by headers |
@@ -104,7 +104,7 @@ that; other messages that are due can be sent in the meantime. See
 - [ ] Treat everything an agent sends as untrusted input: validate types and sizes, cap array lengths, escape descriptions, names and `detail` text before rendering them in HTML (an agent can be compromised, or an operator can name a service `<script>`).
 - [ ] Limit request body size, request rate and concurrent connections per agent and per IP address.
 - [ ] Authorize every command a user issues (who may restart what on which server), log who issued it, and show the agent's result. The agent's local allow-list is a second line of defence, not a replacement.
-- [ ] Issue commands only with fresh `issuedAt` and unique `commandId`s; never reuse IDs.
+- [ ] Issue commands only with fresh `issuedAt` and globally unique `commandId`s; never reuse IDs (the agent remembers them for a year and skips a known one).
 - [ ] Validate remote configuration with the agent's rules before storing it (see [Remote configuration](09-remote-config.md)).
 - [ ] Protect enrollment codes like passwords: show once, expire unused ones, rotate on suspicion.
 - [ ] Audit log: enrollment, rotation, revocation, every command and its result, every configuration version and its acknowledgement.

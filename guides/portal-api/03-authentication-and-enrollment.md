@@ -41,7 +41,7 @@ The agent has no special handling for any status besides "2xx or not":
 | POST metrics/batch, events | Logged at **Error** ("Portal returned 401 Unauthorized on {path}. Check AgentToken."); the message is retried with the normal backoff | Logged at Warning with the status; retried the same way |
 | GET commands/pending, config | Logged at Warning ("PollCommands returned 401" / "FetchConfiguration returned 401"); treated as "nothing new" | Same |
 | POST acknowledge (command) | Logged at Error; not retried | Not retried |
-| POST command result, config acknowledge | Logged at Error; retried every cycle | Retried every cycle |
+| POST command result, config acknowledge | Logged at Error; retried (a result with its backoff, for up to 7 days; a config acknowledgement every config cycle) | Retried the same way |
 
 The agent never re-enrolls, never asks for a new token and never stops trying. A revoked agent
 keeps calling every 30 s until an operator changes its settings or uninstalls it. Use 401 for

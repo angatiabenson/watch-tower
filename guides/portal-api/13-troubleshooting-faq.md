@@ -26,7 +26,12 @@ lines to search for:
 | `FetchConfiguration returned {status}` / `FetchConfiguration failed` | Config poll refused / unreadable or network error |
 | `Portal send failed; deferring N remaining outbox message(s) to the next cycle` | Outbox stopped at a failure |
 | `Dropping metrics batch ... after 5 failed attempts` | Metrics lost |
-| `Rejecting command {id} (ActionType=...): ...` | Command refused as stale, future or with an unparseable `issuedAt`; never acknowledged or run, a failed result `Rejected: ...` is sent |
+| `Rejecting command {id} (ActionType=...): ...` | Command refused as stale, future, with an unparseable `issuedAt`, or without one while `RequireCommandIssuedAt` is set; never acknowledged or run, a failed result `Rejected: ...` is sent |
+| `Command {id} was still executing when the agent stopped; marked failed` | After a restart: the command is not run again; its result is `Interrupted: ...` |
+| `Running command {id} (ActionType=...): received ... but not run before the agent stopped` | After a restart: a stored command that never started runs now; its result follows |
+| `Rejecting stored command {id} (ActionType=..., received ...) that was never run: ...` | After a restart: a stored command that never started is too old now; its result is `Rejected: command expired before it could run (agent restarted)` |
+| `Gave up delivering the result of command {id}: the portal did not accept it in N attempt(s) over 168 h (produced ...)` | The result endpoint refused that result (or was unreachable) for `ResultRetryMaxHours`; the result is lost |
+| `More than 1000 rejected commands are stored; dropped the N oldest ...` | The portal keeps sending commands the agent rejects; the oldest rejections (and their results, if undelivered) are deleted |
 | `Portal sends commands without issuedAt; replay protection is reduced. Update the portal.` | Commands without `issuedAt` (accepted; logged once per process or BaseUrl) |
 | `Portal redirected {path} to {Location}; update VisibilityPortal:BaseUrl. ...` | The portal answered 3xx; the call failed (at most once per 15 min per endpoint) |
 | `Ignoring command without a CommandId` | Missing or wrongly cased `commandId` |
@@ -72,6 +77,14 @@ The portal was unreachable or refused messages, and the outbox is replaying (up 
 per 30 s cycle). Events may come before the metrics of the same period. Use payload timestamps.
 Gaps in CPU/RAM after a long outage are batches that ran out of attempts.
 
+### An endpoint check reports `ConfigurationError`, or never changes
+
+The check is still configured but invalid (locally or in your remote configuration), so it
+doesn't run. Its entry keeps the last result and its `timestamp`, and `detail` says what is
+wrong: `Configuration error: <error> Last result: <status>[: <detail>]`. Fix the check: it then
+runs at once. If your portal still shows the old status, it only replaces an entry when the
+`timestamp` is newer; let an equal `timestamp` from a later batch replace it too.
+
 ### Commands stay pending
 
 - The agent can't parse your poll response: one command with a number in `parameters` (`60`
@@ -82,9 +95,11 @@ Gaps in CPU/RAM after a long outage are batches that ran out of attempts.
   such command is read with defaults and fails on its own. Without `commandId` it is skipped
   (`Ignoring command without a CommandId (ActionType=...)`); with `CommandId` but `ActionType` it
   runs as action 0 and fails (`Unknown action type: 0`); `IssuedAt` is not read, so the command
-  counts as one without `issuedAt` (accepted with a replay-protection warning).
+  counts as one without `issuedAt` (accepted with a replay-protection warning, or rejected when
+  the operator set `RequireCommandIssuedAt`).
 - `issuedAt` is older than 3600 + 300 s, more than 300 s in the future (check the server's clock)
-  or unparseable. Look for `Rejecting command` in the log; the portal gets a failed result.
+  or unparseable, or it is missing and the operator set `VisibilityPortal:RequireCommandIssuedAt`.
+  Look for `Rejecting command` in the log; the portal gets a failed result `Rejected: ...`.
 - You return the command to a different agentId than the one polling.
 - Command polling is disabled (`CommandPoll:PollIntervalSeconds` ≤ 0) or the portal connection is
   off.
@@ -92,10 +107,18 @@ Gaps in CPU/RAM after a long outage are batches that ran out of attempts.
 ### A command was acknowledged but never got a result
 
 - It is scheduled (`scheduledAt` in the future), or still running (up to 120 s).
-- The agent is offline. The result comes when it is back. Interrupted commands are reported as
-  failed at the next start.
-- Your result endpoint answers non-2xx: the agent retries every 30 s. Check your logs for repeated
+- The agent is offline. The result comes when it is back: a command that was running when it
+  stopped is reported as `Interrupted: ...` at the next start (it is not run again); one it had
+  stored but not started runs then, or is reported as `Rejected: command expired before it could
+  run (agent restarted)` if it has become too old.
+- Your result endpoint answers non-2xx: the agent retries it 1, 2, 4, 8 and 16 minutes later, then
+  every 30 minutes, and gives up after `CommandPoll:ResultRetryMaxHours` (168 h) with `Gave up
+  delivering the result of command ...` in its log. Check your logs for repeated
   `POST .../result`.
+- The `commandId` was used before (a reused ID, or an ID derived from something that repeats).
+  The agent remembers every ID it has received (365 days and up to 200 000 IDs by default),
+  acknowledges a repeat and never executes it again, so no new result comes. Use a new UUID per
+  command.
 
 ### "Not authorized" results
 

@@ -126,7 +126,7 @@ Agent-side behaviour behind these events:
 ### Retirement
 
 When a resource stops being monitored while its alert is open (a service or pool removed from the
-watch list, an endpoint check deleted, a drive, physical disk or NIC that disappeared), the agent
+watch list, an endpoint check deleted or left invalid, a drive, physical disk or NIC that disappeared), the agent
 **retires** the alert: it sends `resolved: true` with the opening `incidentType` and a description
 starting with `No longer monitored (` followed by the reason (for example
 `removed from Monitoring:Services:WatchedServices` or `Disk D: is no longer present`):

@@ -76,7 +76,8 @@ No query parameters. Body from a current agent:
   },
   "endpointStatuses": [
     { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "shop-home", "type": "Http", "target": "https://shop.example.com/", "status": "Up", "isUp": true, "responseTimeMs": 182, "certificateDaysLeft": 61.4, "detail": "HTTP 200" },
-    { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "sql-port", "type": "Tcp", "target": "sql01.corp.local:1433", "status": "Down", "isUp": false, "detail": "Connection refused" }
+    { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "sql-port", "type": "Tcp", "target": "sql01.corp.local:1433", "status": "Down", "isUp": false, "detail": "Connection refused" },
+    { "timestamp": "2026-11-03T09:58:41.0000000Z", "name": "status-api", "type": "Http", "target": "https://api.example.com/health", "status": "ConfigurationError", "isUp": true, "responseTimeMs": 95, "detail": "Configuration error: Monitoring:Endpoints:2:ExpectStatus must be status codes or ranges between 100 and 599, e.g. 200-399 or 200,204. Last result: Up: HTTP 200" }
   ]
 }
 ```
@@ -147,8 +148,8 @@ Body from a 1.0.x agent (and the smallest body a current agent can send):
 | `endpointStatuses[].name` | string | | always | Check name, unique per agent. | post-1.0.18 |
 | `endpointStatuses[].type` | string (open enum) | `Http`, `Tcp`, `Certificate` | always | Check type. | post-1.0.18 |
 | `endpointStatuses[].target` | string | | always | URL or `host:port`, without credentials or query string. | post-1.0.18 |
-| `endpointStatuses[].status` | string (open enum) | `Up`, `Down`, `Expiring` | always | Result. | post-1.0.18 |
-| `endpointStatuses[].isUp` | boolean | | always | `status != Down`. | post-1.0.18 |
+| `endpointStatuses[].status` | string (open enum) | `Up`, `Down`, `Expiring`, `ConfigurationError` | always | Result. `ConfigurationError`: the check is configured but invalid and does not run; the entry keeps its last result (`timestamp` included) and `detail` gives the error. | post-1.0.18 |
+| `endpointStatuses[].isUp` | boolean | | always | `false` for `Down`. With `ConfigurationError`, the last result's value (not a current health). | post-1.0.18 |
 | `endpointStatuses[].responseTimeMs` | number | ms, ≥ 0 | optional | Round-trip time. | post-1.0.18 |
 | `endpointStatuses[].certificateDaysLeft` | number | days, 0.1 precision, negative when expired | optional | TLS certificate lifetime left. | post-1.0.18 |
 | `endpointStatuses[].detail` | string | | optional | Human-readable result. | post-1.0.18 |
@@ -179,7 +180,10 @@ reach the portal. Delivered and dropped messages are purged from the agent after
   This also works for current agents, and the reference portal does both.
 - **Snapshots** are repeated in every batch by design. Store them as "latest state per resource"
   and append to history only when the `timestamp` changed. Never keep an older snapshot over a
-  newer one: a batch delayed in the outbox arrives after newer ones.
+  newer one: a batch delayed in the outbox arrives after newer ones. One exception: an endpoint
+  check that becomes invalid is reported with status `ConfigurationError` and its **unchanged**
+  `timestamp`, so let an entry with an equal `timestamp` from a batch with a later `batchedAt`
+  replace the stored one (and record the status change if you keep history).
 - **Removed resources**: A snapshot entry is the resource's last-known reading, repeated until a newer reading replaces it
   or the resource is removed:
   
@@ -189,11 +193,19 @@ reach the portal. Delivered and dropped messages are purged from the agent after
     network-interface listing does).
   - **Services, application pools, endpoint checks**: removed on the agent's next poll after the
     name leaves `Monitoring:Services:WatchedServices`,
-    `Monitoring:ApplicationPools:WatchedApplicationPools` or the valid `Monitoring:Endpoints`
-    (locally or through [remote config](../09-remote-config.md)). Names match exactly: renaming
-    only the letter case replaces the entry.
+    `Monitoring:ApplicationPools:WatchedApplicationPools` or `Monitoring:Endpoints` (locally or
+    through [remote config](../09-remote-config.md)). Every configured endpoint check counts,
+    valid or not: an invalid one keeps its entry with status `ConfigurationError`. Names are
+    compared case-insensitively: renaming only the letter case keeps the entry, its last reading
+    and its schedule, and the entry is reported under the new spelling. Key these resources
+    case-insensitively.
   - The next batch is built from what remains, and a resource that comes back starts a fresh
     entry. Do not expect a resource to vanish from the very next batch.
+  - Nothing else removes an entry: the agent's daily report purge deletes only history
+    (delivered CPU/RAM samples and incidents), never the current state. A resource that is still
+    present but can't be read (for example a fixed drive that is not ready) keeps its last
+    reading and `timestamp` indefinitely. Use the entry's `timestamp`, not its presence in the
+    batch, to judge how fresh it is, and show old readings as stale.
 
 ## Common mistakes
 

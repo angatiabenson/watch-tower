@@ -7,7 +7,10 @@
 Tells the portal that the agent received and stored a command and will execute it now or when
 it is due (`scheduledAt`). Sent once per delivery, immediately after the command passed the
 freshness check and was stored, **before** it runs. If the portal returns the command again, the
-agent acknowledges it again (and does not run it again).
+agent acknowledges it again (and does not run it again). That holds for as long as the agent
+remembers the `commandId` (365 days by default), even after it purged the command itself, so an
+acknowledgement is not proof that a command ran: a reused ID is acknowledged and not executed.
+A command rejected for its `issuedAt` is never acknowledged.
 
 ## Request
 
