@@ -58,6 +58,16 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: ./build/package.ps1 -Version "0.0.0-ci.$env:RUN_NUMBER" -Repository $env:REPOSITORY -OutputDir artifacts
 
+      - name: Release notes (smoke test)
+        shell: pwsh
+        # The script release.yml runs; here from this commit's own subjects (no pull request lookup).
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          ./build/release-notes.ps1 -Version 0.0.0-ci -Repository $env:REPOSITORY -Sha $env:SHA -OutFile artifacts/release-notes.md -NoPullRequest
+          if (-not (Get-Content artifacts/release-notes.md -Raw).Contains('Good to know')) { throw 'release notes were not written' }
+
       - name: One-line installer (smoke test)
         shell: pwsh
         # get-watchtower.ps1 against the package just built: verify, extract, install a throwaway

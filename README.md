@@ -760,6 +760,13 @@ Build the release zip locally (self-contained single-file exe, `install.ps1`, `I
   [one-line installer](#quick-start), served at `releases/latest/download/get-watchtower.ps1`) and
   `SHA256SUMS.txt` (checksums of the zip and of `get-watchtower.ps1`). *Run workflow* releases a
   version you enter (e.g. `1.3.0` or `1.3.0-beta.1`; a version with a suffix is a prerelease).
+- **Release notes** ([release-notes.ps1](build/release-notes.ps1)): users see them under
+  *What's new* when they check for updates, and on the release page. They come from the
+  **Release notes** section of the merged pull request (the
+  [pull request template](.github/pull_request_template.md) has one: write a sentence per change
+  for operators, under *New*, *Fixes* or *Faster*). Without that section, the release lists the
+  `feat`, `fix` and `perf` commit subjects since the previous release instead. The console shows
+  the notes as plain text, so keep to titles and `-` bullets.
 - **Signing**: with the repository secret `WATCHTOWER_SIGNING_KEY` (ECDSA P-256 private key,
   PEM) set, packages are signed; agents with the matching `Updates:PublicKey` then install only
   signed releases. Without it, packages carry a SHA-256 checksum only.
