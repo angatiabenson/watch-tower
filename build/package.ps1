@@ -4,7 +4,8 @@
     watchtower-update.json manifest consumed by the agent's self-updater.
 
 .DESCRIPTION
-    Used by both CI workflows (deploy.yml and release.yml) and runnable locally:
+    Used by both workflows (ci.yml as a packaging smoke test, release.yml for releases) and
+    runnable locally:
 
         ./build/package.ps1 -Version 1.6.0 -Repository angatiabenson/watch-tower
 
