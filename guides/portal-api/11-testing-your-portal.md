@@ -28,7 +28,7 @@ sync. Run them if you change any of them.
 
 - [ ] MUST ignore unknown properties in every request body.
 - [ ] MUST accept unknown values of the open value sets (`incidentType`, `actionType`, `status`, `updatePhase`, `type`). The spec lists the known values in `x-extensible-enum`; they are not closed enums.
-- [ ] MUST accept requests where optional properties are absent (1.0.x agents).
+- [ ] MUST accept requests where optional properties are absent (older agents, 1.0.19 and earlier included).
 - [ ] MUST accept any RFC 3339 offset (`Z`, `+00:00`, `+03:00`) and up to 7 fractional digits.
 - [ ] MUST send camelCase property names in responses.
 

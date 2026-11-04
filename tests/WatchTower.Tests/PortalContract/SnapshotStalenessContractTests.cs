@@ -242,7 +242,7 @@ public sealed class SnapshotStalenessContractTests : IDisposable
         var property = spec["properties"]!["isStale"]!.AsObject();
 
         ((string)property["$ref"]!).Should().Be("#/components/schemas/SnapshotIsStale");
-        ((string)property["x-since"]!).Should().Be("after-1.0.19");
+        ((string)property["x-since"]!).Should().Be("1.0.20");
         (spec["required"]?.AsArray().Select(r => (string)r!) ?? []).Should().NotContain("isStale", "older agents don't send it");
         ((string)property["description"]!).Should().Contain("10 min").And.Contain("unknown");
     }

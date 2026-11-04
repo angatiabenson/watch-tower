@@ -6,11 +6,15 @@ Changes to the contract between the WatchTower agent and a portal
 ([spec](../../spec/portal-agent-api.v1.openapi.yaml)). Agent releases that don't change the
 contract aren't listed. Versioning rules: [Versioning and compatibility](12-versioning-and-compatibility.md).
 
-## Unreleased (after 1.0.19)
+## Unreleased (after 1.0.20)
 
-Everything here is marked `x-since: after-1.0.19` in the spec: agents built from the current
-source send it, 1.0.19 and older don't. The wire format changes are all additive (new optional
-properties and values), so portals written for 1.0.x keep parsing everything. Some agent
+Everything here is marked `x-since: after-1.0.20` in the spec.
+
+## 1.0.20 (2026-11-04)
+
+Everything here is marked `x-since: 1.0.20` in the spec: 1.0.20 and later agents send it, 1.0.19
+and older don't. The wire format changes are all additive (new optional properties and values),
+so portals written for 1.0.19 and older keep parsing everything. Some agent
 behaviour changed as well: a portal that relied on the old behaviour (redirects, stale commands,
 lenient configuration checks, commands for any service name, reused command IDs, results
 refused for more than a week) is affected. See "Changed" below.
@@ -36,10 +40,9 @@ refused for more than a week) is affected. See "Changed" below.
   `batchedAt`: max(3 × the monitor's poll interval, 10 min) for drives, physical disks, network
   interfaces, services and pools; max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) for an
   endpoint check, `ConfigurationError` included. The reading and its `timestamp` are unchanged.
-  It came after the other additions here, so earlier unreleased builds don't send it either:
-  a missing `isStale` means unknown, and portals MUST fall back to the `timestamp`. The agent
-  also logs a warning when an entry first goes stale (at most once per hour per resource) and
-  greys stale entries out in its console.
+  A missing `isStale` (1.0.19 and older) means unknown, and portals MUST fall back to the
+  `timestamp`. The agent also logs a warning when an entry first goes stale (at most once per
+  hour per resource) and greys stale entries out in its console.
 - Agent options that affect what a portal sees (operator settings, not part of the wire format):
   `VisibilityPortal:RequireCommandIssuedAt` (default false), `VisibilityPortal:CommandIdRetentionDays`
   (365, 0 = no age limit), `VisibilityPortal:CommandIdMaxCount` (200 000, 0 = no limit) and
@@ -56,8 +59,8 @@ refused for more than a week) is affected. See "Changed" below.
   unknown`. One that was stored but not started is picked up at the start of every poll cycle
   and runs if it is still within `MaxCommandAgeSeconds` + `ClockSkewSeconds` of its `issuedAt`
   (or of its receipt without `issuedAt`); otherwise it is reported `Rejected: command expired
-  before it could run (agent restarted)`, usually after an acknowledgement. 1.0.x left both
-  without a result. Portals should expect results long after sending a command.
+  before it could run (agent restarted)`, usually after an acknowledgement. 1.0.19 and older left
+  both without a result. Portals should expect results long after sending a command.
 - The contract itself: this OpenAPI file, the portal guide, MinimalPortal, AgentSimulator and
   contract tests.
 
@@ -78,19 +81,19 @@ refused for more than a week) is affected. See "Changed" below.
   or executed again, even after `CommandPoll:RetentionDays` (30 days) purged the command; a
   re-delivery is still acknowledged. IDs are remembered for `CommandIdRetentionDays` (365 days)
   and at most `CommandIdMaxCount` (200 000), oldest forgotten first, pruned hourly, never while
-  the command itself is still stored. 1.0.x never purged command records, so it never ran an ID
-  twice either, but its database grew without bound; with the purge after `RetentionDays` the
-  separate ID record keeps that guarantee, now bounded by those two limits. The guidance is
-  stricter accordingly: a `commandId` MUST be globally unique and never reused
+  the command itself is still stored. 1.0.19 and older never purged command records, so they
+  never ran an ID twice either, but their database grew without bound; with the purge after
+  `RetentionDays` the separate ID record keeps that guarantee, now bounded by those two limits.
+  The guidance is stricter accordingly: a `commandId` MUST be globally unique and never reused
   (it was "unique per agent"); a portal that reuses IDs sees the repeats acknowledged but not
   executed.
 - Command results are retried on a per-result backoff (1, 2, 4, 8, 16, then every 30 minutes),
   at most 50 due results per poll cycle, the longest-due first, instead of every cycle; a result
   not accepted within `CommandPoll:ResultRetryMaxHours` (168 h) is given up on and logged, and at
   most 1000 rejected commands are kept (the oldest deleted, delivered or not; their IDs stay
-  known). 1.0.x retried every result on every cycle without limit. A portal that answers 2xx to
-  every result, as documented, only notices after an outage of more than a week (those results
-  are lost) or when it keeps sending commands the agent rejects.
+  known). 1.0.19 and older retried every result on every cycle without limit. A portal that
+  answers 2xx to every result, as documented, only notices after an outage of more than a week
+  (those results are lost) or when it keeps sending commands the agent rejects.
 - Redirects are never followed, on any transport: a 3xx (304 included) fails the call like any
   other failure, with a rate-limited warning naming the target. The bearer token and
   `X-Agent-Id` are only sent to URLs below BaseUrl. Portals MUST NOT redirect agent API calls.
@@ -100,11 +103,11 @@ refused for more than a week) is affected. See "Changed" below.
   Their names are compared case-insensitively, so renaming one only in letter case keeps its
   entry and last reading, reported under the new spelling. An endpoint check that is still
   configured but invalid keeps its entry, with status `ConfigurationError` (see "Added"). The
-  daily report purge deletes only history (delivered CPU/RAM samples and incidents); 1.0.x also
-  deleted every snapshot row with it, so resources vanished from the batches until they were
-  read again. A resource that is still present but can't be read keeps its last reading and
-  `timestamp`. Current agents mark it `isStale: true` once that reading is older than its window
-  (see "Added"); without `isStale`, the `timestamp` is the freshness indicator.
+  daily report purge deletes only history (delivered CPU/RAM samples and incidents); 1.0.19 and
+  older also deleted every snapshot row with it, so resources vanished from the batches until
+  they were read again. A resource that is still present but can't be read keeps its last
+  reading and `timestamp`. 1.0.20 and later mark it `isStale: true` once that reading is older
+  than its window (see "Added"); without `isStale`, the `timestamp` is the freshness indicator.
 - Every occurrence of an alert key gets its own recovery event, in the order the alert opened
   and closed (an occurrence's recovery is no longer lost when the alert re-opens).
 - Service and application-pool commands only act on names from the agent's local watch lists
@@ -147,8 +150,8 @@ refused for more than a week) is affected. See "Changed" below.
 - A command whose `issuedAt` is older than `MaxCommandAgeSeconds` + `ClockSkewSeconds` (default
   3600 + 300 s), more than `ClockSkewSeconds` in the future or unparseable is dropped: not
   stored, acknowledged, executed or answered (only logged by the agent). A command without
-  `issuedAt` is accepted; `MaxCommandAgeSeconds` = 0 turns the check off. The release after
-  1.0.19 answers these commands with a `Rejected: ` result instead (see above).
+  `issuedAt` is accepted; `MaxCommandAgeSeconds` = 0 turns the check off. 1.0.20 answers these
+  commands with a `Rejected: ` result instead (see above).
 - Service and application-pool commands only act on watched names (the watch lists in effect,
   including lists pushed by the portal). Other names, or a missing `ServiceName` /
   `AppPoolName`, fail with a result starting `Not authorized: `.

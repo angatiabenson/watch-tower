@@ -53,7 +53,7 @@ The same alert resolving:
 }
 ```
 
-An incident outside any alert (also what every 1.0.x agent sends):
+An incident outside any alert (also what every agent up to 1.0.19 sends):
 
 <!-- schema: AgentEvent -->
 ```json
@@ -92,8 +92,8 @@ A one-shot event (an alert key, no `resolved`):
 | `topProcesses[].cpuSeconds` | number | s | always | Processor time used since the process started. | base |
 | `topProcesses[].memoryMb` | number | MiB | always | Working set. | base |
 | `topProcesses[].cpuPercent` | number | % of all logical processors | always | CPU share over the sampling interval. | base |
-| `alertKey` | string | e.g. `cpu`, `disk:C:\`, `svc:W3SVC` | optional | The alert this event belongs to. Compare case-insensitively. | after-1.0.19 |
-| `resolved` | boolean | | optional | `false` opened or escalated the alert, `true` closed it. Absent for one-shot events and incidents without an alert. | after-1.0.19 |
+| `alertKey` | string | e.g. `cpu`, `disk:C:\`, `svc:W3SVC` | optional | The alert this event belongs to. Compare case-insensitively. | 1.0.20 |
+| `resolved` | boolean | | optional | `false` opened or escalated the alert, `true` closed it. Absent for one-shot events and incidents without an alert. | 1.0.20 |
 
 ## Responses and agent behaviour
 
@@ -124,7 +124,7 @@ the cycle. An event waiting in backoff does not block newer events, so they can 
   again. Update the open alert.
 - Expecting the `resolved: true` event to have a "recovery" `incidentType`: CPU, RAM, disk,
   disk-queue and network alerts close with the **same** type that opened them.
-- Requiring `alertKey`: 1.0.x agents never send it, and current agents omit it for incidents
+- Requiring `alertKey`: agents up to 1.0.19 never send it, and later ones omit it for incidents
   outside an alert (spikes, ServiceDown, ApplicationPoolDown).
 - Paging someone during a maintenance window: the agent still sends events while
   `agent.maintenance.active` is true (only its own notifications are held). Decide in the portal.

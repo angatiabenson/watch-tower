@@ -10,7 +10,7 @@ come in three shapes:
 | --- | --- | --- | --- |
 | Alert transition | present | `false` (opened or escalated) or `true` (closed) | `cpu`, `resolved: false` |
 | One-shot alert event | present | absent | `reboot` (ServerRestarted) |
-| Plain incident | absent | absent | CpuSpikeDetected, ServiceDown; everything from 1.0.x agents |
+| Plain incident | absent | absent | CpuSpikeDetected, ServiceDown; everything from agents up to 1.0.19 |
 
 ## Incident types
 
@@ -38,8 +38,8 @@ portal SHOULD map types to its own severities and can use this table.
 | 15 | CertificateExpiring | Warning | opens `endpoint:<name>` | The certificate is inside `CertificateWarnDays` (21). |
 | 16 | ServerRestarted | Info (clean shutdown) or Warning (unexpected) | one-shot `reboot` | The agent noticed the machine booted since it last ran. |
 
-Types 13 to 16 and all alert keys are after-1.0.19 (unreleased). The `description` is English
-text written by the agent; show it, don't parse it.
+Types 13 to 16 and all alert keys are 1.0.20 (agents up to 1.0.19 never send them). The
+`description` is English text written by the agent; show it, don't parse it.
 
 ## Alert lifecycle
 

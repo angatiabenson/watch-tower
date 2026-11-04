@@ -165,10 +165,10 @@ ignored. Messages are shown exactly as the agent writes them (`<name>` is the tr
 | 204 | AppPoolRecycle | `AppPoolName` (required) | allow-list | base |
 | 301 | ForceMetricSnapshot | none | | base |
 | 302 | ForceConfigSync | none | | base |
-| 303 | AgentRestart | none | | base (a stub answering "reserved and not yet implemented" up to 1.0.19; working after-1.0.19) |
-| 304 | AgentUpdate | `Version` | | after-1.0.19 |
+| 303 | AgentRestart | none | | base (a stub answering "reserved and not yet implemented" up to 1.0.19; working from 1.0.20) |
+| 304 | AgentUpdate | `Version` | | 1.0.20 |
 | 401 | ApplyConfiguration | `ConfigJson` (required), `Version` | config validation | base |
-| 501 | SendTestNotification | `Channel` | | after-1.0.19 |
+| 501 | SendTestNotification | `Channel` | | 1.0.20 |
 
 Any other number: failed result `Unknown action type: <n>`.
 
@@ -275,7 +275,7 @@ when the download starts. Follow the rest in the batches: `agent.updatePhase`
 
 Pushes a remote configuration through the command channel instead of `GET config`. Refused when
 the operator turned off portal-managed settings (`VisibilityPortal:RemoteConfig:Enabled = false`),
-the same switch that stops config polling (agents after 1.0.19; earlier ones applied it anyway).
+the same switch that stops config polling (1.0.20 and later; earlier agents applied it anyway).
 
 - `ConfigJson` (required): a **string** containing a JSON [remote configuration](09-remote-config.md)
   object, camelCase and case-sensitive like `GET config`.

@@ -53,21 +53,22 @@ There is no capability negotiation. Use:
 
 - `agent.version` in every batch from current agents (semantic version; `0.0.0-dev` and other
   prerelease suffixes for development builds);
-- **no `agent` object at all** means a 1.0.x agent: 1.0.19 when the batch has a `batchId`,
-  1.0.18 or older when it hasn't;
+- **no `agent` object at all** means an agent up to 1.0.19: 1.0.19 when the batch has a
+  `batchId`, 1.0.18 or older when it hasn't;
 - the presence of a property, rather than version arithmetic, when you can (for example
-  `endpointStatuses`, `alertKey`). Check each property on its own: `isStale` came later than
-  the other after-1.0.19 properties, so a batch with an `agent` object can still lack it. A
-  missing `isStale` means unknown: fall back to the entry's `timestamp`
-  ([Staleness](06-telemetry-reference.md#staleness-isstale)).
+  `endpointStatuses`, `alertKey`), checking each property on its own. A missing `isStale`
+  means unknown: fall back to the entry's `timestamp`
+  ([Staleness](06-telemetry-reference.md#staleness-isstale)). Development builds from before
+  the 1.0.20 release may send an `agent` object without `isStale`.
 
 ## Feature compatibility
 
-`base` = every released v1 agent up to and including 1.0.19. `1.0.19` = added in 1.0.19
-(released 2026-06-15). `after-1.0.19` = added after 1.0.19 and not released yet: builds from
-the current source, then the first release after 1.0.19 and later.
+`base` = every released v1 agent. `1.0.19` = added in 1.0.19 (released 2026-06-15). `1.0.20` =
+added in 1.0.20 (released 2026-11-04). `after-1.0.20` = added after 1.0.20 and not released
+yet: builds from the current source, then the first release after 1.0.20 and later; not sent
+by 1.0.20 or earlier.
 
-| Feature | ≤ 1.0.18 | 1.0.19 | after-1.0.19 (unreleased) |
+| Feature | ≤ 1.0.18 | 1.0.19 | 1.0.20 |
 | --- | --- | --- | --- |
 | The seven endpoints, bearer + `X-Agent-Id`, BaseUrl path prefixes | ✓ | ✓ | ✓ |
 | Metrics series and snapshots (CPU, RAM, disks, queues, NICs, services, pools) | ✓ | ✓ | ✓ |
@@ -83,7 +84,7 @@ the current source, then the first release after 1.0.19 and later.
 | Command results retried with backoff, given up after `ResultRetryMaxHours` (168 h) | ✗ (every cycle, without limit) | ✗ (every cycle, without limit) | ✓ |
 | `ConfigurationError` endpoint status (invalid check keeps its last result) | ✗ (no `endpointStatuses`) | ✗ (no `endpointStatuses`) | ✓ |
 | Snapshot entries removed only when the resource is gone (absent past the grace period, or removed from the configuration; names compared case-insensitively) and kept through the daily report purge | ✗ (every snapshot row deleted by the daily report purge, then read again) | ✗ (as 1.0.18) | ✓ |
-| `isStale` on every snapshot entry (HTTPS `isStale`; gRPC `is_stale`) | ✗ (absent: unknown, judge by `timestamp`) | ✗ (as 1.0.18) | ✓ from later unreleased builds only; earlier ones omit it too |
+| `isStale` on every snapshot entry (HTTPS `isStale`; gRPC `is_stale`) | ✗ (absent: unknown, judge by `timestamp`) | ✗ (as 1.0.18) | ✓ |
 | 3xx answered as a failure, redirects not followed | ✗ (followed by .NET, dropping the token) | ✗ (as 1.0.18) | ✓ |
 | Local allow-list for service and pool commands | ✗ (any service or pool name is acted on) | partial (watched names only, but watch lists pushed by the portal count; others fail with `Not authorized: ...`) | ✓ (`AllowPortalManagedTargets` opt-in) |
 | Remote configuration validation of every field (ranges, names, list sizes, all or nothing) | partial (CPU/RAM poll interval and threshold, disk critical threshold only) | partial (every poll interval, portal timings included, CPU/RAM sustained time, CPU/RAM/disk thresholds only) | ✓ |
@@ -94,7 +95,7 @@ the current source, then the first release after 1.0.19 and later.
 | Results for commands interrupted by a restart (`Interrupted: ...`) | ✗ | ✗ | ✓ |
 | Commands stored but not started before a restart run afterwards, or expire (`Rejected: command expired before it could run (agent restarted)`) | ✗ (never run, no result) | ✗ (as 1.0.18) | ✓ |
 
-Consequences for portals with 1.0.x agents in the fleet (1.0.19 included): send a current
+Consequences for portals with 1.0.19 or older agents in the fleet: send a current
 `issuedAt` anyway (it becomes REQUIRED in v2; 1.0.19 drops a command whose `issuedAt` is stale
 without answering it), validate remote configuration yourself (those agents check only a few
 values), and gate service and pool commands in the portal: 1.0.18 and older act on any name,
