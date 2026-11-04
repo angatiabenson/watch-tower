@@ -33,8 +33,10 @@ info:
 
     * A portal MUST ignore JSON properties it does not know. Later v1 agents add properties
       (see `x-since`) and will keep doing so.
-    * A portal MUST accept enum values it does not know (`x-extensible-enum: true`) and treat
-      them as an unrecognised but valid value, for example by storing and displaying them.
+    * Value sets that grow (incident types, action types, statuses) are NOT closed `enum`s. Their
+      schema accepts any value of the declared type; the values known today are listed in
+      `x-extensible-enum` and in the description. A portal MUST accept a value it does not know
+      and treat it as unrecognised but valid, for example by storing and displaying it.
     * A portal MUST NOT reject a request because an optional property is missing. Older v1
       agents do not send properties marked `x-since: post-1.0.18`.
     * The agent ignores response properties it does not know, so a portal MAY add its own.
@@ -50,6 +52,27 @@ info:
     The agent only distinguishes success (any 2xx) from failure (everything else, plus
     timeouts and network errors). It never treats a 4xx as a permanent rejection. See each
     operation's `x-agent-behaviour` and `guides/portal-api/10-reliability.md`.
+
+    The agent does NOT follow redirects. Any 3xx (304 included) fails that call: a POST counts
+    as not delivered (metrics batches and events stay in the outbox and are retried with
+    backoff, command results are retried on every poll cycle, acknowledgements are never
+    retried), `GET commands/pending` counts as no commands and `GET config` as no change. The
+    agent logs, at most once per 15 minutes per endpoint: "Portal redirected <path> to
+    <absolute Location>; update VisibilityPortal:BaseUrl. The redirect (<status>) was not
+    followed and the call counts as failed (<n> more redirect(s) of this endpoint since the
+    last warning)", with "(no Location header)" when there is none. A portal MUST NOT redirect
+    agent API calls (for example from http to https, or to add a trailing slash); publish the
+    final URL as the agent's BaseUrl instead.
+
+    The bearer token and `X-Agent-Id` are only ever sent to URLs below BaseUrl (same scheme,
+    host, port and path prefix); a request for any other URL is refused and logged.
+
+    Outbox delivery (metrics batches and events) stops for the current flush cycle at the first
+    failure; the remaining messages wait for the next cycle. The failed message itself is not
+    resent on the very next cycle: it waits until its backoff expires (see each operation's
+    `x-agent-behaviour.failure`) and is retried on the first flush cycle after that. Other
+    eligible messages may be delivered in the meantime, so delivery order is not guaranteed
+    after a failure.
   license:
     name: MIT
     identifier: MIT
@@ -91,17 +114,31 @@ paths:
         and immediately after a ForceMetricSnapshot (301) command. One batch per request.
 
         CPU and RAM samples are incremental: each sample is sent in exactly one batch (but that
-        batch may be delivered more than once). Disk, disk-queue, network, service, application
-        pool and endpoint entries are snapshots of the latest reading and are repeated in every
-        batch until a newer reading replaces them.
+        batch may be delivered more than once). The first batches after the portal is enabled
+        can also carry samples the agent collected (and still retained) before that: forwarding
+        starts at the oldest stored sample, at most Outbox:MaxBatchSize per batch.
+
+        Disk, disk-queue, network, service, application pool and endpoint entries are the
+        last-known reading per resource and are repeated in every batch until a newer reading
+        replaces them or the resource is removed:
+
+        * Drives, physical disks and network interfaces are removed once the resource has been
+          absent from 3 consecutive successful inventories AND for at least 10 minutes, whether
+          or not it has an alert. A failed read never counts, and neither does an empty disk
+          listing (an empty network-interface listing does).
+        * Services, application pools and endpoint checks are removed on the next poll after the
+          name leaves Monitoring:Services:WatchedServices,
+          Monitoring:ApplicationPools:WatchedApplicationPools or the valid Monitoring:Endpoints. Names match exactly, so renaming only the letter case replaces the entry.
+        * The next batch is built from what remains; a resource that comes back starts a fresh
+          entry. A portal MUST NOT expect a resource to vanish from the very next batch.
 
         Deduplicate on `batchId` (when present). The same `batchId` MUST produce the same
         stored result however many times it arrives.
       x-agent-behaviour:
         frequency: every Outbox.FlushIntervalSeconds (default 30 s) when there is data; immediately after command 301
         success: any 2xx; the response body is ignored
-        failure: any other status, a timeout (30 s) or a network error; the batch is retried with linear backoff (RetryBackoffSeconds x attempt, default 60 s) and dropped after MaxRetryAttempts (default 5) failed attempts
-        ordering: delivered oldest first within the same priority; events are sent before metrics
+        failure: any other status (including every 3xx, 304 too, which is never followed), a timeout (30 s) or a network error. The batch waits RetryBackoffSeconds x attempt (default 60 s, 120 s, ...) and is retried on the first flush cycle after that; it is dropped after MaxRetryAttempts (default 5) failed attempts
+        ordering: oldest first within the same priority, events before metrics; after a failure, later messages may be delivered before the one that failed
       requestBody:
         required: true
         content:
@@ -121,9 +158,9 @@ paths:
         '413':
           description: Too large. Treated as a failure and retried, so a portal MUST accept batches of the documented maximum size.
         '429':
-          description: Rate limited. Treated as a failure; the agent does not read Retry-After and tries again on its next cycle.
+          description: Rate limited. Treated as a failure; the agent does not read Retry-After and retries the batch once its backoff (60 s by default for the first retry) has expired.
         default:
-          description: Any other status (including 3xx, 400, 403, 404 and 5xx) is a failure and the batch is retried.
+          description: Any other status (including 3xx, 400, 403, 404 and 5xx) is a failure and the batch is retried after its backoff. Redirects are not followed.
 
   /api/v1/agent/events:
     post:
@@ -137,7 +174,7 @@ paths:
       x-agent-behaviour:
         frequency: when an incident happens; queued in the outbox and sent on the next flush cycle (default every 30 s)
         success: any 2xx; the response body is ignored
-        failure: any other status, a timeout or a network error; retried with exponential backoff 30 s, 60 s, 120 s ... capped at 15 min, dropped once older than EventMaxAgeHours (default 168 h)
+        failure: any other status (including every 3xx, 304 too, which is never followed), a timeout or a network error. The event waits 30 s, 60 s, 120 s ... (capped at 15 min) and is retried on the first flush cycle after that; it is dropped once older than EventMaxAgeHours (default 168 h)
       requestBody:
         required: true
         content:
@@ -161,7 +198,7 @@ paths:
         '401':
           description: Missing or invalid credentials; logged as an error and retried.
         default:
-          description: Any other status is a failure and the event is retried.
+          description: Any other status (including 3xx) is a failure and the event is retried after its backoff.
 
   /api/v1/agent/commands/pending:
     get:
@@ -176,11 +213,27 @@ paths:
 
         The whole response is parsed as one JSON array. If it cannot be parsed (for example
         one command has a numeric `parameters` value or a string `actionType`), the agent
-        logs a warning and processes NONE of the commands in that response.
+        logs a warning and processes NONE of the commands in that response. Property names that
+        do not match exactly (such as PascalCase `CommandId`) are ignored instead, so such a
+        command parses with defaults and is then dropped on its own (no `commandId`).
+
+        `issuedAt` protects against replays (unless the agent sets
+        CommandPoll:MaxCommandAgeSeconds to 0, which disables the check):
+
+        * Absent: the command is accepted, acknowledged and executed. The agent logs once per
+          process (and again after a BaseUrl change): "Portal sends commands without issuedAt;
+          replay protection is reduced. Update the portal."
+        * Present: the command is rejected when it is older than MaxCommandAgeSeconds +
+          ClockSkewSeconds (3600 + 300 s by default), more than ClockSkewSeconds (300 s) in the
+          future, or unparseable. Exactly 3900 s old or exactly 300 s ahead is accepted.
+        * A rejected command is never acknowledged or executed. The agent stores it as failed and
+          POSTs its result (`success: false`, `message` "Rejected: <reason>"), retried like every
+          result until the portal answers 2xx. If the commandId is already known to the agent,
+          nothing is reported: the earlier outcome stands.
       x-agent-behaviour:
         frequency: every CommandPoll.PollIntervalSeconds (default 30 s); disabled when that value is 0 or less
         success: 200 with a JSON array (an empty array or a JSON null means no commands) or 204
-        failure: any other status, unparseable JSON, a timeout or a network error is logged and treated as no commands; the next poll happens on schedule
+        failure: any other status (including a 3xx, which is not followed), unparseable JSON, a timeout or a network error is logged and treated as no commands; the next poll happens on schedule
       responses:
         '200':
           description: The pending commands, oldest first is RECOMMENDED.
@@ -213,8 +266,8 @@ paths:
         The acknowledgement is NOT retried when it fails; the command is executed anyway. A
         portal MUST therefore accept a result for a command it never saw acknowledged.
 
-        Commands the agent rejects as stale or from the future (see `issuedAt`) are neither
-        acknowledged nor answered with a result.
+        A command the agent rejects for its `issuedAt` (stale, from the future or unparseable;
+        see `GET commands/pending`) is never acknowledged: it gets a failed result instead.
       x-agent-behaviour:
         frequency: once per accepted command delivery (again for a re-delivered command)
         success: any 2xx
@@ -244,7 +297,8 @@ paths:
       tags: [Commands]
       summary: Record the outcome of a command
       description: |
-        Sent when a command finished, failed, was refused (for example "Not authorized"), timed
+        Sent when a command finished, failed, was refused (for example "Not authorized", or
+        "Rejected: <reason>" for an `issuedAt` that is stale, in the future or unparseable), timed
         out, or was found interrupted after an agent restart. Results are stored by the agent
         and retried on every command-poll cycle until the portal answers 2xx, without a
         retry limit. The same result can therefore arrive more than once: the first accepted
@@ -297,7 +351,7 @@ paths:
       x-agent-behaviour:
         frequency: every RemoteConfig.PollIntervalSeconds (default 300 s); immediately after command 302; not at all when RemoteConfig.Enabled is false
         success: 204 (no change) or 200 with a body whose config and version are both non-null
-        failure: any other status, unparseable JSON, a 200 whose config or version is null, a timeout or a network error is treated as no change
+        failure: any other status (including a 3xx, which is not followed), unparseable JSON, a 200 whose config or version is null, a timeout or a network error is treated as no change
       parameters:
         - name: version
           in: query
@@ -332,12 +386,17 @@ paths:
       summary: Record that the agent applied a configuration version
       description: |
         Sent after the agent wrote a configuration version to its overlay file (fetched from
-        `GET config`, or pushed with an ApplyConfiguration (401) command). Retried on every
-        config poll cycle until the portal answers 2xx.
+        `GET config`, or pushed with an ApplyConfiguration (401) command).
+
+        The agent remembers only its current version. While that version is unacknowledged,
+        the acknowledgement is retried on every config poll cycle until the portal answers 2xx.
+        Once a newer version is applied, the older one is never acknowledged: the newer
+        version supersedes it. A missing acknowledgement therefore does not prove that a
+        version was not applied; compare with the `version` query parameter of later polls.
       x-agent-behaviour:
-        frequency: on the config poll cycle after a new version was applied, then on every cycle until accepted
+        frequency: on the config poll cycle after a new version was applied, then on every cycle while that version is current and unacknowledged
         success: any 2xx
-        failure: any other status, a timeout or a network error; retried on the next config poll cycle
+        failure: any other status, a timeout or a network error; retried on the next config poll cycle unless a newer version has been applied meanwhile
       requestBody:
         required: true
         content:
@@ -434,31 +493,31 @@ components:
           x-since: base
         diskMetrics:
           type: array
-          description: Latest reading per fixed drive (snapshot, repeated every batch).
+          description: Last-known reading per fixed drive (snapshot, repeated every batch; see the operation for when an entry is removed).
           items:
             $ref: '#/components/schemas/DiskMetric'
           x-since: base
         diskQueueMetrics:
           type: array
-          description: Latest disk queue length per physical disk (snapshot).
+          description: Last-known disk queue length per physical disk (snapshot).
           items:
             $ref: '#/components/schemas/DiskQueueMetric'
           x-since: base
         networkMetrics:
           type: array
-          description: Latest output queue length per network interface (snapshot).
+          description: Last-known output queue length per network interface (snapshot).
           items:
             $ref: '#/components/schemas/NetworkMetric'
           x-since: base
         serviceStatuses:
           type: array
-          description: Latest status per watched Windows service (snapshot).
+          description: Last-known status per watched Windows service (snapshot).
           items:
             $ref: '#/components/schemas/ServiceStatus'
           x-since: base
         applicationPoolStatuses:
           type: array
-          description: Latest status per watched IIS application pool (snapshot).
+          description: Last-known status per watched IIS application pool (snapshot).
           items:
             $ref: '#/components/schemas/ApplicationPoolStatus'
           x-since: base
@@ -467,7 +526,7 @@ components:
           x-since: post-1.0.18
         endpointStatuses:
           type: array
-          description: Latest result per configured endpoint check (snapshot). Absent when no endpoint has a result yet.
+          description: Last-known result per configured endpoint check (snapshot). Absent when no endpoint has a result yet.
           items:
             $ref: '#/components/schemas/EndpointStatus'
           x-since: post-1.0.18
@@ -497,9 +556,8 @@ components:
           description: Seconds since this agent PROCESS started (not the machine's uptime).
         updatePhase:
           type: string
-          description: Self-update state.
-          enum: [Idle, Checking, UpToDate, Available, Downloading, ReadyToInstall, Installing, Failed]
-          x-extensible-enum: true
+          description: Self-update state. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Idle, Checking, UpToDate, Available, Downloading, ReadyToInstall, Installing, Failed]
         availableVersion:
           type: string
           description: Newer version offered by the update feed. Absent when none is known.
@@ -634,9 +692,8 @@ components:
           description: Display name; equals serviceName when the service was not found.
         status:
           type: string
-          description: Service Control Manager state, or NotFound.
-          enum: [Running, Stopped, StartPending, StopPending, ContinuePending, PausePending, Paused, NotFound]
-          x-extensible-enum: true
+          description: Service Control Manager state, or NotFound when the service could not be read. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Running, Stopped, StartPending, StopPending, ContinuePending, PausePending, Paused, NotFound]
         isRunning:
           type: boolean
           description: True only when status is Running.
@@ -651,9 +708,8 @@ components:
           type: string
         status:
           type: string
-          description: IIS state as reported by appcmd or PowerShell, or Unknown when it could not be read.
-          enum: [Started, Stopped, Starting, Stopping, Unknown]
-          x-extensible-enum: true
+          description: IIS state as reported by appcmd or PowerShell, Unknown when it could not be read, or NotFound when IIS has no pool of that name. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Started, Stopped, Starting, Stopping, Unknown, NotFound]
         isRunning:
           type: boolean
           description: True only when status is Started.
@@ -669,16 +725,15 @@ components:
           description: Operator-chosen check name, unique per agent.
         type:
           type: string
-          enum: [Http, Tcp, Certificate]
-          x-extensible-enum: true
+          description: Check type. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Http, Tcp, Certificate]
         target:
           type: string
           description: URL or host:port, without credentials or query string.
         status:
           type: string
-          enum: [Up, Down, Expiring]
-          x-extensible-enum: true
-          description: Expiring means reachable, but the TLS certificate is inside its warning window.
+          x-extensible-enum: [Up, Down, Expiring]
+          description: Expiring means reachable, but the TLS certificate is inside its warning window. Known values are listed in x-extensible-enum; accept others.
         isUp:
           type: boolean
           description: False only when status is Down.
@@ -743,9 +798,9 @@ components:
         4 DiskCritical, 5 DiskQueueHigh, 6 NetworkQueueSaturated, 7 ServiceDown, 8 ServiceRestarted,
         9 ServiceRestartFailed, 10 ApplicationPoolDown, 11 ApplicationPoolStarted,
         12 ApplicationPoolStartFailed, 13 EndpointDown, 14 EndpointRecovered,
-        15 CertificateExpiring, 16 ServerRestarted. Numbers never change; new types are appended.
-      enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-      x-extensible-enum: true
+        15 CertificateExpiring, 16 ServerRestarted. Numbers never change; new types are appended,
+        so accept (store and display) a number not in this list.
+      x-extensible-enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
       x-enum-names: [CpuThresholdBreached, CpuSpikeDetected, RamThresholdBreached, RamSpikeDetected, DiskCritical, DiskQueueHigh, NetworkQueueSaturated, ServiceDown, ServiceRestarted, ServiceRestartFailed, ApplicationPoolDown, ApplicationPoolStarted, ApplicationPoolStartFailed, EndpointDown, EndpointRecovered, CertificateExpiring, ServerRestarted]
 
     ProcessInfo:
@@ -780,14 +835,13 @@ components:
         303 AgentRestart, 304 AgentUpdate, 401 ApplyConfiguration, 501 SendTestNotification.
         Unknown numbers are accepted by the agent and answered with a failed result
         ("Unknown action type: N").
-      enum: [101, 102, 103, 201, 202, 203, 204, 301, 302, 303, 304, 401, 501]
-      x-extensible-enum: true
+      x-extensible-enum: [101, 102, 103, 201, 202, 203, 204, 301, 302, 303, 304, 401, 501]
       x-enum-names: [ServiceStart, ServiceStop, ServiceRestart, AppPoolStart, AppPoolStop, AppPoolRestart, AppPoolRecycle, ForceMetricSnapshot, ForceConfigSync, AgentRestart, AgentUpdate, ApplyConfiguration, SendTestNotification]
 
     AgentCommand:
       type: object
       description: A command sent by the portal (portal to agent).
-      required: [commandId, actionType, issuedAt]
+      required: [commandId, actionType]
       properties:
         commandId:
           type: string
@@ -815,11 +869,19 @@ components:
           type: string
           format: date-time
           description: |
-            When the portal issued the command (UTC RECOMMENDED; no offset = UTC). REQUIRED while
-            the agent's CommandPoll:MaxCommandAgeSeconds is above 0 (default 3600): the agent
-            silently drops commands without it, with an unparseable value, issued more than
-            ClockSkewSeconds (default 300) in the future, or older than
-            MaxCommandAgeSeconds + ClockSkewSeconds.
+            When the portal issued the command, as an RFC 3339 timestamp (UTC RECOMMENDED; a
+            value without an offset is taken as UTC). Portals SHOULD send it; it becomes REQUIRED
+            in protocol v2. When present, and while CommandPoll:MaxCommandAgeSeconds is above 0
+            (default 3600), the agent rejects a command issued more than ClockSkewSeconds
+            (default 300 s) in the future or longer ago than MaxCommandAgeSeconds +
+            ClockSkewSeconds (default 3900 s; the exact limits are accepted), and one whose
+            value it cannot parse. A rejected command is never acknowledged or executed; its
+            result is `success: false` with the message "Rejected: " followed by
+            "command is stale: issuedAt <t> is more than 3900s old (...)", "issuedAt <t> is more
+            than 300s in the future (...)" or "unparseable issuedAt '<value>'". When absent, the
+            command is accepted, acknowledged and executed, with a one-time warning in the
+            agent log (see `GET commands/pending`). Generate it when the command is created,
+            never from a fixed literal.
 
     AcknowledgeCommand:
       type: object
@@ -844,7 +906,7 @@ components:
           type: boolean
         message:
           type: string
-          description: Human-readable outcome written by the agent (English). Do not parse it.
+          description: 'Human-readable outcome written by the agent (English). Do not parse it, except that a message starting with "Rejected: " means the command was refused for its issuedAt and never ran.'
         executedAt:
           $ref: '#/components/schemas/Timestamp'
           description: When execution started (or when the command was refused or found interrupted).
