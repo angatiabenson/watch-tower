@@ -119,11 +119,15 @@ if (-not (Test-Administrator)) {
     throw 'Run this from an elevated PowerShell (Run as administrator): installing WatchTower registers a Windows service.'
 }
 
-# TLS 1.2 (and 1.3 where .NET knows it) for Windows PowerShell 5.1 on older .NET defaults;
-# PowerShell 7 already uses the operating system's settings.
-$protocols = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') { $protocols = $protocols -bor [Net.SecurityProtocolType]::Tls13 }
-[Net.ServicePointManager]::SecurityProtocol = $protocols
+# Windows PowerShell 5.1 (.NET Framework) may still default to TLS 1.0/1.1: set exactly TLS 1.2,
+# replacing the session's mask (OR-ing into it would keep the old protocols enabled). TLS 1.3 is
+# left out on purpose: .NET Framework can offer it on Windows builds whose SChannel lacks it, which
+# breaks the handshake. PowerShell 7 already uses the operating system's TLS 1.2+ defaults, so it is
+# left alone. The session's previous setting is restored when the script ends.
+$previousProtocols = [Net.ServicePointManager]::SecurityProtocol
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ('WatchTower-get-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
@@ -216,6 +220,7 @@ try {
     & $installer @installParameters
 }
 finally {
+    [Net.ServicePointManager]::SecurityProtocol = $previousProtocols
     if ($policyChanged) {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy $previousPolicy -Force
     }
