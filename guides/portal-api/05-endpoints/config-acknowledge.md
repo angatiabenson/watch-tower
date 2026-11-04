@@ -54,8 +54,10 @@ record it, because it tells you what the agent runs.
   new poll interval applies after the current wait ends.
 - It does not mean the agent's local operator settings agree. Environment variables on the
   server still win over the portal (see [layering](../09-remote-config.md#layering)).
-- No acknowledgement within two or three poll intervals after the agent fetched a version means
-  it was rejected as invalid, or the agent can't reach this endpoint.
+- No acknowledgement does not prove a rejection. The version may have been rejected as invalid,
+  the agent may be offline or unable to reach this endpoint, or the version was applied and then
+  superseded by a newer one before its acknowledgement got through. Record the version the agent
+  reports in later `GET config?version=...` requests; the agent's log confirms a rejection.
 
 ## Common mistakes
 

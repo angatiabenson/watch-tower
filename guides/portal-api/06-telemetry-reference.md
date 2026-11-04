@@ -72,9 +72,10 @@ One entry per **fixed** drive that is ready (no removable, network or CD drives)
 
 Display: a bar per drive with used/free; warn at the agent's thresholds (`Monitoring:Disk:WarningThresholdPercent`
 70, `CriticalThresholdPercent` 85 by default, or what you pushed in [remote config](09-remote-config.md)).
-A drive that is removed or not ready stays in the list with its last reading until it has been
-absent from 3 consecutive successful inventories and for at least 10 minutes; then it disappears
-from the list, and an open alert for it is retired (see
+A removed drive stays in the list with its last reading until it has been absent from 3
+consecutive successful inventories and for at least 10 minutes; then it disappears from the list,
+and an open alert for it is retired. A drive that is still present but not ready keeps its last
+reading indefinitely: show it as stale using its `timestamp` (see
 [Events and alerts](07-events-and-alerts.md#retirement)).
 
 ## Disk queues (`diskQueueMetrics[]`)
@@ -120,7 +121,7 @@ One entry per name in `Monitoring:ApplicationPools:WatchedApplicationPools`, eve
 | Field | Notes |
 | --- | --- |
 | `applicationPoolName` | pool name as configured |
-| `status` | `Started`, `Stopped`, `Starting`, `Stopping`, or `Unknown` (IIS not installed, pool missing, query failed) |
+| `status` | `Started`, `Stopped`, `Starting`, `Stopping`, `NotFound` (no pool with that name exists) or `Unknown` (IIS unavailable or the query failed). Treat the set as open: accept and display values you don't know |
 | `isRunning` | `true` only for `Started` |
 
 ## Endpoints (`endpointStatuses[]`, post-1.0.18)
@@ -142,7 +143,8 @@ Absent from the batch until at least one check produced a result.
 The agent alerts only after `FailuresBeforeAlert` (default 2) consecutive failures, but every
 single result is reported here.
 
-**`ConfigurationError`.** When an operator (or your remote configuration) leaves a check
+**`ConfigurationError`.** Endpoint checks are configured locally by the operator (remote
+configuration can't change them). When the operator leaves a check
 configured but invalid, even only for a moment while editing it, the check stops running, its
 open `endpoint:<name>` alert is retired and its entry keeps the **last result**: `timestamp`,
 `type`, `target`, `isUp`, `responseTimeMs` and `certificateDaysLeft` stay as they were, `status`

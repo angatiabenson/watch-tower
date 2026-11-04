@@ -79,7 +79,8 @@ Gaps in CPU/RAM after a long outage are batches that ran out of attempts.
 
 ### An endpoint check reports `ConfigurationError`, or never changes
 
-The check is still configured but invalid (locally or in your remote configuration), so it
+The check is still configured but invalid in the operator's local settings (remote configuration
+can't change endpoint checks), so it
 doesn't run. Its entry keeps the last result and its `timestamp`, and `detail` says what is
 wrong: `Configuration error: <error> Last result: <status>[: <detail>]`. Fix the check: it then
 runs at once. If your portal still shows the old status, it only replaces an entry when the
@@ -93,9 +94,9 @@ runs at once. If your portal still shows the old status, it only replaces an ent
   gone. Look for `PollCommands failed` (with a JSON exception) in the log.
 - PascalCase or misspelled property names are different: unknown properties are ignored, so each
   such command is read with defaults and fails on its own. Without `commandId` it is skipped
-  (`Ignoring command without a CommandId (ActionType=...)`); with `CommandId` but `ActionType` it
-  runs as action 0 and fails (`Unknown action type: 0`); `IssuedAt` is not read, so the command
-  counts as one without `issuedAt` (accepted with a replay-protection warning, or rejected when
+  (`Ignoring command without a CommandId (ActionType=...)`), and so is one with `CommandId`
+  (wrong case). With `commandId` but `ActionType` it runs as action 0 and fails
+  (`Unknown action type: 0`). `IssuedAt` is not read, so the command counts as one without `issuedAt` (accepted with a replay-protection warning, or rejected when
   the operator set `RequireCommandIssuedAt`).
 - `issuedAt` is older than 3600 + 300 s, more than 300 s in the future (check the server's clock)
   or unparseable, or it is missing and the operator set `VisibilityPortal:RequireCommandIssuedAt`.
@@ -133,8 +134,11 @@ The agent restarts watched services it finds stopped. Push a maintenance window 
 
 ### Configuration is not applied
 
-- No acknowledgement: the agent rejected it. The log line `Remote config version ... failed validation`
-  names the first bad value. Or the JSON didn't parse (wrong types): `FetchConfiguration failed`.
+- No acknowledgement: this does not prove a rejection. The agent may be offline, the acknowledgement
+  may have failed to deliver, or a newer applied version superseded it; check which version the agent
+  reports in its later `GET config?version=...` requests. A real rejection logs
+  `Remote config version ... failed validation` (naming the first bad value); JSON that didn't parse
+  (wrong types) logs `FetchConfiguration failed`.
 - Acknowledged but no effect:
   - you used PascalCase or misspelled names (silently ignored);
   - an environment variable on the server overrides the setting;

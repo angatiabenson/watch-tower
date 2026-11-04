@@ -296,8 +296,10 @@ Transfer-Encoding: chunked
 { "version": "2026-11-03.5" }
 ```
 
-Answer 2xx. If no acknowledgement arrives within a few poll intervals, the agent rejected the
-configuration (see [Remote configuration](09-remote-config.md)).
+Answer 2xx. A missing acknowledgement does not prove rejection: the agent may be offline, the acknowledgement
+may have failed to deliver, or a newer applied version may have superseded it. Record the version
+the agent reports in later `GET config?version=...` requests, and use the agent's validation log
+(`Remote config version ... failed validation`) to confirm a rejection (see [Remote configuration](09-remote-config.md)).
 
 ```bash
 curl -i -H "Authorization: Bearer $TOKEN" -H "X-Agent-Id: $AGENT" "$PORTAL/api/v1/agent/config"
