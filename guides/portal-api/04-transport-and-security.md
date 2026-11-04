@@ -125,7 +125,7 @@ agent falls back:
 | --- | --- |
 | 2xx | Delivered. |
 | 415 | Resends the same request once, uncompressed. Logs one warning, `Portal does not accept compressed requests; sending uncompressed`, and sends everything uncompressed until the service restarts or `CompressRequests` or `BaseUrl` changes. |
-| 400, before the portal has accepted any compressed request | Resends once uncompressed. If that is accepted, the encoding was the cause: same as 415. If not, it's an ordinary failure and compression stays on. A portal that ignores `Content-Encoding` and fails to parse the gzip bytes as JSON ends up here. |
+| 400, before the portal has accepted any compressed request | Resends once uncompressed. If that is accepted, the encoding *may* have been the cause, so compression is suspended for 1 hour and then tried again; the third such refusal in a row (with no compressed request accepted in between) switches it off like a 415. If the uncompressed resend fails too, it's an ordinary failure and compression stays on. A portal that ignores `Content-Encoding` and fails to parse the gzip bytes as JSON ends up here; answer 415 instead so the agent stops at once. |
 | 400, after the portal has accepted compressed requests | Ordinary failure (the content, not the encoding). |
 | 413 | Resends once uncompressed (the body inflated past your cap); compression stays on. |
 | anything else | As without compression. |

@@ -95,17 +95,18 @@ public class GrpcPortalClient : IPortalClient, IDisposable
     /// </summary>
     private async Task<TReply> CallCompressibleAsync<TReply>(Func<Metadata, Task<TReply>> call)
     {
-        var gzip = _compression.Enabled;
+        var ticket = _compression.Begin();
+        var gzip = ticket.Gzip;
         try
         {
             var reply = await call(BuildMetadata(gzip));
             if (gzip)
-                _compression.MarkAccepted();
+                _compression.MarkAccepted(ticket);
             return reply;
         }
         catch (RpcException ex) when (gzip && RefusesEncoding(ex))
         {
-            _compression.Disable($"{ex.StatusCode} \"{ex.Status.Detail}\"");
+            _compression.Disable(ticket, $"{ex.StatusCode} \"{ex.Status.Detail}\"");
             return await call(BuildMetadata(compress: false));
         }
     }

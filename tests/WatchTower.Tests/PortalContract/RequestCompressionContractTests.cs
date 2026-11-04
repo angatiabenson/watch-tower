@@ -16,6 +16,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 
 using Moq;
 
@@ -28,6 +29,7 @@ using WatchTower.Portal.Actions;
 using WatchTower.Portal.Clients;
 using WatchTower.Portal.Storage;
 using WatchTower.Services.Abstractions;
+using WatchTower.Tests.Alerting;
 using WatchTower.Tests.Hosting;
 using WatchTower.Tests.Ui;
 using WatchTower.Workers;
@@ -312,7 +314,7 @@ public sealed class RequestCompressionContractTests : IAsyncLifetime
     // ── against test servers that refuse in other ways ──────────────────────────────────────
 
     private static (HttpsPortalClient Client, FakePortal Handler, RecordingLoggerProvider Logs) Fake(
-        Func<bool, HttpResponseMessage> respond, IOptionsMonitor<PortalOptions>? monitor = null)
+        Func<bool, HttpResponseMessage> respond, IOptionsMonitor<PortalOptions>? monitor = null, TimeProvider? time = null)
     {
         var handler = new FakePortal(respond);
         var logs = new RecordingLoggerProvider();
@@ -322,9 +324,12 @@ public sealed class RequestCompressionContractTests : IAsyncLifetime
         ServiceCollectionExtensions.AddPortalHttpClient(services, monitor.CurrentValue.BaseUrl)
             .ConfigurePrimaryHttpMessageHandler(() => handler);
         var client = new HttpsPortalClient(services.BuildServiceProvider().GetRequiredService<IHttpClientFactory>(), monitor,
-            logs.CreateLogger<HttpsPortalClient>());
+            logs.CreateLogger<HttpsPortalClient>(), time);
         return (client, handler, logs);
     }
+
+    private static IEnumerable<LogEntry> SuspendWarnings(RecordingLoggerProvider logs) =>
+        logs.At(LogLevel.Warning).Where(e => e.Message.Contains("then trying compression again"));
 
     private static PortalOptions GzipOptions(string baseUrl = "https://portal.example.com")
     {
@@ -369,16 +374,76 @@ public sealed class RequestCompressionContractTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Status400_CausedByTheEncoding_SwitchesCompressionOff()
+    public async Task Status400_ThatThePlainBodyPasses_SuspendsCompressionForAnHour_ThenProbesAgain()
     {
-        // A portal without support that tries to parse the gzip bytes as JSON answers 400.
-        var (client, handler, logs) = Fake(RefuseGzip(HttpStatusCode.BadRequest));
+        // A single 400 may be transient: compression pauses, then is tried again.
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-11-04T00:00:00Z"));
+        var calls = 0;
+        var (client, handler, logs) = Fake(gzip => new HttpResponseMessage(
+            gzip && ++calls == 1 ? HttpStatusCode.BadRequest : HttpStatusCode.OK), time: time);
 
-        (await client.SendMetricsBatchAsync(AgentPayloads.FullBatch(), Ct)).Should().BeTrue();
+        (await client.SendMetricsBatchAsync(AgentPayloads.FullBatch(), Ct)).Should().BeTrue();   // gzip 400 → plain 200
+        (await client.SendEventAsync(AgentPayloads.FullEvent(), Ct)).Should().BeTrue();          // suspended: plain
+        time.Advance(RequestCompression.SuspendFor + TimeSpan.FromSeconds(1));
+        (await client.SendEventAsync(AgentPayloads.FullEvent(), Ct)).Should().BeTrue();          // probed again: gzip 200
+
+        Compressed(handler).Should().Equal(true, false, false, true);
+        SuspendWarnings(logs).Should().ContainSingle().Which.Message.Should().Contain("400");
+        FallbackWarnings(logs).Should().BeEmpty("one ambiguous 400 does not switch compression off");
+    }
+
+    [Fact]
+    public async Task Status400_CausedByTheEncoding_SwitchesCompressionOff_AfterThreeRefusalsInARow()
+    {
+        // A portal without support that tries to parse the gzip bytes as JSON answers 400 every time.
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-11-04T00:00:00Z"));
+        var (client, handler, logs) = Fake(RefuseGzip(HttpStatusCode.BadRequest), time: time);
+
+        for (var probe = 0; probe < RequestCompression.MaxAmbiguousRefusals; probe++)
+        {
+            (await client.SendMetricsBatchAsync(AgentPayloads.FullBatch(), Ct)).Should().BeTrue();
+            time.Advance(RequestCompression.SuspendFor + TimeSpan.FromSeconds(1));
+        }
         (await client.SendEventAsync(AgentPayloads.FullEvent(), Ct)).Should().BeTrue();
 
-        Compressed(handler).Should().Equal(true, false, false);
-        FallbackWarnings(logs).Should().ContainSingle().Which.Message.Should().Contain("400");
+        Compressed(handler).Should().Equal(true, false, true, false, true, false, false);
+        SuspendWarnings(logs).Should().HaveCount(RequestCompression.MaxAmbiguousRefusals - 1);
+        FallbackWarnings(logs).Should().ContainSingle().Which.Message.Should().Contain("400").And.Contain("3 times in a row");
+    }
+
+    [Fact]
+    public void ARefusalFromThePreviousPortal_DoesNotChangeTheNewPortalsCompression()
+    {
+        // The reviewer's race: a compressed request is in flight to the old BaseUrl, the operator
+        // switches portals, then the old portal's 415 arrives.
+        var monitor = new TestOptionsMonitor<PortalOptions>(GzipOptions("https://old.example.com"));
+        var compression = new RequestCompression(monitor, NullLogger.Instance);
+        var stale = compression.Begin();
+        stale.Gzip.Should().BeTrue();
+
+        monitor.CurrentValue = GzipOptions("https://new.example.com");
+        compression.Disable(stale, "415 Unsupported Media Type");
+        compression.MarkAccepted(stale);
+
+        var fresh = compression.Begin();
+        fresh.Gzip.Should().BeTrue("the old portal's refusal must not switch the new portal's compression off");
+        compression.IsProven(fresh).Should().BeFalse("the old portal's acceptance proves nothing about the new one");
+
+        compression.RefusedAmbiguously(stale, "400 Bad Request");
+        compression.Begin().Gzip.Should().BeTrue("a stale ambiguous refusal is ignored too");
+    }
+
+    [Fact]
+    public void AnAmbiguousRefusal_AfterThePortalWasProven_IsIgnored()
+    {
+        var monitor = new TestOptionsMonitor<PortalOptions>(GzipOptions());
+        var compression = new RequestCompression(monitor, NullLogger.Instance);
+        var ticket = compression.Begin();
+        compression.MarkAccepted(ticket);
+
+        compression.RefusedAmbiguously(ticket, "400 Bad Request");
+
+        compression.Begin().Gzip.Should().BeTrue("a 400 after a proven compressed request is about the content");
     }
 
     [Fact]

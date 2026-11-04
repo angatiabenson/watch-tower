@@ -61,7 +61,7 @@ public class HttpsPortalClient : IPortalClient, IDisposable
         _timeProvider = timeProvider ?? TimeProvider.System;
 
         PortalTls.EnsureTransportAllowed(options.CurrentValue);
-        _compression = new RequestCompression(options, logger);
+        _compression = new RequestCompression(options, logger, _timeProvider);
     }
 
     public void Dispose()
@@ -194,25 +194,28 @@ public class HttpsPortalClient : IPortalClient, IDisposable
         {
             var client = CreateClient();
             var url = BuildUrl(path);
-            var gzip = compressible && _compression.Enabled;
+            var ticket = compressible ? _compression.Begin() : default;
+            var gzip = ticket.Gzip;
             var response = await SendPostAsync(client, url, payload, gzip, ct);
             try
             {
                 if (gzip && response.IsSuccessStatusCode)
-                    _compression.MarkAccepted();
-                else if (gzip && ShouldResendUncompressed(response.StatusCode))
+                    _compression.MarkAccepted(ticket);
+                else if (gzip && ShouldResendUncompressed(response.StatusCode, ticket))
                 {
                     var refused = response.StatusCode;
                     // 415: the portal cannot read the encoding, which is unambiguous.
                     if (refused == HttpStatusCode.UnsupportedMediaType)
-                        _compression.Disable("415 Unsupported Media Type");
+                        _compression.Disable(ticket, "415 Unsupported Media Type");
                     response.Dispose();
 
                     // The portal refused the request, so it did not take it: sending it once more,
                     // uncompressed, neither loses nor duplicates it.
                     response = await SendPostAsync(client, url, payload, gzip: false, ct);
+                    // A 400 that the uncompressed body passes may still have been transient, so it
+                    // only suspends compression for a while (see RequestCompression).
                     if (refused == HttpStatusCode.BadRequest && response.IsSuccessStatusCode)
-                        _compression.Disable("400 Bad Request, and accepted the same body uncompressed");
+                        _compression.RefusedAmbiguously(ticket, "400 Bad Request");
                 }
                 return Evaluate(response, path, endpoint);
             }
@@ -234,9 +237,9 @@ public class HttpsPortalClient : IPortalClient, IDisposable
     /// repetitive batch can exceed; compression stays on); for 400 only until the portal has
     /// accepted a compressed request (after that a 400 is about the content).
     /// </summary>
-    private bool ShouldResendUncompressed(HttpStatusCode status) =>
+    private bool ShouldResendUncompressed(HttpStatusCode status, RequestCompression.Ticket ticket) =>
         status is HttpStatusCode.UnsupportedMediaType or HttpStatusCode.RequestEntityTooLarge ||
-        (status == HttpStatusCode.BadRequest && !_compression.Proven);
+        (status == HttpStatusCode.BadRequest && !_compression.IsProven(ticket));
 
     private static Task<HttpResponseMessage> SendPostAsync<T>(
         HttpClient client, string url, T payload, bool gzip, CancellationToken ct)
