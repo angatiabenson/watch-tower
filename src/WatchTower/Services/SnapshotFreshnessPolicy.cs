@@ -44,13 +44,40 @@ public sealed class SnapshotFreshnessPolicy(
     public bool IsStale(SnapshotKind kind, string name, DateTime readingAt, DateTime now) =>
         SnapshotFreshness.IsStale(readingAt, now, Window(kind, name));
 
+    private static readonly EndpointCheckOptions DefaultCheck = new();
+
+    /// <summary>Name index of the endpoint checks for one options instance (immutable once built).</summary>
+    private sealed class EndpointIndex(EndpointMonitorOptions options, int count, Dictionary<string, EndpointCheckOptions> byName)
+    {
+        public EndpointMonitorOptions Options { get; } = options;
+        public int Count { get; } = count;
+        public Dictionary<string, EndpointCheckOptions> ByName { get; } = byName;
+    }
+
+    /// <summary>Rebuilt when the options instance (a configuration reload) or its list length changes.</summary>
+    private volatile EndpointIndex? _endpointIndex;
+
     private TimeSpan EndpointWindow(string name)
     {
-        // The first entry of a name is the one the endpoint monitor runs (names match
-        // case-insensitively, trimmed, like its schedule).
-        var check = endpoints.CurrentValue.Endpoints.FirstOrDefault(e =>
-            e is not null && string.Equals(e.Name?.Trim(), name?.Trim(), StringComparison.OrdinalIgnoreCase))
-            ?? new EndpointCheckOptions();
+        var options = endpoints.CurrentValue;
+        var index = _endpointIndex;
+        if (index is null || !ReferenceEquals(index.Options, options) || index.Count != options.Endpoints.Count)
+        {
+            // The first entry of a name is the one the endpoint monitor runs (names match
+            // case-insensitively, trimmed, like its schedule).
+            var byName = new Dictionary<string, EndpointCheckOptions>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in options.Endpoints)
+            {
+                var key = e?.Name?.Trim();
+                if (!string.IsNullOrEmpty(key))
+                    byName.TryAdd(key, e!);
+            }
+
+            index = new EndpointIndex(options, options.Endpoints.Count, byName);
+            _endpointIndex = index; // a racing rebuild only repeats this work
+        }
+
+        var check = index.ByName.GetValueOrDefault(name?.Trim() ?? string.Empty, DefaultCheck);
         return SnapshotFreshness.EndpointWindow(check.IntervalSeconds, check.TimeoutSeconds);
     }
 

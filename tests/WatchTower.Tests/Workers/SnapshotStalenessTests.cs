@@ -276,6 +276,34 @@ public sealed class SnapshotStalenessTests : IDisposable
     }
 
     [Fact]
+    public void ALongerPollInterval_EndsTheStaleState_WithoutClaimingTheResourceIsReadAgain()
+    {
+        var disk = new DiskMonitorOptions { PollIntervalSeconds = 60 }; // window 10 min
+        var policy = new SnapshotFreshnessPolicy(
+            new TestOptionsMonitor<DiskMonitorOptions>(disk),
+            new TestOptionsMonitor<NetworkMonitorOptions>(new()),
+            new TestOptionsMonitor<ServiceMonitorOptions>(new()),
+            new TestOptionsMonitor<ApplicationPoolMonitorOptions>(new()),
+            new TestOptionsMonitor<EndpointMonitorOptions>(new()));
+        var stale = StaleWorker(policy);
+        var readingAt = Now - TimeSpan.FromMinutes(20);
+        _store.AddDiskMetric(new DiskMetric(readingAt, "D:\\", 500, 400, 20));
+        stale.CheckOnce();
+        StaleWarnings.Should().ContainSingle();
+
+        disk.PollIntervalSeconds = 1_800; // window 90 min: the same 20-minute-old reading is fresh again
+        stale.CheckOnce();
+
+        var info = _logs.At(LogLevel.Information).Should().ContainSingle().Subject;
+        info.Message.Should().Contain(@"Drive D:\").And.Contain("no new reading").And.NotContain("read again");
+
+        // A genuinely new reading afterwards is a normal fresh entry: nothing more is logged.
+        _store.AddDiskMetric(new DiskMetric(Now, "D:\\", 500, 400, 20));
+        stale.CheckOnce();
+        _logs.At(LogLevel.Information).Should().HaveCount(1);
+    }
+
+    [Fact]
     public void AStaleConfigurationErrorEndpoint_SaysTheConfigurationMustBeFixed()
     {
         _store.AddEndpointStatus(new EndpointStatus(Now - TimeSpan.FromMinutes(15), "sql-port", "Tcp", "sql01:1433",

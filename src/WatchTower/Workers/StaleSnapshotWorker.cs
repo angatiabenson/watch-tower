@@ -43,8 +43,11 @@ public sealed class StaleSnapshotWorker(
         public int Suppressed;
     }
 
-    /// <summary>Entries currently stale, and whether this episode was logged.</summary>
-    private readonly Dictionary<Key, bool> _stale = new(KeyComparer.Instance);
+    /// <summary>An entry currently stale: whether this episode was logged, and the reading it had.</summary>
+    private readonly record struct Episode(bool Warned, DateTime ReadingAt);
+
+    /// <summary>Entries currently stale.</summary>
+    private readonly Dictionary<Key, Episode> _stale = new(KeyComparer.Instance);
 
     /// <summary>When each resource was last warned about, and the episodes suppressed since.</summary>
     private readonly Dictionary<Key, Warned> _warned = new(KeyComparer.Instance);
@@ -86,12 +89,24 @@ public sealed class StaleSnapshotWorker(
             var window = freshness.Window(kind, name);
             if (!SnapshotFreshness.IsStale(readingAt, now, window))
             {
-                if (!_stale.Remove(key, out var episodeWarned))
+                if (!_stale.Remove(key, out var episode))
                     return;
-                if (episodeWarned)
+                if (episode.Warned)
                 {
-                    logger.LogInformation("{What} {Name} is being read again (reading at {ReadingAt:O}); it is no longer reported as stale",
-                        What(kind), name, readingAt);
+                    if (readingAt > episode.ReadingAt)
+                    {
+                        logger.LogInformation("{What} {Name} is being read again (reading at {ReadingAt:O}); it is no longer reported as stale",
+                            What(kind), name, readingAt);
+                    }
+                    else
+                    {
+                        // No new reading: the freshness window grew (a longer poll or check
+                        // interval) or the clock moved back. Don't claim the resource recovered.
+                        logger.LogInformation(
+                            "{What} {Name} is no longer reported as stale, but it has no new reading (still {ReadingAt:O}): " +
+                            "its freshness window is now {WindowMinutes:0.#} min, or the clock was adjusted",
+                            What(kind), name, readingAt, window.TotalMinutes);
+                    }
                 }
                 else if (_warned.TryGetValue(key, out var earlier))
                 {
@@ -100,18 +115,18 @@ public sealed class StaleSnapshotWorker(
                 return;
             }
 
-            if (_stale.TryGetValue(key, out var warnedAlready) && warnedAlready)
+            if (_stale.TryGetValue(key, out var current) && current.Warned)
                 return; // one warning per episode
 
             if (_warned.TryGetValue(key, out var warned) && now - warned.At < WarningInterval)
             {
-                _stale[key] = false; // logged once the rate limit allows, if it is still stale then
+                _stale[key] = new Episode(false, readingAt); // logged once the rate limit allows, if still stale
                 return;
             }
 
             var suppressed = warned?.Suppressed ?? 0;
             _warned[key] = new Warned { At = now };
-            _stale[key] = true;
+            _stale[key] = new Episode(true, readingAt);
             logger.LogWarning(
                 "{What} {Name} has had no new reading since {ReadingAt:O} (freshness window {WindowMinutes:0.#} min): it is still " +
                 "reported with that reading, marked stale. {Reason}{Suppressed}",
