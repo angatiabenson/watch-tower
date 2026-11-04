@@ -14,6 +14,12 @@ INSTALL (on the server, in an elevated PowerShell)
   4. Configure email and notification channels, watched services / IIS app pools, endpoint
      checks, thresholds and the optional Visibility Portal connection from the console.
 
+ONE-LINE INSTALL (next servers; elevated PowerShell)
+  & ([scriptblock]::Create((irm https://github.com/angatiabenson/watch-tower/releases/latest/download/get-watchtower.ps1)))
+  downloads the latest release and SHA256SUMS.txt, refuses a zip whose SHA-256 doesn't match,
+  then runs this install.ps1 with any options below (e.g. append -EnrollmentCode WT1...).
+  -Version <x.y.z> picks a release. To read it first: irm <that URL> -OutFile get-watchtower.ps1
+
 INSTALL.PS1 OPTIONS
   -InstallDir <path>        where the binaries go (default C:\Program Files\WatchTower)
   -DataDir <path>           settings, database and logs (default C:\ProgramData\WatchTower)
