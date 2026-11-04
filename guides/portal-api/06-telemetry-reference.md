@@ -23,9 +23,9 @@ or the resource is removed:
   network-interface listing does).
 - **Services, application pools, endpoint checks**: removed on the agent's next poll after the
   name leaves `Monitoring:Services:WatchedServices`,
-  `Monitoring:ApplicationPools:WatchedApplicationPools` or `Monitoring:Endpoints` (locally or
-  through [remote config](09-remote-config.md)). Every configured endpoint check counts, valid or
-  not. Names are compared case-insensitively: renaming only the letter case keeps the entry, its
+  `Monitoring:ApplicationPools:WatchedApplicationPools` or `Monitoring:Endpoints`. Service and
+  application-pool watch lists can change locally or through [remote config](09-remote-config.md);
+  endpoint checks can change only locally. Every configured endpoint check counts, valid or not. Names are compared case-insensitively: renaming only the letter case keeps the entry, its
   last reading and its schedule, and the entry is reported under the new spelling. Key these
   resources case-insensitively.
 - The next batch is built from what remains, and a resource that comes back starts a fresh
@@ -61,7 +61,8 @@ computes it when it builds the batch:
 | application pools | max(3 × `Monitoring:ApplicationPools:PollIntervalSeconds`, 10 min) |
 | endpoint checks | max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) of that check (interval clamped to 5 to 86400 s, timeout to 1 to 120 s) |
 
-The intervals are the agent's current ones, local or pushed by [remote config](09-remote-config.md).
+Monitor poll intervals are the agent's current values, configured locally or through
+[remote config](09-remote-config.md). Endpoint check intervals and timeouts are configured locally only.
 With the defaults every window is 10 minutes. An endpoint check's window is longer once
 2 × interval + timeout exceeds 600 s: a daily certificate check stays fresh for 48 hours plus
 its timeout.
