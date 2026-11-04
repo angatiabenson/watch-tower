@@ -13,6 +13,7 @@ using WatchTower.Portal.Clients;
 using WatchTower.Portal.Contracts;
 using WatchTower.Services.Endpoints;
 using WatchTower.Updates;
+using WatchTower.Workers;
 
 namespace WatchTower.Tests.PortalContract;
 
@@ -223,7 +224,8 @@ public class AgentPayloadSchemaTests
             "ApplicationPoolStatus/properties/status" =>
                 ["Starting", "Started", "Stopping", "Stopped", ApplicationPoolStatus.UnknownStatus, ApplicationPoolStatus.NotFoundStatus],
             "EndpointStatus/properties/type" => Enum.GetNames<EndpointCheckType>(),
-            "EndpointStatus/properties/status" => Enum.GetNames<EndpointState>(),
+            // The probe's results, plus the status of a configured but invalid check.
+            "EndpointStatus/properties/status" => [.. Enum.GetNames<EndpointState>(), EndpointStatus.ConfigurationError],
             _ => throw new ArgumentOutOfRangeException(nameof(location)),
         };
 
@@ -235,6 +237,42 @@ public class AgentPayloadSchemaTests
             names.Should().Equal(agentNames, "x-enum-names must name the values in the same order");
         }
     }
+
+    [Fact]
+    public void ConfigurationError_KeepsTheLastResult_InTheDocumentedShape()
+    {
+        var last = new EndpointStatus(AgentPayloads.Now.AddMinutes(-20), "status-api", "Http", "https://api.example.com/health",
+            nameof(EndpointState.Down), false, 95, null, "HTTP 503");
+        const string error = "Monitoring:Endpoints:2:Target must be an absolute http(s) URL.";
+
+        // The agent's own marking (EndpointMonitorWorker): everything but status and detail is the last result.
+        var marked = EndpointMonitorWorker.MarkConfigurationError(last, error);
+        marked.Should().Be(last with
+        {
+            Status = EndpointStatus.ConfigurationError,
+            Detail = $"Configuration error: {error} Last result: Down: HTTP 503",
+        });
+        EndpointMonitorWorker.MarkConfigurationError(marked, "Another error.").Detail
+            .Should().Be("Configuration error: Another error. Last result: Down: HTTP 503", "a new error keeps the last real result");
+        EndpointMonitorWorker.MarkConfigurationError(last with { Status = nameof(EndpointState.Up), IsUp = true, Detail = null }, error).Detail
+            .Should().Be($"Configuration error: {error} Last result: Up", "the \": <detail>\" part is omitted without a detail");
+
+        // The spec documents that shape and isUp's meaning for it.
+        var status = PortalSpec.Pointer("#/components/schemas/EndpointStatus/properties/status").AsObject();
+        status["x-extensible-enum"]!.AsArray().Select(v => (string)v!).Should().Contain(marked.Status);
+        Collapse(status["description"]!.GetValue<string>()).Should().Contain("\"Configuration error: <error> Last result: <status>[: <detail>]\"");
+        Collapse(PortalSpec.Pointer("#/components/schemas/EndpointStatus/properties/isUp/description").GetValue<string>())
+            .Should().Contain("With ConfigurationError it is the value of the last result");
+
+        // On the wire (HTTPS as OutboxDispatchWorker maps it, and gRPC) it is a valid EndpointStatus.
+        var dto = new EndpointStatusDto(marked.Timestamp.ToString("O"), marked.Name, marked.Type, marked.Target, marked.Status,
+            marked.IsUp, marked.ResponseTimeMs, marked.CertificateDaysLeft, marked.Detail);
+        var json = Serialize(dto);
+        PortalSpec.Validate("EndpointStatus", json, SchemaMode.Strict).Should().BeEmpty(json);
+        GrpcPortalClient.ToProto(dto).Status.Should().Be(EndpointStatus.ConfigurationError);
+    }
+
+    private static string Collapse(string text) => string.Join(' ', text.Split((char[])[' ', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries));
 
     [Fact]
     public void PublishedSchemas_AcceptWhatLaterAgentsMaySend_StrictModeDoesNot()

@@ -132,6 +132,44 @@ public sealed class MinimalPortalEndToEndTests : IAsyncLifetime
         agent.Telemetry.LastUpdateResult!.CompletedAt.Offset.Should().Be(TimeSpan.FromHours(3));
     }
 
+    [Fact]
+    public async Task EndpointConfigurationError_ReplacesTheLastResult_AndALateOlderBatchDoesNotBringItBack()
+    {
+        var portal = await StartPortalAsync("");
+        var client = portal.Client();
+        var ct = TestContext.Current.CancellationToken;
+
+        // The agent's own marking of a check left invalid: same timestamp as its last result.
+        var checkedAt = AgentPayloads.Now.AddMinutes(-5);
+        var last = new EndpointStatus(checkedAt, "shop-home", "Http", "https://shop.example.com/", "Up", true, 182, null, "HTTP 200");
+        var marked = EndpointMonitorWorker.MarkConfigurationError(last, "Monitoring:Endpoints:0:Target must be an absolute http(s) URL.");
+        static MetricsBatchDto Batch(string batchId, DateTime batchedAt, EndpointStatus entry) => AgentPayloads.MinimalBatch() with
+        {
+            BatchId = batchId,
+            BatchedAt = AgentPayloads.Utc(batchedAt),
+            EndpointStatuses =
+            [
+                new EndpointStatusDto(entry.Timestamp.ToString("O"), entry.Name, entry.Type, entry.Target, entry.Status, entry.IsUp,
+                    entry.ResponseTimeMs, entry.CertificateDaysLeft, entry.Detail),
+            ],
+        };
+        var older = Batch("6c1e5f2a-0d3b-4c7e-9a8f-1b2c3d4e5f60", checkedAt.AddSeconds(10), last);
+        var newer = Batch("7d2f6a3b-1e4c-4d8f-8b9a-2c3d4e5f6a71", checkedAt.AddSeconds(40), marked);
+
+        (await client.SendMetricsBatchAsync(older, ct)).Should().BeTrue();
+        (await client.SendMetricsBatchAsync(newer, ct)).Should().BeTrue();
+        portal.Agent.Endpoints["shop-home"].Status.Should().Be("ConfigurationError", "an equal timestamp from a later batch replaces the entry");
+
+        // The older batch arrives again late, as from the agent's outbox: the status must not go back to Up.
+        (await client.SendMetricsBatchAsync(older with { BatchId = "8e3a7b4c-2f5d-4e9a-9c0b-3d4e5f6a7b82" }, ct)).Should().BeTrue();
+        var entry = portal.Agent.Endpoints["shop-home"];
+        entry.Status.Should().Be("ConfigurationError");
+        entry.IsUp.Should().BeTrue("isUp is the last result's");
+        entry.Detail.Should().Be("Configuration error: Monitoring:Endpoints:0:Target must be an absolute http(s) URL. Last result: Up: HTTP 200");
+        Sample.PortalState.EndpointHealth(entry).Should().Be("not checked (configuration error)");
+        portal.State.Describe(portal.Agent)["endpoints"]![0]!["health"]!.GetValue<string>().Should().Be("not checked (configuration error)");
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("/watchtower")]
