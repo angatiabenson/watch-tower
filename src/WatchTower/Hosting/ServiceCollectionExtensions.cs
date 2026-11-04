@@ -124,19 +124,8 @@ public static class ServiceCollectionExtensions
     private static void AddPortal(IServiceCollection services, IConfiguration config, string dbPath)
     {
         var protocol = config[$"{PortalOptions.SectionName}:Protocol"] ?? "Https";
-        var baseUrl = (config[$"{PortalOptions.SectionName}:BaseUrl"] ?? "").TrimEnd('/') + "/";
 
-        services.AddTransient<AgentAuthHandler>();
-        services.AddHttpClient("PortalClient", client =>
-        {
-            if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-                client.BaseAddress = uri;
-            client.Timeout = TimeSpan.FromSeconds(30);
-        })
-        // TLS policy (RequireTls) and the optional client certificate (Tls:ClientCertThumbprint) for mTLS.
-        .ConfigurePrimaryHttpMessageHandler(sp => PortalTls.CreateHandler(
-            sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<PortalOptions>>().CurrentValue.Tls))
-        .AddHttpMessageHandler<AgentAuthHandler>();
+        AddPortalHttpClient(services, config[$"{PortalOptions.SectionName}:BaseUrl"]);
 
         if (protocol.Equals("Grpc", StringComparison.OrdinalIgnoreCase))
             services.AddSingleton<IPortalClient, GrpcPortalClient>();
@@ -173,5 +162,28 @@ public static class ServiceCollectionExtensions
 
         if (config.GetValue($"{PortalOptions.SectionName}:RemoteConfig:Enabled", true))
             services.AddHostedService<RemoteConfigWorker>();
+    }
+
+    /// <summary>
+    /// Registers the named <c>"PortalClient"</c> used by <see cref="HttpsPortalClient"/> (HTTPS and
+    /// the opt-in plain HTTP): the portal TLS handler, which never follows redirects, and the
+    /// credentials handler, which only signs requests below the configured BaseUrl.
+    /// </summary>
+    internal static IHttpClientBuilder AddPortalHttpClient(IServiceCollection services, string? configuredBaseUrl)
+    {
+        var baseUrl = (configuredBaseUrl ?? "").TrimEnd('/') + "/";
+
+        services.AddTransient<AgentAuthHandler>();
+        return services.AddHttpClient("PortalClient", client =>
+        {
+            if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+                client.BaseAddress = uri;
+            client.Timeout = TimeSpan.FromSeconds(30);
+        })
+        // TLS policy (RequireTls), no redirects, and the optional client certificate
+        // (Tls:ClientCertThumbprint) for mTLS.
+        .ConfigurePrimaryHttpMessageHandler(sp => PortalTls.CreateHandler(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<PortalOptions>>().CurrentValue.Tls))
+        .AddHttpMessageHandler<AgentAuthHandler>();
     }
 }

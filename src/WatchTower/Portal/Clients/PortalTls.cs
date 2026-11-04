@@ -105,9 +105,10 @@ public static class PortalTls
     }
 
     /// <summary>
-    /// Creates the primary handler for a portal connection: presents the configured client
-    /// certificate (if any) and, only when <paramref name="allowUntrustedServerCert"/> is true,
-    /// skips server-certificate validation (development use only; callers must guard it).
+    /// Creates the primary handler for a portal connection: never follows redirects, presents the
+    /// configured client certificate (if any) and, only when
+    /// <paramref name="allowUntrustedServerCert"/> is true, skips server-certificate validation
+    /// (development use only; callers must guard it).
     /// </summary>
     public static SocketsHttpHandler CreateHandler(TlsOptions tls, bool allowUntrustedServerCert = false)
     {
@@ -117,6 +118,12 @@ public static class PortalTls
             // stream limit is reached instead of queueing behind long calls.
             EnableMultipleHttp2Connections = true,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+
+            // Never follow portal redirects: a followed 301/302 turns a POST into a GET whose 2xx
+            // would count as delivered, and the request (with its bearer token) could end up at
+            // another host. A 3xx is a failure the clients report instead (see HttpsPortalClient).
+            // gRPC does not redirect, so this changes nothing for that transport.
+            AllowAutoRedirect = false,
         };
 
         var clientCert = LoadClientCertificate(tls);
