@@ -60,7 +60,10 @@ public record ServiceStatusDto(
 /// <summary>Latest endpoint check result (omitted when no endpoints are configured, and by older agents).</summary>
 /// <param name="Type">Http | Tcp | Certificate.</param>
 /// <param name="Target">Target without credentials or query string.</param>
-/// <param name="Status">Up | Down | Expiring.</param>
+/// <param name="Status">
+/// Up | Down | Expiring | ConfigurationError (open set). ConfigurationError: the check is
+/// configured but invalid and not running; the other fields, isUp included, are its last result.
+/// </param>
 public record EndpointStatusDto(
     string Timestamp,
     string Name,

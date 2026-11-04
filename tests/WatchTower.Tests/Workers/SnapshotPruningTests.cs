@@ -429,13 +429,78 @@ public sealed class SnapshotPruningTests : IDisposable
         await worker.PollOnceAsync(Ct);
         Reported().Should().BeEquivalentTo(["site"]);
 
-        // A check that becomes invalid is not configured any more either.
+        // A check that becomes invalid is still configured: its row stays (marked, see below).
         options.CurrentValue = new EndpointMonitorOptions { Endpoints = [new EndpointCheckOptions { Name = "site", Target = "" }] };
         await worker.PollOnceAsync(Ct);
-        Reported().Should().BeEmpty();
+        Reported().Should().BeEquivalentTo(["site"]);
 
         options.CurrentValue = new EndpointMonitorOptions { Endpoints = [Check("api")] };
         await worker.PollOnceAsync(Ct);
         Reported().Should().BeEquivalentTo(["api"]);
+    }
+
+    [Fact]
+    public async Task EndpointTemporarilyInvalid_KeepsItsLastResult_MarkedAsAConfigurationError()
+    {
+        var probe = new Mock<IEndpointProbe>();
+        probe.Setup(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new EndpointProbeResult(EndpointState.Down, "HTTP 503", 40, null));
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(new EndpointMonitorOptions { Endpoints = [DailyCheck("site")] });
+        using var worker = new EndpointMonitorWorker(probe.Object, _store, _alerts, options, _time, NullLogger<EndpointMonitorWorker>.Instance);
+        await worker.PollOnceAsync(Ct);
+        var last = _store.GetLatestEndpointStatuses().Should().ContainSingle().Subject;
+
+        // Invalid (and renamed in case) for a while: the row is kept, with an explicit state.
+        options.CurrentValue = new EndpointMonitorOptions
+        {
+            Endpoints = [new EndpointCheckOptions { Name = "Site", Target = "not a url", IntervalSeconds = 86_400 }],
+        };
+        for (var i = 0; i < 3; i++)
+        {
+            _time.Advance(EndpointMonitorWorker.Tick);
+            await worker.PollOnceAsync(Ct);
+        }
+
+        var marked = _store.GetLatestEndpointStatuses().Should().ContainSingle().Subject;
+        marked.Should().BeEquivalentTo(last with
+        {
+            Name = "Site",
+            Status = EndpointStatus.ConfigurationError,
+            Detail = "Configuration error: Monitoring:Endpoints:0:Target must be an absolute http(s) URL. Last result: Down: HTTP 503",
+        });
+        marked.IsUp.Should().BeFalse("the last result's reachability is kept");
+        probe.Verify(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        // A different error replaces the reason but keeps the last real result.
+        options.CurrentValue = new EndpointMonitorOptions
+        {
+            Endpoints = [new EndpointCheckOptions { Name = "Site", Target = "https://site.example", IntervalSeconds = 1 }],
+        };
+        _time.Advance(EndpointMonitorWorker.Tick);
+        await worker.PollOnceAsync(Ct);
+        _store.GetLatestEndpointStatuses().Single().Detail.Should().Be(
+            "Configuration error: Monitoring:Endpoints:0:IntervalSeconds must be between 5 and 86400. Last result: Down: HTTP 503");
+
+        // Fixed: it runs at once, although its interval is a day, and reports a real result again.
+        options.CurrentValue = new EndpointMonitorOptions { Endpoints = [DailyCheck("Site")] };
+        _time.Advance(EndpointMonitorWorker.Tick);
+        await worker.PollOnceAsync(Ct);
+        probe.Verify(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _store.GetLatestEndpointStatuses().Should().ContainSingle()
+            .Which.Should().Match<EndpointStatus>(e => e.Name == "Site" && e.Status == "Down" && e.Detail == "HTTP 503");
+    }
+
+    [Fact]
+    public async Task InvalidEndpointWithoutAResultYet_GetsNoRow()
+    {
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(new EndpointMonitorOptions
+        {
+            Endpoints = [new EndpointCheckOptions { Name = "new", Target = "" }],
+        });
+        using var worker = new EndpointMonitorWorker(UpProbe().Object, _store, _alerts, options, _time, NullLogger<EndpointMonitorWorker>.Instance);
+
+        await worker.PollOnceAsync(Ct);
+
+        _store.GetLatestEndpointStatuses().Should().BeEmpty();
     }
 }

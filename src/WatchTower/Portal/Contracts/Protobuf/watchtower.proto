@@ -68,7 +68,7 @@ message EndpointStatusProto  {
   string          name                  = 2;
   string          type                  = 3;  // Http | Tcp | Certificate
   string          target                = 4;  // without credentials or query string
-  string          status                = 5;  // Up | Down | Expiring
+  string          status                = 5;  // Up | Down | Expiring | ConfigurationError (open set)
   bool            is_up                 = 6;
   optional double response_time_ms      = 7;
   optional double certificate_days_left = 8;

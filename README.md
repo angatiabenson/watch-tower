@@ -226,6 +226,10 @@ An endpoint alerts *Critical* (`EndpointDown`) after `FailuresBeforeAlert` failu
 invalid or expired certificate counts as a failure), *Warning* (`CertificateExpiring`) as
 soon as a certificate is inside its warning window, and resolves (`EndpointRecovered`) when
 the check passes. HTTP redirects are followed at most 5 times and only within the same host.
+A check whose configuration becomes invalid stops running (its alert is retired) but keeps its
+last result, reported with status `ConfigurationError` and the reason in its detail, until it
+is fixed (it then runs at once) or removed. Names are case-insensitive: renaming `Site` to
+`site` keeps its last result and schedule.
 Configure the list with `WatchTower config import endpoints.json` (it is validated first);
 the console shows the results read-only:
 

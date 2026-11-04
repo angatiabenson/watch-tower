@@ -88,15 +88,27 @@ public sealed class EndpointMonitorWorker(
     {
         var now = UtcNow;
         var due = new List<EndpointCheck>();
+        // Checks that run: their schedule, failure count and alert.
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Every configured name, valid or not: only a name that is gone loses its snapshot row.
+        var configuredNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var invalid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var configured = options.CurrentValue.Endpoints;
 
         for (var i = 0; i < configured.Count; i++)
         {
-            if (!EndpointCheck.TryCreate(configured[i], $"Monitoring:Endpoints:{i}", out var check, out var error))
+            if (configured[i] is not { } entry)
+                continue;
+            var rawName = entry.Name?.Trim();
+            if (!string.IsNullOrEmpty(rawName))
+                configuredNames.Add(rawName);
+
+            if (!EndpointCheck.TryCreate(entry, $"Monitoring:Endpoints:{i}", out var check, out var error))
             {
                 if (_invalidLogged.TryAdd(error, error))
                     logger.LogWarning("Skipping invalid endpoint check: {Error}", error);
+                if (!string.IsNullOrEmpty(rawName))
+                    invalid.TryAdd(rawName, error);
                 continue;
             }
             if (!names.Add(check.Name))
@@ -109,20 +121,25 @@ public sealed class EndpointMonitorWorker(
         foreach (var check in due)
             _lastRun[check.Name] = now;
 
-        await ReconcileAsync(names, ct);
+        await ReconcileAsync(names, configuredNames, ct);
+        MarkMisconfigured(invalid.Where(e => !names.Contains(e.Key)));
 
         await Task.WhenAll(due.Select(check => RunAsync(check, ct)));
     }
 
     internal const string RemovedReason = $"removed from {EndpointMonitorOptions.SectionName}:Endpoints or no longer a valid check";
 
+    internal const string SnapshotRemovedReason = $"removed from {EndpointMonitorOptions.SectionName}:Endpoints";
+
     /// <summary>
-    /// First poll (startup) and every poll after a configuration change: forgets checks that are
-    /// gone and retires their alerts, which could otherwise never resolve.
+    /// First poll (startup) and every poll after a configuration change: forgets the schedule of
+    /// checks that no longer run (so a check added again, or fixed, runs at once), retires their
+    /// alerts, which could otherwise never resolve, and deletes the snapshot rows of names that
+    /// are no longer configured at all.
     /// </summary>
-    private async Task ReconcileAsync(HashSet<string> configured, CancellationToken ct)
+    private async Task ReconcileAsync(HashSet<string> running, HashSet<string> configuredNames, CancellationToken ct)
     {
-        foreach (var name in _lastRun.Keys.Concat(_failures.Keys).Where(n => !configured.Contains(n)).ToList())
+        foreach (var name in _lastRun.Keys.Concat(_failures.Keys).Where(n => !running.Contains(n)).ToList())
         {
             _lastRun.TryRemove(name, out _);
             _failures.TryRemove(name, out _);
@@ -130,23 +147,80 @@ public sealed class EndpointMonitorWorker(
 
         try
         {
-            await alerts.RetireUnconfiguredAsync(AlertKey.EndpointPrefix, configured.Select(AlertKey.Endpoint), RemovedReason, ct);
+            await alerts.RetireUnconfiguredAsync(AlertKey.EndpointPrefix, running.Select(AlertKey.Endpoint), RemovedReason, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Could not retire alerts of endpoint checks that are no longer configured");
         }
 
-        // Their last result would otherwise be repeated in every metrics batch forever.
+        // Their last result would otherwise be repeated in every metrics batch forever. A check
+        // that is configured but (perhaps only for a moment) invalid keeps its row: see MarkMisconfigured.
         try
         {
-            foreach (var removed in metricsStore.RemoveSnapshotsExcept(SnapshotKind.Endpoint, configured))
-                logger.LogInformation("Stopped reporting endpoint check {Endpoint} to the portal: {Reason}", removed, RemovedReason);
+            foreach (var removed in metricsStore.RemoveSnapshotsExcept(SnapshotKind.Endpoint, configuredNames))
+                logger.LogInformation("Stopped reporting endpoint check {Endpoint} to the portal: {Reason}", removed, SnapshotRemovedReason);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Could not remove the snapshots of endpoint checks that are no longer configured");
         }
+    }
+
+    /// <summary>
+    /// Keeps the last result of each configured but invalid check and marks it
+    /// <see cref="EndpointStatus.ConfigurationError"/>, with the error in its detail, so the
+    /// portal and the console show why it is not being checked. Checks without a result yet
+    /// get no row.
+    /// </summary>
+    private void MarkMisconfigured(IEnumerable<KeyValuePair<string, string>> invalid)
+    {
+        var errors = invalid.ToList();
+        if (errors.Count == 0)
+            return;
+
+        try
+        {
+            var rows = metricsStore.GetLatestEndpointStatuses()
+                .GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (name, error) in errors)
+            {
+                if (!rows.TryGetValue(name, out var row))
+                    continue;
+
+                var marked = MarkConfigurationError(row, error);
+                if (marked != row)
+                    metricsStore.AddEndpointStatus(marked);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not mark the snapshots of invalid endpoint checks");
+        }
+    }
+
+    internal static EndpointStatus MarkConfigurationError(EndpointStatus row, string error)
+    {
+        string lastResult;
+        if (row.Status == EndpointStatus.ConfigurationError)
+        {
+            // Already marked: keep the last real result it carries.
+            var at = row.Detail?.IndexOf(EndpointStatus.LastResultSeparator, StringComparison.Ordinal) ?? -1;
+            lastResult = at < 0 ? string.Empty : row.Detail![at..];
+        }
+        else
+        {
+            lastResult = EndpointStatus.LastResultSeparator + row.Status +
+                         (string.IsNullOrEmpty(row.Detail) ? string.Empty : $": {row.Detail}");
+        }
+
+        return row with
+        {
+            Status = EndpointStatus.ConfigurationError,
+            Detail = EndpointStatus.ConfigurationErrorPrefix + error + lastResult,
+        };
     }
 
     private async Task RunAsync(EndpointCheck check, CancellationToken ct)

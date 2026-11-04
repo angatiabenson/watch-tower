@@ -563,6 +563,8 @@ const ENDPOINT_STATUS = {
   up: ['ok', 'Up', 2],
   expiring: ['warning', 'Expiring', 1],
   down: ['critical', 'Down', 0],
+  // Configured but invalid: not checked; the row shows its last result.
+  configurationerror: ['warning', 'Config error', 1],
 };
 const ENDPOINT_TYPE = { http: 'HTTP', tcp: 'TCP', certificate: 'TLS cert' };
 
@@ -582,8 +584,10 @@ function certText(days) {
 function renderEndpoints(endpoints) {
   const list = [...endpoints].sort((a, b) => endpointState(a)[2] - endpointState(b)[2] || String(a.name).localeCompare(String(b.name)));
   const down = list.filter((e) => endpointState(e)[0] === 'critical').length;
-  const expiring = list.filter((e) => endpointState(e)[0] === 'warning').length;
-  const meta = [down ? `${down} down` : '', expiring ? `${expiring} expiring` : ''].filter(Boolean).join(', ') || `${list.length} checked`;
+  const expiring = list.filter((e) => endpointState(e) === ENDPOINT_STATUS.expiring).length;
+  const misconfigured = list.filter((e) => endpointState(e) === ENDPOINT_STATUS.configurationerror).length;
+  const meta = [down ? `${down} down` : '', expiring ? `${expiring} expiring` : '',
+    misconfigured ? `${misconfigured} misconfigured` : ''].filter(Boolean).join(', ') || `${list.length} checked`;
   return [
     panelHead('h-endpoints', 'Endpoints', h('span', { class: 'panel-meta' }, meta, ' · ',
       h('a', { href: '#/config/endpoints', 'aria-label': 'Edit endpoint checks' }, 'Edit'))),
