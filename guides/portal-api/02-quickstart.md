@@ -191,8 +191,12 @@ When commands are waiting, return them as a JSON array (`Content-Type: applicati
 ```
 
 Three things the agent is strict about: property names are camelCase, every parameter value is a
-string (`"60"`, not `60`), and `issuedAt` must be within the last hour (the agent silently drops
-older commands). Keep returning a command on every poll until it is acknowledged.
+string (`"60"`, not `60`), and `issuedAt` must be fresh: at most 3600 s + 300 s of clock-skew
+allowance old (3900 s) and at most 300 s in the future, by default. A command outside those
+limits is not executed; the agent answers it with a failed result giving the reason. The
+`issuedAt` above is only an example: when you test, generate it at the moment you queue the
+command (for example `date -u +%Y-%m-%dT%H:%M:%SZ`), never paste a literal date. Keep
+returning a command on every poll until it is acknowledged.
 
 ```bash
 curl -i -H "Authorization: Bearer $TOKEN" -H "X-Agent-Id: $AGENT" \

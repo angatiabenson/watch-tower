@@ -67,7 +67,7 @@ flowchart LR
 | Deduplicates commands by `commandId` and refuses stale ones. | Give every command a unique `commandId` and a current `issuedAt`, and expire commands the agent never acknowledged. |
 | Only touches services and application pools the operator allowed locally. | Not rely on a command succeeding; show the reported result. |
 | Retries command results and config acknowledgements until 2xx. | Answer 2xx to repeated results and acknowledgements, even for IDs it no longer knows. |
-| Validates every remote configuration and applies all or nothing. | Track which version each agent acknowledged; treat a missing acknowledgement as "not applied". |
+| Validates every remote configuration and applies all or nothing. | Track which version each agent acknowledged, and which version it reports in `GET config?version=`. A missing acknowledgement is not proof that a version was not applied: a newer applied version supersedes an older unacknowledged one. |
 | Uses HTTPS and validates the certificate, unless the operator opted into plain HTTP. | Serve a certificate the agent's Windows trusts; never redirect agent API calls. |
 
 ## Overall flow

@@ -23,6 +23,7 @@ agent speaks v1:
 | New optional properties in portal responses that the agent understands (commands, config) | none: older agents ignore them |
 | New remote-config fields | none; older agents ignore them |
 | Behaviour changes inside the agent (thresholds, retry timings, descriptions) | none; they are not part of the contract |
+| Stricter agent-side checks of what a portal sends (command freshness, configuration validation, the command allow-list, refusing redirects) | none for a portal that follows these docs; one that relied on the old leniency sees failed results, rejected configurations or failed deliveries. Listed under "Changed" in the [CHANGELOG](CHANGELOG.md) |
 
 The agent MUST NOT start depending on a new endpoint, or on a new response property, within v1.
 Anything a portal must implement to keep working is a breaking change.
@@ -72,7 +73,8 @@ after 1.0.18 and later (and builds from current source).
 | `endpointStatuses`, incident types 13 to 15 | ✗ | ✓ |
 | ServerRestarted (16) | ✗ | ✓ |
 | `alertKey` / `resolved` alert lifecycle | ✗ | ✓ |
-| Command freshness check on `issuedAt` (commands without it are dropped) | ✗ (any `issuedAt`, even none, accepted) | ✓ |
+| Command freshness check on `issuedAt` (stale, future or unparseable: failed result; absent: accepted with a warning) | ✗ (any `issuedAt`, even none, accepted) | ✓ |
+| 3xx answered as a failure, redirects not followed | ✗ (followed by .NET, dropping the token) | ✓ |
 | Local allow-list for service and pool commands | ✗ (any service or pool name is acted on) | ✓ (`AllowPortalManagedTargets` opt-in) |
 | Remote configuration validation of every field (ranges, names, list sizes, all or nothing) | partial (CPU/RAM poll interval and threshold, disk critical threshold only) | ✓ |
 | Events retried for up to 7 days | ✗ (5 attempts, like metrics) | ✓ |
@@ -81,7 +83,8 @@ after 1.0.18 and later (and builds from current source).
 | Enrollment codes (`WT1.`, `enroll`, `install.ps1 -EnrollmentCode`) | ✗ (seed file or manual settings) | ✓ |
 | Results for commands interrupted by a restart | ✗ | ✓ |
 
-Consequences for portals with 1.0.x agents in the fleet: send `issuedAt` anyway, validate
+Consequences for portals with 1.0.x agents in the fleet: send a current `issuedAt` anyway (it
+becomes REQUIRED in v2), validate
 remote configuration yourself (those agents check only a few values), and be aware that service and pool commands are
 not limited to watched names on those agents. Gate them in the portal.
 

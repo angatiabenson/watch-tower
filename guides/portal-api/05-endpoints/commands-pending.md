@@ -60,7 +60,7 @@ No query parameters, no body.
 | `actionType` | integer | yes | A JSON number. A string (`"103"`) makes the **whole response** unreadable. | What to do; see the [catalog](../08-commands.md#action-catalog). Unknown numbers produce a failed result. |
 | `parameters` | object of string → string, or null | no | Every value MUST be a JSON string (`"60"`, `"true"`). Keys are case-sensitive (`ServiceName`, not `serviceName`). A non-string value makes the whole response unreadable. | Action arguments. `null`/absent = none. |
 | `scheduledAt` | date-time string or null | no | No offset = UTC. | Run at or after this time. Not more than 10 s in the future (or absent, null, unparseable) = run now. |
-| `issuedAt` | date-time string | yes (with the default settings) | No offset = UTC. Within `MaxCommandAgeSeconds` (3600 s) + `ClockSkewSeconds` (300 s) in the past and at most `ClockSkewSeconds` in the future. | Replay protection. Missing, unparseable, too old or future commands are **silently dropped**: no acknowledgement, no result. |
+| `issuedAt` | date-time string | SHOULD (REQUIRED in v2) | No offset = UTC. Within `MaxCommandAgeSeconds` (3600 s) + `ClockSkewSeconds` (300 s) in the past and at most `ClockSkewSeconds` in the future. | Replay protection. Unparseable, too old or future (the exact limits are accepted): **never acknowledged or executed**, answered with `success: false` and `Rejected: <reason>`. Absent: accepted, acknowledged and executed, with a one-time warning in the agent log. See [Commands](../08-commands.md#lifecycle). |
 
 Property names are camelCase and matched **case-sensitively**: `CommandId` is not read (the command
 then has no ID and is ignored). Unknown properties are ignored.
@@ -92,8 +92,8 @@ acknowledged, stop returning it.
   until that command is removed. One bad command blocks all commands for that agent.
 - PascalCase property names, or `actionType` as a name (`"ServiceRestart"`).
 - An old `issuedAt` (a command created hours ago and only now released, or a server clock that is
-  wrong): the agent drops it without any answer. Expire commands in the portal after about 50
-  minutes without acknowledgement, and run NTP.
+  wrong): the agent does not run it and answers with a failed result. Expire commands in the
+  portal after about 50 minutes without acknowledgement, and run NTP.
 - `issuedAt` in local time without an offset: the agent reads it as UTC.
 - Re-issuing a retry of a failed command with the same `commandId`: the agent ignores it. Use a new
   ID.

@@ -17,17 +17,20 @@ The agent uses .NET's `HttpClient` with a `SocketsHttpHandler` (`PortalTls.Creat
 | Timeout | 30 s per request, including the response body | SHOULD answer well within 30 s; a timeout counts as a failure and is retried |
 | Request bodies | `Content-Type: application/json; charset=utf-8`, **chunked** (no `Content-Length`) | MUST accept chunked request bodies (check your reverse proxy and WAF) |
 | Response bodies | Read as UTF-8 JSON; the `Content-Type` is not checked | SHOULD send `application/json`; MUST NOT compress (the agent sends no `Accept-Encoding` and does not decompress) |
-| Redirects | Followed by .NET, which drops the `Authorization` header and turns POST into GET for 301/302/303 | MUST NOT redirect agent API requests (it ends in 401s or lost data) |
+| Redirects | Never followed (all transports). Any 3xx, 304 included, fails the call: POSTs count as not delivered (batches and events retried with backoff, results every poll cycle, acknowledgements never), `GET commands/pending` counts as no commands, `GET config` as no change. A warning names the target, at most once per 15 min per endpoint | MUST NOT redirect agent API requests (for example http→https or a trailing slash); publish the final URL as BaseUrl |
+| Credentials scope | The bearer token and `X-Agent-Id` are only sent to URLs below BaseUrl (same scheme, host, port and path prefix); anything else is refused and logged | Serve the whole API below the published BaseUrl |
 | Proxies | The .NET default proxy: `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` environment variables of the service, otherwise the Windows proxy settings of the service account. No agent-specific proxy setting | Nothing; mention it to users behind proxies |
 | User-Agent | None sent | Identify agents by credentials and `agent.version` in batches, not by headers |
 
 ### Certificate pinning
 
-The agent does not support certificate or public-key pinning: it trusts what Windows trusts. For a
-tighter trust relationship, a portal can:
+The agent does not support certificate or public-key pinning, and it cannot restrict which issuer
+may vouch for your host name: it accepts any certificate that chains to a root the server trusts.
+For a tighter trust relationship, a portal can:
 
-- use a certificate from a private CA that is installed on your customers' servers (and nowhere
-  else). That is effectively pinning to your CA.
+- use a certificate from a private CA installed on your customers' servers. That makes your
+  certificate trusted there without a public CA, but it is NOT pinning: every other root the
+  server trusts can still vouch for your host name.
 - require mutual TLS: the portal pins the *agent's* client certificate thumbprint per agentId.
 - keep the bearer token as the authority: a stolen certificate alone is not enough to talk to
   your portal, and a stolen token alone is not enough when you require mTLS.
@@ -86,8 +89,11 @@ after five attempts. MinimalPortal allows 16 MB.
 
 The agent sends one request at a time per loop. The outbox loop sends its queued messages one
 after another and stops at the first failure until the next cycle (30 s). A portal can therefore
-slow an agent down by answering `429` or `503`. The agent doesn't read `Retry-After`; it simply
-tries again next cycle. See [Reliability](10-reliability.md) for what that does to queued data.
+slow an agent down by answering `429` or `503`. The agent doesn't read `Retry-After`. The refused
+message waits for its own backoff (a metrics batch at least `RetryBackoffSeconds`, 60 s by
+default, for the first retry; an event 30 s, doubling) and is retried on the first cycle after
+that; other messages that are due can be sent in the meantime. See
+[Reliability](10-reliability.md) for what that does to queued data.
 
 ## Security checklist for portal authors
 

@@ -19,7 +19,7 @@ stateDiagram-v2
     Pending --> Acknowledged: POST .../acknowledge
     Pending --> Succeeded: POST .../result success=true (ack was lost)
     Pending --> Failed: POST .../result success=false
-    Pending --> Expired: no ack within ~50 min (agent drops commands older than 60 min)
+    Pending --> Expired: no ack within ~50 min (the agent rejects commands older than 65 min)
     Acknowledged --> Succeeded: result success=true
     Acknowledged --> Failed: result success=false
     Acknowledged --> Unknown: no result for a long time (agent offline)
@@ -37,7 +37,7 @@ flowchart TD
     R[Command in poll response] --> B{commandId blank?}
     B -- yes --> X1[ignored, logged]
     B -- no --> F{issuedAt fresh?<br/>within max age + skew}
-    F -- no --> X2[dropped: no ack, no result]
+    F -- no --> X2[not executed: failed result with the reason]
     F -- yes --> S[stored; INSERT OR IGNORE by commandId]
     S --> A[POST acknowledge, once, not retried]
     A --> D{scheduledAt more than 10 s ahead?}
@@ -53,11 +53,21 @@ flowchart TD
 
 Details that matter to a portal:
 
-- **Freshness** (replay protection): `issuedAt` MUST be present and parseable, at most
+- **Freshness** (replay protection): when `issuedAt` is present it must be parseable, at most
   `CommandPoll:ClockSkewSeconds` (300) in the future and at most `MaxCommandAgeSeconds` (3600) +
-  `ClockSkewSeconds` old **when the agent receives it**. Otherwise the command is dropped with a
-  warning in the agent log and nothing goes back to the portal. Operators can set
-  `MaxCommandAgeSeconds = 0` to disable the check. Don't count on that.
+  `ClockSkewSeconds` old **when the agent receives it** (exactly 3900 s old or exactly 300 s ahead
+  is accepted). Otherwise the command is rejected: never acknowledged or executed, stored as
+  failed, and reported with `success: false` and one of these messages, retried until you answer
+  2xx:
+  - `Rejected: command is stale: issuedAt <t> is more than 3900s old (max age 3600s + 300s clock skew; agent time <now>)`
+  - `Rejected: issuedAt <t> is more than 300s in the future (agent time <now>)`
+  - `Rejected: unparseable issuedAt '<value>'`
+
+  If the agent already knows the `commandId`, a rejected re-delivery reports nothing (the earlier
+  outcome stands). A command without `issuedAt` is accepted, acknowledged and executed; the agent
+  logs once per process (and after a BaseUrl change) `Portal sends commands without issuedAt;
+  replay protection is reduced. Update the portal.` Portals SHOULD always send it (REQUIRED in
+  v2). Operators can set `MaxCommandAgeSeconds = 0` to disable the check. Don't count on that.
 - **Deduplication**: by `commandId`, for as long as the agent keeps the record
   (`CommandPoll:RetentionDays`, 30 days after it finished; records whose result is not delivered
   yet are never purged). A repeat is acknowledged again but not executed again.
@@ -173,7 +183,9 @@ active.
 ### 301 ForceMetricSnapshot
 
 Wakes the outbox worker: it collects and sends a batch right away instead of at the end of the
-flush interval. Result `Metric snapshot triggered` (sent before the batch).
+flush interval. Result `Metric snapshot triggered`. The result and the batch come from two
+independent loops: there is no ordering guarantee between them (the batch may arrive before or
+after the result, and a failed delivery delays either one).
 
 ### 302 ForceConfigSync
 
@@ -263,7 +275,8 @@ when every channel succeeded. With no matching channel: `No notification channel
 - Set `issuedAt` to the current UTC time when the agent can first receive the command. For
   commands held back by your own workflow (approvals), set it when releasing them.
 - Return every unacknowledged command on every poll; stop after the acknowledgement.
-- Expire unacknowledged commands after about 50 minutes, before the agent would drop them.
+- Expire unacknowledged commands after about 50 minutes, before the agent would refuse them as
+  stale.
 - Record the first result; answer 2xx to all results and acknowledgements.
 - Authorize users per agent and action in the portal, and audit-log issuer, command and result.
 - Offer service and pool actions only for names the agent reports.

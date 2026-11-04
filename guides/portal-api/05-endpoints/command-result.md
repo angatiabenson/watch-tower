@@ -95,4 +95,5 @@ Per-action messages: [Commands](../08-commands.md#action-catalog).
   `agent.lastUpdateResult` in the following batches.
 - Assuming `success: true` for AgentRestart (303) means the agent is back: the result is sent
   before the restart. Watch `agent.startedAt` change.
-- Expecting a result for a command the agent dropped as stale: none is ever sent.
+- Treating a failed result for a stale or future `issuedAt` as an execution failure: the command
+  never ran. Issue a new command (new `commandId`, current `issuedAt`) if it is still wanted.

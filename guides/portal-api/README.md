@@ -38,7 +38,7 @@ You also issue **enrollment codes** (`WT1.…`) so an operator can connect a ser
 6. Commands: return unacknowledged ones from `GET commands/pending` (200 array or 204) with a unique `commandId`, an `actionType` number, string-only `parameters` and a recent `issuedAt`.
 7. The agent acknowledges a command once (not retried), executes it, and retries the result until you answer 2xx; first result wins.
 8. Service and app-pool commands only work on names the operator watches locally; the agent refuses the rest with a failed result.
-9. Config: answer `GET config?version=v` with 204 when `v` is current, else 200 `{config, version}`; the agent validates, applies, then retries `POST config/acknowledge` until 2xx. An invalid config is never acknowledged.
+9. Config: answer `GET config?version=v` with 204 when `v` is current, else 200 `{config, version}`; the agent validates, applies, then retries `POST config/acknowledge` until 2xx while that version is its current one (a newer applied version supersedes it). An invalid config is never acknowledged.
 10. v1 only grows by optional additions; anything breaking becomes v2 under a new path, with both served side by side during a transition.
 
 ## Map of the documentation

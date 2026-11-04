@@ -8,7 +8,10 @@ contract aren't listed. Versioning rules: [Versioning and compatibility](12-vers
 
 ## Unreleased (first agent release after 1.0.18)
 
-All additive within v1; portals written for 1.0.x keep working.
+The wire format changes are all additive (new optional properties and values), so portals
+written for 1.0.x keep parsing everything. Some agent behaviour changed as well: a portal that
+relied on the old behaviour (redirects, stale commands, lenient configuration checks, commands
+for any service name) is affected. See "Changed" below.
 
 ### Added
 
@@ -29,8 +32,20 @@ All additive within v1; portals written for 1.0.x keep working.
 
 ### Changed (agent behaviour within the existing contract)
 
-- Commands are dropped unless `issuedAt` is present, parseable and recent (default: at most
-  3600 s old and 300 s in the future). Portals MUST send `issuedAt`.
+- Command freshness: when `issuedAt` is present, a command older than `MaxCommandAgeSeconds` +
+  `ClockSkewSeconds` (default 3600 + 300 s), more than `ClockSkewSeconds` (300 s) in the future,
+  or with an unparseable value is rejected: never acknowledged or executed, and reported with
+  `success: false` and a message starting `Rejected: ` (retried until accepted). A command
+  without `issuedAt` is accepted, acknowledged and executed, with a one-time warning in the agent
+  log. Portals SHOULD send `issuedAt`; it becomes REQUIRED in v2.
+- Redirects are never followed, on any transport: a 3xx (304 included) fails the call like any
+  other failure, with a rate-limited warning naming the target. The bearer token and
+  `X-Agent-Id` are only sent to URLs below BaseUrl. Portals MUST NOT redirect agent API calls.
+- Snapshots no longer keep resources that are gone: drives, physical disks and network
+  interfaces leave the batch after 3 consecutive successful inventories and 10 minutes without
+  them; services, pools and endpoint checks on the next poll after they leave the configuration.
+- Every occurrence of an alert key gets its own recovery event, in the order the alert opened
+  and closed (an occurrence's recovery is no longer lost when the alert re-opens).
 - Service and application-pool commands only act on names from the agent's local watch lists
   (opt-in `VisibilityPortal:CommandPoll:AllowPortalManagedTargets` to include portal-pushed
   lists); the agent's own service is never a target.
@@ -40,6 +55,17 @@ All additive within v1; portals written for 1.0.x keep working.
   without acknowledgement.
 - Incident events are retried with exponential backoff for up to `EventMaxAgeHours` (168 h)
   instead of a fixed number of attempts.
+
+### Spec corrections
+
+- Open value sets (`incidentType`, `actionType`, every `status`, `updatePhase`, endpoint `type`) are
+  no longer closed JSON Schema `enum`s, which rejected unknown values: the known values are listed
+  in `x-extensible-enum`, and the schemas accept any value of the type.
+- `applicationPoolStatuses[].status` lists `NotFound`, which the agent reports for a pool IIS does
+  not have.
+- `AgentCommand.issuedAt` is no longer in `required` (see the freshness change above).
+- Retries after a failure, snapshot removal, configuration acknowledgement superseding and
+  redirects are described as the agent implements them.
 
 ## 1.0.x (up to 1.0.18)
 

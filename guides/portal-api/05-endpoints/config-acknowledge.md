@@ -59,6 +59,9 @@ record it, because it tells you what the agent runs.
 
 ## Common mistakes
 
-- Answering 404 for unknown versions: the agent retries every 300 s forever.
+- Answering 404 for unknown versions: the agent retries every 300 s for as long as that version
+  is its current one.
+- Waiting for the acknowledgement of an older version after pushing a newer one: the agent keeps
+  only its current version, so the older one is never acknowledged once the newer one is applied.
 - Treating the acknowledgement of version N as "every earlier version was applied": it only
   means N is current.

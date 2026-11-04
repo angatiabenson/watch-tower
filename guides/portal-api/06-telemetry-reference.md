@@ -7,9 +7,24 @@ Windows side, the units, how often it changes and how to show it. Two kinds of d
 
 - **Series** (`cpuMetrics`, `ramMetrics`): every sample is in exactly one batch. Append to a time
   series keyed by timestamp.
-- **Snapshots** (everything else): the latest reading of each resource, repeated in every batch.
-  Keep "current state per resource" and append to history only when the reading's `timestamp`
-  changes.
+- **Snapshots** (everything else): the last-known reading of each resource, repeated in every
+  batch until a newer reading replaces it. Keep "current state per resource" and append to
+  history only when the reading's `timestamp` changes.
+
+A snapshot entry is the resource's last-known reading, repeated until a newer reading replaces it
+or the resource is removed:
+
+- **Drives, physical disks, network interfaces**: removed once the resource has been absent from 3
+  consecutive successful inventories AND for at least 10 minutes, whether or not it has an open
+  alert. A failed read never counts, and neither does an empty disk listing (an empty
+  network-interface listing does).
+- **Services, application pools, endpoint checks**: removed on the agent's next poll after the
+  name leaves `Monitoring:Services:WatchedServices`,
+  `Monitoring:ApplicationPools:WatchedApplicationPools` or the valid `Monitoring:Endpoints`
+  (locally or through [remote config](09-remote-config.md)). Names match exactly: renaming
+  only the letter case replaces the entry.
+- The next batch is built from what remains, and a resource that comes back starts a fresh
+  entry. Do not expect a resource to vanish from the very next batch.
 
 All timestamps are the agent's clock in UTC. See [clock skew](10-reliability.md#clock-skew).
 
@@ -50,8 +65,10 @@ One entry per **fixed** drive that is ready (no removable, network or CD drives)
 
 Display: a bar per drive with used/free; warn at the agent's thresholds (`Monitoring:Disk:WarningThresholdPercent`
 70, `CriticalThresholdPercent` 85 by default, or what you pushed in [remote config](09-remote-config.md)).
-A drive that disappears from the list was removed or is not ready. Its open alert is retired
-(see [Events and alerts](07-events-and-alerts.md#retirement)).
+A drive that is removed or not ready stays in the list with its last reading until it has been
+absent from 3 consecutive successful inventories and for at least 10 minutes; then it disappears
+from the list, and an open alert for it is retired (see
+[Events and alerts](07-events-and-alerts.md#retirement)).
 
 ## Disk queues (`diskQueueMetrics[]`)
 

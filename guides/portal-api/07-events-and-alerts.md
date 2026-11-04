@@ -72,16 +72,30 @@ Rules a portal SHOULD follow:
 1. **Open**: on `resolved: false` for a key without an open alert, open one (opened at
    `timestamp`).
 2. **Update or escalate**: on `resolved: false` for an open key, keep it open and update type and
-   description. The agent sends this when an alert escalates in severity (an endpoint going from
-   Expiring, type 15, to Down, type 13). The same key can also carry a different type later in
-   its life.
-3. **Close**: on `resolved: true`, close the open alert if it opened at or before this
+   description, but only if the event is not older than the alert's last transition (the
+   `timestamp` of the opening or escalation that set them). An older one is history: keep it,
+   but it MUST NOT overwrite a newer severity or description. The agent sends this when an alert
+   escalates in severity (an endpoint going from Expiring, type 15, to Down, type 13). The same
+   key can also carry a different type later in its life.
+3. **Close**: on `resolved: true`, close the open alert if its last transition is older than this
    `timestamp`. The close event's `incidentType` is the recovery type where one exists (8, 11,
    14), otherwise the type that opened the alert.
 4. **Out of order**: an event in retry backoff can be overtaken by later ones. Remember when each
    key last closed. A `resolved: false` older than the last close is history and MUST NOT reopen
    the alert. A `resolved: true` without an open alert is recorded, and closes nothing.
-5. **Duplicates** are filtered by `eventId` before any of this.
+5. **Same timestamp**: a close and an opening for the same key with the SAME `timestamp` mean
+   "closed, then opened again", whichever arrives first. The agent emits such a pair when a
+   resource changes from one problem to another (see Endpoint Down → Expiring below), so the
+   alert ends up open with the opening's type. Do not drop the opening because a close with an
+   equal timestamp was already recorded.
+6. **Duplicates** are filtered by `eventId` before any of this.
+
+Timestamps cannot resolve every reordering: two transitions in the same instant carry no order
+between them, and an event the agent dropped (older than `Outbox:EventMaxAgeHours`) never
+arrives. Reconcile open alerts against the snapshots in the metrics batches (`endpointStatuses`,
+`serviceStatuses`, `applicationPoolStatuses`, `diskMetrics` ...): for example, an open endpoint
+alert whose endpoint reports `Up` in a newer snapshot is stale. The reference portal
+(`samples/MinimalPortal`) implements rules 1 to 6.
 
 Agent-side behaviour behind these events:
 
@@ -90,10 +104,21 @@ Agent-side behaviour behind these events:
   threshold doesn't flap. Service, pool and endpoint alerts close as soon as the resource is
   healthy.
 - **Endpoint Down → Expiring**: the agent first closes the critical alert (type 14,
-  `resolved: true`), then opens a warning on the same key (type 15, `resolved: false`).
+  `resolved: true`), then opens a warning on the same key (type 15, `resolved: false`). Both
+  events carry the same `timestamp` and may arrive in either order (rule 5).
 - **Reminders**: while an alert stays open the agent re-notifies its own channels every
   `Alerting:RenotifyMinutes` (60). Reminders are **not** sent to the portal. One open event per
   occurrence.
+- **Occurrences**: each time a key opens again after it closed is a new occurrence with its own
+  opening and its own recovery event. The agent queues them for the portal as they happen
+  (Opened A → Resolved A → Opened B); a re-opening never cancels the previous occurrence's
+  recovery. Like every event they may still arrive out of order after a delivery failure (rule 4).
+- **Flapping notices are not portal events**: when more than 5 notices of one key are waiting
+  for the agent's own notification channels (email, Teams, webhooks ...), the agent folds the
+  middle ones into one resolved notice titled `Flapping: N occurrences between T1 and T2`. That
+  folding only happens in the channel delivery queue. The portal still receives every
+  occurrence's own `resolved: false` and `resolved: true` events, and never an event with that
+  title, so it needs no special handling.
 - **Plain incidents**: spikes and "found down" incidents are informational. The alert, if any,
   comes separately (a ServiceDown is followed by ServiceRestarted as a plain incident when the
   restart worked, or by ServiceRestartFailed opening `svc:<name>` when it didn't).

@@ -34,7 +34,10 @@ Each flush cycle (default every 30 s):
    first;
 2. send them one by one, one HTTP request each;
 3. at the **first failure**, record an attempt for that message only, and end the cycle. The rest
-   are untouched and are tried again next cycle.
+   are untouched and are tried again next cycle. The failed message itself is only due again once
+   its backoff has expired (a batch: `RetryBackoffSeconds` × attempt, so at least 60 s by default;
+   an event: 30 s, 60 s, 120 s ... up to 15 min), so later cycles may deliver other messages
+   before it. Delivery order is therefore not guaranteed after a failure.
 
 ### Guarantees and non-guarantees
 
@@ -68,19 +71,27 @@ them and SHOULD update "current state" only from data newer than what it has.
 ### Backpressure
 
 If your portal is overloaded, answering `429` or `503` quickly is the correct reaction. The agent
-stops at that message and tries again next cycle (it ignores `Retry-After`). That limits each
-agent to one failed request per 30 s cycle, but it also spends retry attempts: batches refused
-five times are lost. Prefer scaling out over refusing for long periods.
+stops the cycle at that message (it ignores `Retry-After`) and retries the message once its
+backoff has expired, not on the very next cycle: the first retry of a metrics batch comes after at
+least 60 s by default, later ones after 120 s, 180 s and so on. Other messages that are due may be
+sent in the meantime. That limits each agent to one failed request per 30 s cycle, but it also
+spends retry attempts: batches refused five times are lost. Prefer scaling out over refusing for
+long periods.
 
 ## Commands and configuration under failure
 
 | Message | Retried? | Effect of a long portal outage |
 | --- | --- | --- |
-| command poll | next cycle | commands issued during the outage are picked up afterwards, unless older than 60 min (then dropped by the agent) |
+| command poll | next cycle | commands issued during the outage are picked up afterwards; one whose `issuedAt` is older than 3600 + 300 s is not executed and gets a failed result giving the reason |
 | command acknowledgement | no | lost; the result still comes |
 | command result | every poll cycle, no limit, survives restarts | delivered afterwards |
 | config fetch | next cycle | applied afterwards |
-| config acknowledgement | every config cycle until 2xx, survives restarts | delivered afterwards |
+| config acknowledgement | every config cycle until 2xx, survives restarts, but only while that version is the agent's current one | delivered afterwards; if a newer version was applied meanwhile, only the newer one is acknowledged |
+
+The agent stores one remote configuration: the version it applied last. Applying a newer version
+replaces it and its acknowledgement state, so an older version that was never acknowledged is
+never acknowledged later. A missing acknowledgement therefore does not prove that a version was
+not applied: the `version` query parameter of the next `GET config` says what the agent has.
 
 ## Agent restarts
 

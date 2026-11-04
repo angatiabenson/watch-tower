@@ -15,7 +15,7 @@ Every request carries `Authorization: Bearer <token>` and `X-Agent-Id: <agentId>
 | [`POST /api/v1/agent/commands/{commandId}/acknowledge`](command-acknowledge.md) | agent → portal | once per received command | no |
 | [`POST /api/v1/agent/commands/{commandId}/result`](command-result.md) | agent → portal | when a command ends | yes, every 30 s, indefinitely |
 | [`GET /api/v1/agent/config`](config.md) | portal → agent | every 300 s, and right after command 302 | next poll |
-| [`POST /api/v1/agent/config/acknowledge`](config-acknowledge.md) | agent → portal | after applying a version | yes, every 300 s, indefinitely |
+| [`POST /api/v1/agent/config/acknowledge`](config-acknowledge.md) | agent → portal | after applying a version | yes, every 300 s, while that version is the current one (a newer applied version supersedes it) |
 
 The intervals are the agent's defaults. Operators can change them, and so can your portal through
 [remote configuration](../09-remote-config.md) (`portal.*`).
@@ -25,11 +25,16 @@ The intervals are the agent's defaults. Operators can change them, and so can yo
 | Response | metrics/batch, events | commands/pending, config | acknowledge (command) | result, config/acknowledge |
 | --- | --- | --- | --- | --- |
 | 2xx | delivered, removed from the outbox | body parsed (204 = nothing) | done | done |
-| 3xx | failure (redirect followed without the token) | as "nothing new" | ignored | failure, retried |
+| 3xx | failure (redirects are not followed; logged with the `Location`), retried after the backoff | as "nothing new" | ignored | failure, retried |
 | 401 | failure, logged as an error, retried | as "nothing new", logged | ignored, logged as an error | failure, logged as an error, retried |
 | other 4xx | failure, retried | as "nothing new" | ignored | failure, retried |
 | 5xx | failure, retried | as "nothing new" | ignored | failure, retried |
 | timeout (30 s), connection error | failure, retried | as "nothing new" | ignored | failure, retried |
+
+A 3xx (any, 304 included) is never followed. The agent logs at most once per 15 minutes per
+endpoint: `Portal redirected <path> to <absolute Location>; update VisibilityPortal:BaseUrl. The redirect
+(<status>) was not followed and the call counts as failed (<n> more redirect(s) of this endpoint
+since the last warning)`, with `(no Location header)` when there is none.
 
 The agent never reads response bodies of POSTs, and no status code means "stop retrying". A
 portal that wants the agent to stop sending something answers 2xx and discards it.

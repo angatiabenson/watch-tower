@@ -113,7 +113,7 @@ Body from a 1.0.x agent (and the smallest body a current agent can send):
 | `ramMetrics[].usagePercent` | number | %, 0 to 100 | always | Used physical memory. | base |
 | `ramMetrics[].availableMb` | number | MiB, ≥ 0 | always | Available physical memory. | base |
 | `ramMetrics[].totalMb` | number | MiB, > 0 | always | Installed physical memory. | base |
-| `diskMetrics[]` | array | one per fixed drive | always | Snapshot (latest reading, repeated every batch). | base |
+| `diskMetrics[]` | array | one per fixed drive | always | Snapshot (last-known reading, repeated every batch; see below for when an entry is removed). | base |
 | `diskMetrics[].timestamp` | date-time | UTC | always | When the drive was read (default every 60 s). | base |
 | `diskMetrics[].driveName` | string | e.g. `C:\` | always | Drive root, with trailing backslash (JSON `"C:\\"`). | base |
 | `diskMetrics[].totalGb` / `freeGb` | number | GiB (1024³ bytes), ≥ 0 | always | Capacity and free space. | base |
@@ -130,7 +130,7 @@ Body from a 1.0.x agent (and the smallest body a current agent can send):
 | `serviceStatuses[].isRunning` | boolean | | always | `status == Running`. | base |
 | `applicationPoolStatuses[]` | array | one per watched pool | always | Snapshot. | base |
 | `applicationPoolStatuses[].applicationPoolName` | string | | always | IIS pool name. | base |
-| `applicationPoolStatuses[].status` | string (open enum) | `Started`, `Stopped`, `Starting`, `Stopping`, `Unknown` | always | IIS state. | base |
+| `applicationPoolStatuses[].status` | string (open enum) | `Started`, `Stopped`, `Starting`, `Stopping`, `Unknown`, `NotFound` | always | IIS state; `Unknown` when it could not be read, `NotFound` when IIS has no pool of that name. | base |
 | `applicationPoolStatuses[].isRunning` | boolean | | always | `status == Started`. | base |
 | `*.timestamp` (snapshots) | date-time | UTC | always | When that resource was last read. | base |
 | `agent` | object | | optional (always from current agents) | Agent self-description, see [telemetry](../06-telemetry-reference.md#the-agent-object). | post-1.0.18 |
@@ -161,12 +161,13 @@ Semantics, display and aggregation of every value: [Telemetry reference](../06-t
 | --- | --- |
 | any 2xx (200, 201, 202, 204) | Delivered. The body is ignored. |
 | 401 | Failure; logged at Error ("Check AgentToken"). Retried as below. |
-| 3xx, 400, 403, 404, 413, 429, other 4xx, 5xx | Failure; logged at Warning with the status. Retried as below. |
+| 3xx, 400, 403, 404, 413, 429, other 4xx, 5xx | Failure; logged at Warning with the status (redirects are not followed; the warning includes the `Location`). Retried as below. |
 | timeout (30 s), DNS, TCP or TLS error | Failure; retried as below. |
 
 Retry: the first failed message ends the cycle (the rest stay queued without counting an
-attempt). A failed batch is retried after `RetryBackoffSeconds × attempt` (60 s, 120 s, 180 s,
-240 s) and **dropped after `MaxRetryAttempts` (5) failed attempts**. Its CPU/RAM samples then never
+attempt). A failed batch is not resent on the next cycle: it is due again after
+`RetryBackoffSeconds × attempt` (60 s, 120 s, 180 s, 240 s) and is retried on the first cycle
+after that, so other messages may be delivered before it. It is **dropped after `MaxRetryAttempts` (5) failed attempts**. Its CPU/RAM samples then never
 reach the portal. Delivered and dropped messages are purged from the agent after 48 h. Details:
 [Reliability](../10-reliability.md).
 
@@ -179,6 +180,20 @@ reach the portal. Delivered and dropped messages are purged from the agent after
 - **Snapshots** are repeated in every batch by design. Store them as "latest state per resource"
   and append to history only when the `timestamp` changed. Never keep an older snapshot over a
   newer one: a batch delayed in the outbox arrives after newer ones.
+- **Removed resources**: A snapshot entry is the resource's last-known reading, repeated until a newer reading replaces it
+  or the resource is removed:
+  
+  - **Drives, physical disks, network interfaces**: removed once the resource has been absent from 3
+    consecutive successful inventories AND for at least 10 minutes, whether or not it has an open
+    alert. A failed read never counts, and neither does an empty disk listing (an empty
+    network-interface listing does).
+  - **Services, application pools, endpoint checks**: removed on the agent's next poll after the
+    name leaves `Monitoring:Services:WatchedServices`,
+    `Monitoring:ApplicationPools:WatchedApplicationPools` or the valid `Monitoring:Endpoints`
+    (locally or through [remote config](../09-remote-config.md)). Names match exactly: renaming
+    only the letter case replaces the entry.
+  - The next batch is built from what remains, and a resource that comes back starts a fresh
+    entry. Do not expect a resource to vanish from the very next batch.
 
 ## Common mistakes
 

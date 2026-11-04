@@ -26,7 +26,9 @@ lines to search for:
 | `FetchConfiguration returned {status}` / `FetchConfiguration failed` | Config poll refused / unreadable or network error |
 | `Portal send failed; deferring N remaining outbox message(s) to the next cycle` | Outbox stopped at a failure |
 | `Dropping metrics batch ... after 5 failed attempts` | Metrics lost |
-| `Rejecting command {id} (ActionType=...): ...` | Command dropped as stale, future or without `issuedAt` |
+| `Rejecting command {id} (ActionType=...): ...` | Command refused as stale, future or with an unparseable `issuedAt`; never acknowledged or run, a failed result `Rejected: ...` is sent |
+| `Portal sends commands without issuedAt; replay protection is reduced. Update the portal.` | Commands without `issuedAt` (accepted; logged once per process or BaseUrl) |
+| `Portal redirected {path} to {Location}; update VisibilityPortal:BaseUrl. ...` | The portal answered 3xx; the call failed (at most once per 15 min per endpoint) |
 | `Ignoring command without a CommandId` | Missing or wrongly cased `commandId` |
 | `Refusing unauthorized command ...` | Allow-list refusal (a result is sent) |
 | `Remote config version {v} failed validation: ...` | Configuration rejected (no acknowledgement) |
@@ -41,8 +43,9 @@ lines to search for:
 - You rotated the token and revoked the old one before the operator re-enrolled (accept both
   during rotation).
 - A proxy in front of your portal strips `Authorization` or `X-Agent-Id`, or your portal
-  **redirected** (for example http→https or a missing trailing slash). Redirects drop
-  `Authorization`.
+  **redirected** (for example http→https or a missing trailing slash). The agent never follows
+  redirects: every 3xx fails the call. Look for `Portal redirected ... to ...; update
+  VisibilityPortal:BaseUrl` in the log (at most once per 15 minutes per endpoint).
 - You compare `X-Agent-Id` case-sensitively against a differently cased stored ID.
 
 ### No data arrives at all
@@ -71,11 +74,17 @@ Gaps in CPU/RAM after a long outage are batches that ran out of attempts.
 
 ### Commands stay pending
 
-- The agent can't parse your poll response: one command with a number in `parameters`, a string
-  `actionType` or PascalCase names blocks all commands for that agent. Look for
-  `PollCommands failed` in the log.
-- `issuedAt` is missing, older than an hour, or the server's clock is off by more than 5
-  minutes. Look for `Rejecting command` in the log.
+- The agent can't parse your poll response: one command with a number in `parameters` (`60`
+  instead of `"60"`) or a string `actionType` (`"103"`, `"ServiceRestart"`) makes the whole
+  array unreadable, so NO command of that response runs, on every poll, until that command is
+  gone. Look for `PollCommands failed` (with a JSON exception) in the log.
+- PascalCase or misspelled property names are different: unknown properties are ignored, so each
+  such command is read with defaults and fails on its own. Without `commandId` it is skipped
+  (`Ignoring command without a CommandId (ActionType=...)`); with `CommandId` but `ActionType` it
+  runs as action 0 and fails (`Unknown action type: 0`); `IssuedAt` is not read, so the command
+  counts as one without `issuedAt` (accepted with a replay-protection warning).
+- `issuedAt` is older than 3600 + 300 s, more than 300 s in the future (check the server's clock)
+  or unparseable. Look for `Rejecting command` in the log; the portal gets a failed result.
 - You return the command to a different agentId than the one polling.
 - Command polling is disabled (`CommandPoll:PollIntervalSeconds` ≤ 0) or the portal connection is
   off.
@@ -135,8 +144,11 @@ load.
 **Do I have to implement every endpoint?** For a working agent, yes. A read-only portal can answer
 `commands/pending` and `config` with 204 forever and still MUST answer the POSTs with 2xx.
 
-**Can I get historical data the agent collected before enrollment?** No. Only data collected
-while the portal connection was enabled is queued.
+**Can I get historical data the agent collected before enrollment?** There is no history API.
+But the agent forwards CPU and RAM samples from its local database starting at the oldest one it
+still retains (the forwarding position starts at 0), so the first batches after the portal is
+enabled can contain samples collected before that, possibly hours or days old. Store them by
+their own timestamps. Events are only queued while the portal connection is enabled.
 
 **Is there a heartbeat?** The batch every 30 s is the heartbeat (see
 [Liveness](06-telemetry-reference.md#liveness)).
