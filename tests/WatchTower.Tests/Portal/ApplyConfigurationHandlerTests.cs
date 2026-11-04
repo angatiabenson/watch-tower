@@ -51,6 +51,51 @@ public class ApplyConfigurationHandlerTests
     }
 
     [Fact]
+    public async Task PortalManagedSettingsTurnedOffDuringAFetch_TheFetchedConfigIsNotApplied()
+    {
+        using var dir = new TestDataDirectory();
+        dir.Paths.EnsureDirectories();
+        var options = new TestOptionsMonitor<PortalOptions>(new PortalOptions { Enabled = true, RemoteConfig = { Enabled = true } });
+        var fetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cycleDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var client = new Mock<WatchTower.Portal.Clients.IPortalClient>();
+        client.Setup(c => c.FetchConfigurationAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Returns(async () =>
+            {
+                fetchStarted.TrySetResult();
+                await release.Task;
+                var config = new RemoteAgentConfigDto { Services = new RemoteServiceConfig { WatchedServices = ["W3SVC"] } };
+                return (true, (RemoteAgentConfigDto?)config, (string?)"v2");
+            });
+        var store = new Mock<IRemoteConfigStore>();
+        store.Setup(s => s.GetCurrentVersionAsync()).ReturnsAsync((string?)null);
+        store.Setup(s => s.GetUnacknowledgedAsync())
+            .Callback(() => cycleDone.TrySetResult())
+            .ReturnsAsync(((RemoteAgentConfigDto?)null, (string?)null));
+
+        using var worker = new WatchTower.Workers.RemoteConfigWorker(client.Object, store.Object, dir.Paths,
+            new WatchTower.Portal.Actions.ConfigSyncTrigger(), options, TimeProvider.System,
+            NullLogger<WatchTower.Workers.RemoteConfigWorker>.Instance);
+        await worker.StartAsync(Ct);
+        try
+        {
+            await fetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            options.CurrentValue = new PortalOptions { Enabled = true, RemoteConfig = { Enabled = false } }; // operator turns it off
+            release.TrySetResult();
+            await cycleDone.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        File.Exists(dir.Paths.RemoteConfigFilePath).Should().BeFalse("the switch was turned off before the response was applied");
+        store.Verify(s => s.SaveConfigAsync(It.IsAny<RemoteAgentConfigDto>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
     public async Task PortalManagedSettingsAllowed_AppliesTheCommand()
     {
         using var dir = new TestDataDirectory();

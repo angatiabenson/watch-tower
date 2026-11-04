@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/ci.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/angatiabenson/watch-tower/actions/workflows/release.yml"><img src="https://github.com/angatiabenson/watch-tower/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-  <img src="https://img.shields.io/badge/tests-1074%20passing-brightgreen" alt="Tests: 1074 passing">
+  <img src="https://img.shields.io/badge/tests-1075%20passing-brightgreen" alt="Tests: 1075 passing">
   <img src="https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet" alt=".NET 10">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license"></a>

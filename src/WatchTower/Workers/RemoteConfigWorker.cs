@@ -93,6 +93,17 @@ public class RemoteConfigWorker : BackgroundService
                 return;
             }
 
+            // The operator may have turned off portal-managed settings (or the portal) while the
+            // fetch was in flight: re-read the live options right before writing the overlay.
+            var live = _options.CurrentValue;
+            if (!live.Enabled || !live.RemoteConfig.Enabled)
+            {
+                _logger.LogInformation(
+                    "Remote config version {Version} was not applied: portal-managed settings were turned off during the fetch",
+                    version);
+                return;
+            }
+
             await ApplyConfigurationHandler.WriteRemoteConfigFileAsync(_paths.RemoteConfigFilePath, config, ct);
             await _configStore.SaveConfigAsync(config, version);
 
