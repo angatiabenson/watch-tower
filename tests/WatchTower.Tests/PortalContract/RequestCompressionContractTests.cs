@@ -434,6 +434,61 @@ public sealed class RequestCompressionContractTests : IAsyncLifetime
     }
 
     [Fact]
+    public void ATicketsDestination_IsTheBaseUrlOfItsOwnGeneration()
+    {
+        // The request is sent to ticket.BaseUrl, so a destination and a compression state can never
+        // come from two different configurations.
+        var monitor = new TestOptionsMonitor<PortalOptions>(GzipOptions("https://old.example.com"));
+        var compression = new RequestCompression(monitor, NullLogger.Instance);
+
+        var old = compression.Begin();
+        monitor.CurrentValue = GzipOptions("https://new.example.com");
+        var fresh = compression.Begin();
+
+        old.BaseUrl.Should().Be("https://old.example.com");
+        fresh.BaseUrl.Should().Be("https://new.example.com");
+        fresh.Generation.Should().NotBe(old.Generation);
+    }
+
+    [Fact]
+    public void ALateChangeCallbackWithAnOldValue_CannotSyncTheStateBackwards()
+    {
+        var monitor = new CallbackOptionsMonitor(GzipOptions("https://old.example.com"));
+        var compression = new RequestCompression(monitor, NullLogger.Instance);
+        var oldValue = monitor.CurrentValue;
+
+        monitor.CurrentValue = GzipOptions("https://new.example.com");
+        compression.Disable(compression.Begin(), "415 Unsupported Media Type"); // the new portal refuses
+        monitor.Raise(oldValue);                                               // an obsolete callback arrives late
+
+        var after = compression.Begin();
+        after.Gzip.Should().BeFalse("the new portal's refusal must survive a late callback for the old value");
+        after.BaseUrl.Should().Be("https://new.example.com");
+    }
+
+    /// <summary>An options monitor whose change listeners the test can invoke with any value.</summary>
+    private sealed class CallbackOptionsMonitor(PortalOptions value) : IOptionsMonitor<PortalOptions>
+    {
+        private readonly List<Action<PortalOptions, string?>> _listeners = [];
+
+        public PortalOptions CurrentValue { get; set; } = value;
+
+        public PortalOptions Get(string? name) => CurrentValue;
+
+        public IDisposable? OnChange(Action<PortalOptions, string?> listener)
+        {
+            _listeners.Add(listener);
+            return null;
+        }
+
+        public void Raise(PortalOptions value)
+        {
+            foreach (var listener in _listeners)
+                listener(value, null);
+        }
+    }
+
+    [Fact]
     public void AnAmbiguousRefusal_AfterThePortalWasProven_IsIgnored()
     {
         var monitor = new TestOptionsMonitor<PortalOptions>(GzipOptions());

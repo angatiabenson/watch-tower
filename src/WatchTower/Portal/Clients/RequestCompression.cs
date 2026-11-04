@@ -39,8 +39,12 @@ internal sealed class RequestCompression : IDisposable
     /// <summary>Ambiguous refusals in a row (none accepted compressed in between) that switch it off.</summary>
     public const int MaxAmbiguousRefusals = 3;
 
-    /// <summary>The configuration generation a request decided under, and whether it compresses.</summary>
-    public readonly record struct Ticket(long Generation, bool Gzip);
+    /// <summary>
+    /// The configuration generation a request decided under, whether it compresses, and the portal
+    /// BaseUrl of that same configuration: the request is sent to <see cref="BaseUrl"/>, so the
+    /// destination and the compression state always come from one snapshot.
+    /// </summary>
+    public readonly record struct Ticket(long Generation, bool Gzip, string BaseUrl);
 
     private readonly IOptionsMonitor<PortalOptions> _options;
     private readonly ILogger _logger;
@@ -61,18 +65,24 @@ internal sealed class RequestCompression : IDisposable
         _logger = logger;
         _time = time ?? TimeProvider.System;
         _key = KeyOf(options.CurrentValue);
-        _changeSubscription = options.OnChange((value, _) => Sync(value));
+        // A change callback may run late, after a newer change: always sync to the current value,
+        // never to the (possibly obsolete) one the callback was handed.
+        _changeSubscription = options.OnChange((_, _) => Sync());
     }
 
-    /// <summary>Decides whether the next compressible request is sent compressed.</summary>
+    /// <summary>
+    /// Decides whether the next request is sent compressed, and to which portal. The options are
+    /// read inside the lock, so a delayed caller can never sync the state back to an older
+    /// configuration.
+    /// </summary>
     public Ticket Begin()
     {
-        var options = _options.CurrentValue;
         lock (_lock)
         {
+            var options = _options.CurrentValue;
             SyncLocked(options);
             var suspended = _suspendedSince is { } since && _time.GetElapsedTime(since) < SuspendFor;
-            return new Ticket(_generation, options.GzipRequests && !_disabled && !suspended);
+            return new Ticket(_generation, options.GzipRequests && !_disabled && !suspended, options.BaseUrl ?? "");
         }
     }
 
@@ -157,10 +167,10 @@ internal sealed class RequestCompression : IDisposable
                            "compression stays off until the service restarts or {Section}:CompressRequests or " +
                            "BaseUrl changes", reason, PortalOptions.SectionName);
 
-    private void Sync(PortalOptions options)
+    private void Sync()
     {
         lock (_lock)
-            SyncLocked(options);
+            SyncLocked(_options.CurrentValue);
     }
 
     /// <summary>

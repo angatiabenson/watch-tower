@@ -70,11 +70,9 @@ public class HttpsPortalClient : IPortalClient, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private string BuildUrl(string path)
-    {
-        var base_ = _options.CurrentValue.BaseUrl.TrimEnd('/');
-        return $"{base_}/{path}";
-    }
+    private string BuildUrl(string path) => JoinUrl(_options.CurrentValue.BaseUrl, path);
+
+    private static string JoinUrl(string baseUrl, string path) => $"{baseUrl.TrimEnd('/')}/{path}";
 
     public async Task<bool> SendMetricsBatchAsync(MetricsBatchDto batch, CancellationToken ct)
     {
@@ -193,8 +191,10 @@ public class HttpsPortalClient : IPortalClient, IDisposable
         try
         {
             var client = CreateClient();
-            var url = BuildUrl(path);
+            // A compressible request takes its destination from the same snapshot as its
+            // compression ticket, so its outcome can only ever apply to the portal it went to.
             var ticket = compressible ? _compression.Begin() : default;
+            var url = compressible ? JoinUrl(ticket.BaseUrl, path) : BuildUrl(path);
             var gzip = ticket.Gzip;
             var response = await SendPostAsync(client, url, payload, gzip, ct);
             try
