@@ -24,22 +24,30 @@ portal SHOULD map types to its own severities and can use this table.
 | 1 | CpuSpikeDetected | Warning | plain | First sample at or above the CPU threshold. Carries `topProcesses`. |
 | 2 | RamThresholdBreached | Critical | opens `ram` | RAM ≥ `Monitoring:Ram:ThresholdPercent` (90) for `SustainedSeconds` (300). `topProcesses` by working set. Also the `ram` close type. |
 | 3 | RamSpikeDetected | Warning | plain | First sample at or above the RAM threshold. `topProcesses` (3, by working set). |
-| 4 | DiskCritical | Critical | opens `disk:<drive>` e.g. `disk:C:\` | Usage ≥ `CriticalThresholdPercent` (85). Closes once usage has stayed below it for the debounce time. `WarningThresholdPercent` (70) only affects the agent's local log and reports. Also the close type. |
-| 5 | DiskQueueHigh | Warning | opens `diskqueue:<instance>` | Queue length > `QueueLengthWarningThreshold` (2). Also the close type. |
-| 6 | NetworkQueueSaturated | Warning | opens `net:<interface>` | Output queue > `OutputQueueWarningThreshold` (0). Also the close type. |
+| 4 | DiskCritical | Critical | opens `disk:<drive>` e.g. `disk:C:\` | Usage ≥ `CriticalThresholdPercent` (85) for `Monitoring:Disk:SustainedSeconds` (600; at once up to 1.0.21). Closes once usage has stayed below it for the debounce time. `WarningThresholdPercent` (70) only affects the agent's local log and reports. Also the close type. |
+| 5 | DiskQueueHigh | Warning | opens `diskqueue:<instance>` | Queue length > `QueueLengthWarningThreshold` (2) for `QueueSustainedSeconds` (300; at once up to 1.0.21). Also the close type. |
+| 6 | NetworkQueueSaturated | Warning | opens `net:<interface>` | Output queue > `OutputQueueWarningThreshold` (0) for `Monitoring:Network:SustainedSeconds` (300; at once up to 1.0.21). Also the close type. |
 | 7 | ServiceDown | Critical | plain | A watched service is found stopped (once per outage). The agent then tries to restart it. |
-| 8 | ServiceRestarted | Info | closes `svc:<name>` if open, else plain | The agent restarted the service. |
-| 9 | ServiceRestartFailed | Critical | opens `svc:<name>` | `MaxRestartAttempts` (3) restarts failed. |
+| 8 | ServiceRestarted | Info | closes `svc:<name>` if open, else plain | The agent restarted the service. Recorded and sent to the portal, never notified on its own. |
+| 9 | ServiceRestartFailed | Critical | opens `svc:<name>` | `MaxRestartAttempts` (3) restarts failed and (after 1.0.21) the service is still down `Monitoring:Services:SustainedSeconds` (120) after it was first seen down. |
 | 10 | ApplicationPoolDown | Critical | plain | A watched pool is found stopped. The agent then tries to start it. |
 | 11 | ApplicationPoolStarted | Info | closes `pool:<name>` if open, else plain | The agent started the pool. |
-| 12 | ApplicationPoolStartFailed | Critical | opens `pool:<name>` | `MaxStartAttempts` (3) starts failed. |
-| 13 | EndpointDown | Critical | opens or escalates `endpoint:<name>` | `FailuresBeforeAlert` (2) consecutive failed checks (an expired or invalid certificate counts as a failed check). |
+| 12 | ApplicationPoolStartFailed | Critical | opens `pool:<name>` | `MaxStartAttempts` (3) starts failed and (after 1.0.21) the pool is still down `Monitoring:ApplicationPools:SustainedSeconds` (120) after it was first seen down. |
+| 13 | EndpointDown | Critical | opens or escalates `endpoint:<name>` | `FailuresBeforeAlert` (2) consecutive failed checks (an expired or invalid certificate counts as a failed check) and (after 1.0.21) failing for the check's waiting period: its `SustainedSeconds`, default `Monitoring:EndpointDefaults:SustainedSeconds` (120). Both are needed. |
 | 14 | EndpointRecovered | Info | closes `endpoint:<name>` | The check succeeds again (or went from Down to Expiring, see below). |
 | 15 | CertificateExpiring | Warning | opens `endpoint:<name>` | The certificate is inside `CertificateWarnDays` (21). |
 | 16 | ServerRestarted | Info (clean shutdown) or Warning (unexpected) | one-shot `reboot` | The agent noticed the machine booted since it last ran. |
 
 Types 13 to 16 and all alert keys are 1.0.20 (agents up to 1.0.19 never send them). The
 `description` is English text written by the agent; show it, don't parse it.
+
+Agents after 1.0.21 wait before every alert that opens a key: a breach must last its waiting
+period first ([Alert waiting periods](09-remote-config.md#alert-waiting-periods)). While it waits
+there is **no event** for it; each metrics batch lists it in
+[`pendingAlerts`](06-telemetry-reference.md#pending-alerts-pendingalerts). A breach that clears
+within its period never produces an event, so every "resolved" event still follows an "opened"
+one. Plain events (CpuSpikeDetected, ServiceDown, ApplicationPoolDown, ServiceRestarted,
+ApplicationPoolStarted) are still sent at once.
 
 ## Alert lifecycle
 

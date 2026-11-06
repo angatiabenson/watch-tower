@@ -49,4 +49,5 @@ Each endpoint page lists every field with:
 - **Present**: `always` (every v1 agent sends it), `optional` (may be absent; the agent never sends
   `null`), or for portal-to-agent fields whether the agent requires it.
 - **Since**: `base` (every released v1 agent), `1.0.19` (added in 1.0.19), `1.0.20` (added in
-  1.0.20) or `after-1.0.20` (added after 1.0.20, unreleased).
+  1.0.20), `after-1.0.20` (added after 1.0.20, released in 1.0.21) or `after-1.0.21` (added after
+  1.0.21, unreleased).
