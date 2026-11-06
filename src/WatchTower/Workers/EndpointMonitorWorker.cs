@@ -256,10 +256,15 @@ public sealed class EndpointMonitorWorker(
     private async Task HandleResultAsync(EndpointCheck check, EndpointProbeResult result, CancellationToken ct)
     {
         // A result of a definition that has been replaced (or removed) while it ran says nothing
-        // about the check as it is now: it must not count as its failure or start its wait.
-        if (!_definitions.TryGetValue(check.Name, out var current) || current != Definition(check))
+        // about the check as it is now: it must not be recorded, count as its failure or start
+        // its wait. The configuration can change while the probe is awaited, before any poll has
+        // processed it, so the result is checked against the configuration as it is now as well
+        // as against the definition the worker last scheduled.
+        if (!_definitions.TryGetValue(check.Name, out var scheduled) || scheduled != Definition(check) ||
+            !IsConfiguredNow(check))
         {
-            logger.LogDebug("Ignoring the result of endpoint check {Endpoint}: it was changed while the check ran", check.Name);
+            logger.LogInformation(
+                "Ignoring a result of endpoint check {Endpoint}: its configuration changed while the check ran", check.Name);
             return;
         }
 
@@ -318,6 +323,27 @@ public sealed class EndpointMonitorWorker(
     /// the schedule or the alerting policy (interval, FailuresBeforeAlert, SustainedSeconds):
     /// tuning those keeps the failures counted so far. Kept in memory only, never logged.
     /// </summary>
+    /// <summary>
+    /// Whether <paramref name="check"/> is, right now, what <c>Monitoring:Endpoints</c> configures
+    /// under its name: the first valid entry of that name (as <see cref="PollOnceAsync"/> picks
+    /// it) has the same <see cref="Definition"/>. False when the entry was changed, removed or
+    /// made invalid.
+    /// </summary>
+    private bool IsConfiguredNow(EndpointCheck check)
+    {
+        var configured = options.CurrentValue.Endpoints;
+        for (var i = 0; i < configured.Count; i++)
+        {
+            if (configured[i] is not { } entry ||
+                !string.Equals(entry.Name?.Trim(), check.Name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!EndpointCheck.TryCreate(entry, $"Monitoring:Endpoints:{i}", out var current, out _))
+                continue; // invalid entries are skipped by the poll too
+            return Definition(current) == Definition(check);
+        }
+        return false;
+    }
+
     private const char Separator = (char)0x1F; // ASCII unit separator: not expected in any of the parts
 
     internal static string Definition(EndpointCheck check) => string.Join(Separator,

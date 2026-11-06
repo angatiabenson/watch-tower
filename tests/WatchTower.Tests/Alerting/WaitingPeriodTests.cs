@@ -493,6 +493,47 @@ public class WaitingPeriodTests
             "the late result does not overwrite B's status either");
     }
 
+    [Fact]
+    public async Task Endpoint_ChangedWhileItsProbeIsAwaited_TheLateResultIsIgnored_BeforeAnyOtherPoll()
+    {
+        // A fails at 0 and 60 s (2 of 2 failures, 60 of 120 s). Its third probe starts at 120 s and
+        // hangs; meanwhile the operator replaces A with healthy B; A then fails at 130 s, before
+        // any other poll has seen the change. That failure must not open the alert.
+        var thirdProbe = new TaskCompletionSource<EndpointProbeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probesOfA = 0;
+        _probe.Setup(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()))
+            .Returns((EndpointCheck c, CancellationToken _) =>
+                c.Url!.Host != "a.example" ? Task.FromResult(new EndpointProbeResult(EndpointState.Up, "HTTP 200", 12))
+                : ++probesOfA == 3 ? thirdProbe.Task
+                : Task.FromResult(new EndpointProbeResult(EndpointState.Down, "HTTP 503", 12)));
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(Shop("https://a.example/"));
+        var worker = new EndpointMonitorWorker(_probe.Object, _store.Object, _alerts, options, _time,
+            NullLogger<EndpointMonitorWorker>.Instance);
+        await worker.PollOnceAsync(Ct);
+        Advance(60);
+        await worker.PollOnceAsync(Ct);
+        Advance(60);
+
+        var poll = worker.PollOnceAsync(Ct);     // t = 120 s: A's third probe is awaited
+        options.CurrentValue = Shop("https://b.example/");
+        Advance(10);
+        thirdProbe.SetResult(new EndpointProbeResult(EndpointState.Down, "HTTP 503", 12));
+        await poll;                              // completes before any poll processed the change
+
+        _dispatcher.Sent.Should().BeEmpty("A's late failure must not open an alert after A was replaced");
+        _alerts.GetOpenAlerts().Should().BeEmpty();
+        _store.Verify(s => s.AddEndpointStatus(It.Is<EndpointStatus>(e => !e.IsUp)), Times.Exactly(2),
+            "only A's results from before the change are recorded");
+
+        Advance(5);
+        await worker.PollOnceAsync(Ct);          // the next poll runs B at once: it is up
+
+        _dispatcher.Sent.Should().BeEmpty("no opening, so no resolved notice either");
+        _alerts.GetPendingAlerts().Should().BeEmpty("A's wait ended with its replacement");
+        _alerts.GetShortBreaches(Now.AddDays(-1)).Should().BeEmpty("a replaced check did not recover");
+        _store.Verify(s => s.AddEndpointStatus(It.Is<EndpointStatus>(e => e.IsUp && e.Target == "https://b.example/")), Times.Once);
+    }
+
     // ------------------------------------------------------------------ services and pools
 
     private readonly Mock<IWindowsServiceManager> _services = new();
