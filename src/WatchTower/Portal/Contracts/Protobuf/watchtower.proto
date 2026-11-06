@@ -39,6 +39,7 @@ message MetricsBatchPayload {
   string batch_id                            = 9;  // idempotency key for de-duplicating retried batches
   AgentTelemetryProto            agent              = 10; // optional: agent identity/version/update state
   repeated EndpointStatusProto   endpoint_statuses  = 11; // latest endpoint check results (absent from older agents)
+  repeated PendingAlertProto     pending_alerts     = 12; // breaches inside their waiting period at batched_at; NOT alerts (absent from agents up to 1.0.21)
 }
 
 // Agent self-description sent with every metrics batch (additive; absent from older agents).
@@ -67,6 +68,17 @@ message DiskQueueMetricProto { string timestamp = 1; string instance_name = 2; d
 message NetworkMetricProto   { string timestamp = 1; string interface_name = 2; double output_queue_length = 3; optional bool is_stale = 4; }
 message ServiceStatusProto   { string timestamp = 1; string service_name = 2; string display_name = 3; string status = 4; bool is_running = 5; optional bool is_stale = 6; }
 message AppPoolStatusProto   { string timestamp = 1; string app_pool_name = 2; string status = 3; bool is_running = 4; optional bool is_stale = 5; }
+// A breach inside its alert's waiting period (Monitoring:...:SustainedSeconds): nothing has been
+// raised or sent. It becomes an alert (an AgentEvent with alert_key and resolved = false) at
+// alerts_at if it is still present; if it clears first, nothing is ever sent for it.
+message PendingAlertProto {
+  string alert_key           = 1;  // key the alert will have, e.g. "diskqueue:0 C:"
+  string severity            = 2;  // Info | Warning | Critical (open set)
+  string title               = 3;  // latest headline
+  string since               = 4;  // ISO-8601 UTC: first seen at this severity
+  int32  alert_after_seconds = 5;  // the waiting period
+  string alerts_at           = 6;  // ISO-8601 UTC: since + alert_after_seconds
+}
 message EndpointStatusProto  {
   string          timestamp             = 1;
   string          name                  = 2;
@@ -148,13 +160,15 @@ message RemoteAgentConfig {
   RemoteAppPoolConfig app_pools = 6;
   RemotePortalConfig  portal   = 7;
   RemoteMaintenanceConfig maintenance = 8;  // optional maintenance window (absent from older portals)
+  RemoteEndpointConfig endpoints = 9;  // defaults for endpoint checks (ignored by agents up to 1.0.21)
 }
 
 message RemoteCpuConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
 message RemoteRamConfig     { optional int32 poll_interval_seconds = 1; optional double threshold_percent = 2; optional int32 sustained_seconds = 3; }
-message RemoteDiskConfig    { optional int32 poll_interval_seconds = 1; optional double warning_threshold_percent = 2; optional double critical_threshold_percent = 3; optional double queue_length_warning_threshold = 4; }
-message RemoteNetworkConfig { optional int32 poll_interval_seconds = 1; optional double output_queue_warning_threshold = 2; }
-message RemoteServiceConfig { optional int32 poll_interval_seconds = 1; repeated string watched_services = 2; }
-message RemoteAppPoolConfig { optional int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; }
+message RemoteDiskConfig    { optional int32 poll_interval_seconds = 1; optional double warning_threshold_percent = 2; optional double critical_threshold_percent = 3; optional double queue_length_warning_threshold = 4; optional int32 sustained_seconds = 5; optional int32 queue_sustained_seconds = 6; }
+message RemoteNetworkConfig { optional int32 poll_interval_seconds = 1; optional double output_queue_warning_threshold = 2; optional int32 sustained_seconds = 3; }
+message RemoteServiceConfig { optional int32 poll_interval_seconds = 1; repeated string watched_services = 2; optional int32 sustained_seconds = 3; }
+message RemoteAppPoolConfig { optional int32 poll_interval_seconds = 1; repeated string watched_application_pools = 2; optional int32 sustained_seconds = 3; }
 message RemotePortalConfig  { optional int32 outbox_flush_interval_seconds = 1; optional int32 command_poll_interval_seconds = 2; optional int32 remote_config_poll_interval_seconds = 3; }
+message RemoteEndpointConfig { optional int32 sustained_seconds = 1; }
 message RemoteMaintenanceConfig { optional string until_utc = 1; optional string reason = 2; }

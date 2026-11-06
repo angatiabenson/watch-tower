@@ -16,6 +16,7 @@ public enum EndpointCheckType
 /// <param name="Port">Tcp/Certificate: port.</param>
 /// <param name="Url">Http: the URL to GET.</param>
 /// <param name="DisplayTarget">Target without credentials or query string (safe to show and send).</param>
+/// <param name="AlertAfter">The check's own waiting period; null = <c>Monitoring:EndpointDefaults:SustainedSeconds</c>.</param>
 public sealed record EndpointCheck(
     string Name,
     EndpointCheckType Type,
@@ -28,7 +29,8 @@ public sealed record EndpointCheck(
     string? ExpectBodyContains,
     int CertificateWarnDays,
     TimeSpan Interval,
-    int FailuresBeforeAlert)
+    int FailuresBeforeAlert,
+    TimeSpan? AlertAfter = null)
 {
     public const int MaxNameLength = 100;
     public const int MinIntervalSeconds = SnapshotFreshness.EndpointMinIntervalSeconds;
@@ -55,6 +57,8 @@ public sealed record EndpointCheck(
             return Fail($"{key}:IntervalSeconds must be between {MinIntervalSeconds} and {MaxIntervalSeconds}.", out error);
         if (o.FailuresBeforeAlert < 1 || o.FailuresBeforeAlert > 100)
             return Fail($"{key}:FailuresBeforeAlert must be between 1 and 100.", out error);
+        if (o.SustainedSeconds is < 0 or > Alerting.PendingAlertTracker.MaxSeconds)
+            return Fail($"{key}:SustainedSeconds must be between 0 and {Alerting.PendingAlertTracker.MaxSeconds} (or empty for the default).", out error);
         if (o.CertificateWarnDays < 1 || o.CertificateWarnDays > 3650)
             return Fail($"{key}:CertificateWarnDays must be between 1 and 3650.", out error);
 
@@ -103,7 +107,8 @@ public sealed record EndpointCheck(
             string.IsNullOrEmpty(o.ExpectBodyContains) ? null : o.ExpectBodyContains,
             o.CertificateWarnDays,
             TimeSpan.FromSeconds(o.IntervalSeconds),
-            o.FailuresBeforeAlert);
+            o.FailuresBeforeAlert,
+            o.SustainedSeconds is { } wait ? TimeSpan.FromSeconds(wait) : null);
         return true;
     }
 

@@ -48,6 +48,12 @@ Password rule: at least 10 characters (server enforces; show the hint in the for
       "description": "Drive C:\\ at 91.0% (9.7 GB free of 126.5 GB)", "openedAt": "2026-11-03T08:10:00Z",
       "lastNotifiedAt": "2026-11-03T08:10:00Z", "notifyCount": 1 }   // lastNotifiedAt null = held (maintenance / no channel)
   ],
+  "pendingAlerts": [                // breaches inside their waiting period (…SustainedSeconds), oldest first:
+                                    // nothing is sent; each becomes an alert at alertsAt if still present
+    { "key": "diskqueue:0 C:", "severity": "warning", "title": "Disk Queue High: 0 C: at 3.4",
+      "since": "2026-11-03T09:58:00Z", "alertAfterSeconds": 300, "alertsAt": "2026-11-03T10:03:00Z",
+      "lastSeenAt": "2026-11-03T10:00:00Z" }
+  ],
   "workers": [                      // monitoring worker liveness (feeds the health-gated heartbeat)
     { "name": "cpu", "lastSuccessAt": "2026-11-03T09:59:55Z", "intervalSeconds": 5, "stale": false }
   ],                                // stale = no successful cycle for 3x the interval (at least 2 min)

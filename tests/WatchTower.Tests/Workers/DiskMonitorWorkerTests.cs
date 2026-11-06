@@ -32,7 +32,10 @@ public class DiskMonitorWorkerTests
             PollIntervalSeconds = 1,
             WarningThresholdPercent = 70,
             CriticalThresholdPercent = 85,
-            QueueLengthWarningThreshold = 2.0
+            QueueLengthWarningThreshold = 2.0,
+            // These tests are about alerting itself; the waiting periods have their own tests.
+            SustainedSeconds = 0,
+            QueueSustainedSeconds = 0,
         });
         _metricsProvider.Setup(m => m.GetDiskQueueMetrics()).Returns(new List<DiskQueueMetric>());
         _emailService.Setup(e => e.IsConfigured).Returns(true);

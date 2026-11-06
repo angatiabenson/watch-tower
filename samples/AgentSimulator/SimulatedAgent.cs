@@ -152,7 +152,9 @@ public sealed partial class SimulatedAgent(
             _services.Select(s => new ServiceStatusDto(snap, s.Key, DisplayName(s.Key), s.Value.Status, s.Value.Running, Stale(snap, polled30))).ToList(),
             _pools.Select(p => new ApplicationPoolStatusDto(snap, p.Key, p.Value.Status, p.Value.Running, Stale(snap, polled30))).ToList(),
             Telemetry(at),
-            Endpoints(snap)?.Select(e => e with { IsStale = Stale(e.Timestamp, SnapshotFreshness.EndpointWindow(60, 10)) }).ToList());
+            Endpoints(snap)?.Select(e => e with { IsStale = Stale(e.Timestamp, SnapshotFreshness.EndpointWindow(60, 10)) }).ToList(),
+            // Like agents after 1.0.21: the list is always present; nothing waits in the simulator.
+            PendingAlerts: []);
     }
 
     /// <summary>

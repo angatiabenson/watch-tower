@@ -85,6 +85,12 @@ public static class ConfigSchema
 
     private static readonly FieldCondition HttpOnly = new("Type", ["Http"]);
 
+    /// <summary>Label of every waiting-period field (<c>...SustainedSeconds</c>).</summary>
+    private const string AlertAfterLabel = "Alert after (s)";
+
+    /// <summary>Longest waiting period, as everywhere else (one day).</summary>
+    private const int MaxWaitSeconds = Services.Alerting.PendingAlertTracker.MaxSeconds;
+
     /// <summary>
     /// One <see cref="Configuration.EndpointCheckOptions"/> entry. Defaults mirror that class;
     /// ranges mirror <see cref="Services.Endpoints.EndpointCheck.TryCreate"/>, which still
@@ -108,6 +114,10 @@ public static class ConfigSchema
             1, Services.Endpoints.EndpointCheck.MaxTimeoutSeconds, Default: 10),
         new("FailuresBeforeAlert", "Failures before alert", FieldType.Int,
             "Consecutive failed checks before the endpoint is reported down.", 1, 100, Default: 2),
+        new("SustainedSeconds", AlertAfterLabel, FieldType.Int,
+            "Waiting period for this check: it must also have been failing this long before anyone is notified. " +
+            "Empty = the default for all checks (Endpoint checks section). 0 = failures only.",
+            0, MaxWaitSeconds, Placeholder: "default"),
         new("ExpectStatus", "Expected status", FieldType.String,
             "Accepted HTTP status codes, e.g. 200-399, 200 or 200,204,301-302.",
             Placeholder: "200-399", Format: "status-ranges", Default: "200-399", VisibleWhen: HttpOnly),
@@ -201,9 +211,10 @@ public static class ConfigSchema
         new("cpu", "CPU", "Alert when processor usage stays above a threshold.",
         [
             new("Monitoring:Cpu:ThresholdPercent", "Alert threshold (%)", FieldType.Number, null, 1, 100),
-            new("Monitoring:Cpu:SustainedSeconds", "Sustained for (s)", FieldType.Int,
-                "Usage must stay above the threshold this long before an emergency alert. Shorter bursts are logged as spikes.",
-                0, 86_400),
+            new("Monitoring:Cpu:SustainedSeconds", AlertAfterLabel, FieldType.Int,
+                "Waiting period: usage must stay at or above the threshold this long before anyone is notified. " +
+                "Shorter bursts are logged as spikes and shown as pending, but not sent. 0 = alert on the first reading.",
+                0, MaxWaitSeconds),
             new("Monitoring:Cpu:PollIntervalSeconds", "Sample every (s)", FieldType.Int, null, 1, 3_600),
             new("Monitoring:Cpu:TopProcessCount", "Top processes in alerts", FieldType.Int, null, 0, 20, Advanced: true),
         ]),
@@ -211,7 +222,10 @@ public static class ConfigSchema
         new("ram", "Memory", "Alert when memory usage stays above a threshold.",
         [
             new("Monitoring:Ram:ThresholdPercent", "Alert threshold (%)", FieldType.Number, null, 1, 100),
-            new("Monitoring:Ram:SustainedSeconds", "Sustained for (s)", FieldType.Int, null, 0, 86_400),
+            new("Monitoring:Ram:SustainedSeconds", AlertAfterLabel, FieldType.Int,
+                "Waiting period: usage must stay at or above the threshold this long before anyone is notified. " +
+                "Shorter peaks are shown as pending but not sent. 0 = alert on the first reading.",
+                0, MaxWaitSeconds),
             new("Monitoring:Ram:PollIntervalSeconds", "Sample every (s)", FieldType.Int, null, 1, 3_600),
             new("Monitoring:Ram:TopProcessCount", "Top processes in alerts", FieldType.Int, null, 0, 20, Advanced: true),
         ]),
@@ -222,6 +236,14 @@ public static class ConfigSchema
             new("Monitoring:Disk:CriticalThresholdPercent", "Critical alert at (% used)", FieldType.Number, null, 1, 100),
             new("Monitoring:Disk:QueueLengthWarningThreshold", "I/O queue alert threshold", FieldType.Number,
                 "SSD/NVMe: ~2. Spinning disks: 4–5.", 0, 1_000),
+            new("Monitoring:Disk:SustainedSeconds", "Space alert after (s)", FieldType.Int,
+                "Waiting period: a drive must stay at or above the critical threshold this long before anyone is notified. " +
+                "Until then it is shown as pending. 0 = alert on the first reading.",
+                0, MaxWaitSeconds),
+            new("Monitoring:Disk:QueueSustainedSeconds", "I/O queue alert after (s)", FieldType.Int,
+                "Waiting period: the I/O queue must stay above its threshold this long before anyone is notified. " +
+                "Short bursts (backups, updates) are shown as pending but not sent. 0 = alert on the first reading.",
+                0, MaxWaitSeconds),
             new("Monitoring:Disk:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
         ]),
 
@@ -229,6 +251,10 @@ public static class ConfigSchema
         [
             new("Monitoring:Network:OutputQueueWarningThreshold", "Output queue alert threshold", FieldType.Number,
                 "0 is right for most servers: any queued packets mean the NIC is saturated.", 0, 10_000),
+            new("Monitoring:Network:SustainedSeconds", AlertAfterLabel, FieldType.Int,
+                "Waiting period: the output queue must stay above the threshold this long before anyone is notified. " +
+                "Until then it is shown as pending. 0 = alert on the first reading.",
+                0, MaxWaitSeconds),
             new("Monitoring:Network:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
         ]),
 
@@ -237,6 +263,11 @@ public static class ConfigSchema
             new("Monitoring:Services:WatchedServices", "Watched services", FieldType.Services,
                 "Stopped services are restarted automatically; an alert is sent if recovery fails."),
             new("Monitoring:Services:MaxRestartAttempts", "Max restart attempts", FieldType.Int, null, 0, 50),
+            new("Monitoring:Services:SustainedSeconds", AlertAfterLabel, FieldType.Int,
+                "Waiting period: you are only notified if a service is still down this long after it was first seen down " +
+                "and the restart attempts failed. A successful automatic restart is logged, never sent. " +
+                "0 = notify as soon as the restart attempts have failed.",
+                0, MaxWaitSeconds),
             new("Monitoring:Services:RestartDelaySeconds", "Delay before restart (s)", FieldType.Int, null, 0, 3_600),
             new("Monitoring:Services:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
             new("Monitoring:Services:RestartTimeoutSeconds", "Restart timeout (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
@@ -251,6 +282,11 @@ public static class ConfigSchema
         [
             new("Monitoring:ApplicationPools:WatchedApplicationPools", "Watched application pools", FieldType.AppPools),
             new("Monitoring:ApplicationPools:MaxStartAttempts", "Max start attempts", FieldType.Int, null, 0, 50),
+            new("Monitoring:ApplicationPools:SustainedSeconds", AlertAfterLabel, FieldType.Int,
+                "Waiting period: you are only notified if a pool is still down this long after it was first seen down " +
+                "and the start attempts failed. A successful automatic start is logged, never sent. " +
+                "0 = notify as soon as the start attempts have failed.",
+                0, MaxWaitSeconds),
             new("Monitoring:ApplicationPools:StartDelaySeconds", "Delay before start (s)", FieldType.Int, null, 0, 3_600),
             new("Monitoring:ApplicationPools:PollIntervalSeconds", "Check every (s)", FieldType.Int, null, 1, 3_600),
             new("Monitoring:ApplicationPools:StartTimeoutSeconds", "Start timeout (s)", FieldType.Int, null, 1, 3_600, Advanced: true),
@@ -265,6 +301,11 @@ public static class ConfigSchema
             new("Monitoring:Endpoints", "Checks", FieldType.ObjectList,
                 "Each check runs on its own schedule. Removing a check stops it.",
                 Max: MaxEndpointChecks, Fields: EndpointCheckFields, UniqueBy: "Name", ItemNoun: "endpoint check"),
+            new("Monitoring:EndpointDefaults:SustainedSeconds", AlertAfterLabel, FieldType.Int,
+                "Waiting period for checks without their own: an endpoint is reported down only once it has been failing " +
+                "this long and for its \"Failures before alert\" checks in a row, so a single failed check never alerts. " +
+                "Until then it is shown as pending. 0 = failures only.",
+                0, MaxWaitSeconds),
         ]),
 
         new("heartbeat", "Dead man's switch", "Ping an external monitor (e.g. healthchecks.io) so you hear about it if WatchTower itself stops.",

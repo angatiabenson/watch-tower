@@ -111,7 +111,7 @@ public class EndpointMonitorWorkerTests
     {
         _options.CurrentValue = new EndpointMonitorOptions
         {
-            Endpoints = [new EndpointCheckOptions { Name = "tls", Type = "Certificate", Target = "example.com", FailuresBeforeAlert = 1 }],
+            Endpoints = [new EndpointCheckOptions { Name = "tls", Type = "Certificate", Target = "example.com", FailuresBeforeAlert = 1, SustainedSeconds = 0 }],
         };
         var worker = CreateWorker();
 

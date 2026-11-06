@@ -114,16 +114,16 @@ public class CpuMonitorWorker : BackgroundService
                 _logger.LogWarning("CPU spike detected: {Description}", spike.Description);
             }
 
-            var elapsed = UtcNow - _firstBreachTime.Value;
-            if (elapsed.TotalSeconds >= opts.SustainedSeconds)
-            {
+            // Waiting period (Monitoring:Cpu:SustainedSeconds): pending until the breach has lasted
+            // that long; already open, it stays open (reminders as usual).
+            if (_alerts.ObserveBreach(AlertKey.Cpu, AlertSeverity.Critical,
+                    PendingAlertTracker.Period(opts.SustainedSeconds), Title(cpuUsage)))
                 await RaiseEmergencyAsync(cpuUsage, opts, ct);
-                _firstBreachTime = UtcNow;
-            }
         }
         else
         {
             _firstBreachTime = null;
+            _alerts.ClearBreach(AlertKey.Cpu); // a breach still waiting goes without a word
             if (_recovery.Clear(AlertKey.Cpu, UtcNow, _alerts.RecoveryWindow))
                 await _alerts.ResolveAsync(AlertKey.Cpu, ct: ct);
         }
@@ -160,6 +160,8 @@ public class CpuMonitorWorker : BackgroundService
         return false;
     }
 
+    private static string Title(double cpuUsage) => $"CPU Emergency: {cpuUsage:F1}%";
+
     /// <summary>
     /// Sustained breach: raise (or keep open) the <c>cpu</c> alert. The alert manager decides
     /// whether anything is recorded or sent; top processes are only sampled when it is.
@@ -168,7 +170,7 @@ public class CpuMonitorWorker : BackgroundService
         _alerts.RaiseAsync(
             AlertKey.Cpu,
             AlertSeverity.Critical,
-            $"CPU Emergency: {cpuUsage:F1}%",
+            Title(cpuUsage),
             async token =>
             {
                 var topProcesses = (await _metricsProvider.GetTopCpuProcessesAsync(opts.TopProcessCount, token)).ToList();

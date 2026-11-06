@@ -325,21 +325,50 @@ configuration. Anyone can build a compatible portal, in any language:
 
 ### Monitoring
 
-| What | Default poll | Default threshold | Alert |
-|---|---|---|---|
-| **CPU** | 5 s | 99 % sustained for 5 min | Critical, with the top processes |
-| **Memory** | 5 s | 90 % sustained for 5 min | Critical, with the top processes |
-| **Disk space** | 60 s | 70 % warning (logged), 85 % critical | Critical, per drive |
-| **Disk queue length** | 60 s | > 2 per disk | Warning: the disk can't keep up |
-| **Network output queue** | 30 s | > 0 per adapter | Warning: the adapter is saturated |
-| **Windows services** | 30 s | Stopped | Restarted automatically; critical if that fails |
-| **IIS application pools** | 30 s | Stopped | Started automatically; critical if that fails |
-| **Endpoints** | 60 s per check | Failing, or certificate expiring | See [Endpoint checks](#endpoint-checks) |
+| What | Default poll | Default threshold | Alerts after | Alert |
+|---|---|---|---|---|
+| **CPU** | 5 s | 99 % | 5 min | Critical, with the top processes |
+| **Memory** | 5 s | 90 % | 5 min | Critical, with the top processes |
+| **Disk space** | 60 s | 70 % warning (logged), 85 % critical | 10 min | Critical, per drive |
+| **Disk queue length** | 60 s | > 2 per disk | 5 min | Warning: the disk can't keep up |
+| **Network output queue** | 30 s | > 0 per adapter | 5 min | Warning: the adapter is saturated |
+| **Windows services** | 30 s | Stopped | 2 min down and the restarts failed | Restarted automatically; critical if that fails |
+| **IIS application pools** | 30 s | Stopped | 2 min down and the starts failed | Started automatically; critical if that fails |
+| **Endpoints** | 60 s per check | Failing, or certificate expiring | 2 min failing and 2 failed checks in a row | See [Endpoint checks](#endpoint-checks) |
 
 Every value is configurable in the console. Run the `Get-Counter` commands
 `\PhysicalDisk(*)\Current Disk Queue Length` and `\Network Interface(*)\Output Queue Length`
 during peak hours to find good thresholds: about 2 suits SSD/NVMe disks, 4 to 5 spinning disks,
 and 0 is right for the network queue on most servers.
+
+### Waiting periods
+
+A short spike is not worth an email. Every alert has its own **waiting period** (the "Alerts
+after" column above): a threshold breach must last that long before anyone is notified. While it
+waits, the breach is shown as **pending** in the console (for example "Disk Queue High: 0 C: at
+3.4, for 2 min, alerts at 10:35") and reported to the portal, metrics are recorded as usual, but
+nothing is emailed or sent to any notification channel. If it recovers within the period, nobody
+is ever notified, and no "resolved" message follows either. One reading back under the threshold
+starts the wait over. The daily report lists how many breaches recovered before alerting, per
+alert type, with the longest one, so you can see WatchTower kept watching.
+
+| Setting | Default | Waits for |
+|---|---|---|
+| `Monitoring:Cpu:SustainedSeconds` | 300 | CPU at or above its threshold |
+| `Monitoring:Ram:SustainedSeconds` | 300 | Memory at or above its threshold |
+| `Monitoring:Disk:SustainedSeconds` | 600 | A drive at or above the critical threshold |
+| `Monitoring:Disk:QueueSustainedSeconds` | 300 | A disk queue above its threshold |
+| `Monitoring:Network:SustainedSeconds` | 300 | An adapter's output queue above its threshold |
+| `Monitoring:Services:SustainedSeconds` | 120 | A service still down this long after it was first seen down, and its automatic restarts failed |
+| `Monitoring:ApplicationPools:SustainedSeconds` | 120 | The same for application pools |
+| `Monitoring:EndpointDefaults:SustainedSeconds` | 120 | An endpoint failing this long **and** `FailuresBeforeAlert` checks in a row; a check can set its own `SustainedSeconds` |
+
+Each is 0 to 86400 seconds; 0 alerts on the first reading (as earlier versions did for
+everything but CPU and memory). They are in the console's settings ("Alert after (s)") and can be
+set by a portal through [remote configuration](guides/portal-api/09-remote-config.md#alert-waiting-periods).
+A disk that goes from warning to critical waits the critical period from when it became critical.
+An alert that was raised resolves exactly as before (`Alerting:ResolveAfterSeconds`). Waiting
+periods are kept in memory: after a restart of the agent a breach starts waiting again.
 
 ### Spike detection
 
@@ -351,8 +380,10 @@ processes using the most of that resource at that moment (no notification).
 
 When a watched service stops (use the service *name*, e.g. `MSSQLSERVER`, not its display name;
 the console has a picker), WatchTower waits `RestartDelaySeconds` (10), restarts it, checks that
-it stays running, and records the restart. After `MaxRestartAttempts` (3) failed attempts it
-raises a critical alert. Reports use display names. Right after WatchTower starts
+it stays running, and records the restart. A successful restart is logged and recorded
+(ServiceRestarted), never emailed. Only when `MaxRestartAttempts` (3) restarts in a row failed
+and the service is still down `Monitoring:Services:SustainedSeconds` (120) after it was first
+seen down does it raise a critical alert. Reports use display names. Right after WatchTower starts
 (`StartupGraceSeconds`, 120), stopped services are recorded but not restarted, so a reboot can
 settle. Stopped IIS application pools are started the same way (`Monitoring:ApplicationPools`:
 `StartDelaySeconds`, `MaxStartAttempts`). Nothing is restarted automatically during a
@@ -363,7 +394,8 @@ settle. Stopped IIS application pools are started the same way (`Monitoring:Appl
 An HTML email at `Reporting:DailyReportTime` (08:00 in `Display:Timezone`, default
 Africa/Nairobi, labelled EAT) with CPU and memory min/avg/max, disk queues and network queues,
 per-drive usage bars, service and pool status, and the day's incidents with their top
-processes. A failed send is retried after 5, 15, 30 and 60 minutes. Only once a report was
+processes. A "Recovered before alerting" section counts the breaches that cleared within
+their waiting period (nothing was sent for them), per alert type, with the longest one. A failed send is retried after 5, 15, 30 and 60 minutes. Only once a report was
 delivered are the samples and incidents it covered deleted (CPU and memory samples only after
 the portal has them, when connected); current state and alert state are kept. Without a
 delivered report, history older than 48 hours is purged instead.
@@ -375,7 +407,7 @@ Every problem WatchTower detects is an **alert** with a stable key — `cpu`, `r
 `pool:<app pool>`, `endpoint:<name>` — and a lifecycle that survives restarts (SQLite
 table `alert_state`, untouched by the daily report purge):
 
-- **Opened**: the first time the condition is seen, the incident is recorded, sent to the
+- **Opened**: once the condition has lasted its [waiting period](#waiting-periods), the incident is recorded, sent to the
   portal and a notification goes out.
 - **Still open**: nothing new is recorded; a reminder is sent every
   `Alerting:RenotifyMinutes` (default 60, `0` = never). A higher severity (e.g. a
@@ -542,15 +574,19 @@ dashboard and go to the portal.
 | `CertificateWarnDays` | 21 | Certificate: warn when fewer days are left |
 | `IntervalSeconds` | 60 | 5–86400 |
 | `FailuresBeforeAlert` | 2 | Consecutive failures before the endpoint is reported down |
+| `SustainedSeconds` | – | Waiting period of this check; empty = `Monitoring:EndpointDefaults:SustainedSeconds` (120) |
 
-An endpoint alerts *Critical* (`EndpointDown`) after `FailuresBeforeAlert` failures (an
-invalid or expired certificate counts as a failure), *Warning* (`CertificateExpiring`) as
+An endpoint alerts *Critical* (`EndpointDown`) after `FailuresBeforeAlert` failures in a row
+that span at least its waiting period (an invalid or expired certificate counts as a failure), *Warning* (`CertificateExpiring`) as
 soon as a certificate is inside its warning window, and resolves (`EndpointRecovered`) when
 the check passes. HTTP redirects are followed at most 5 times and only within the same host.
 A check whose configuration becomes invalid stops running (its alert is retired) but keeps its
 last result, reported with status `ConfigurationError` and the reason in its detail, until it
 is fixed (it then runs at once) or removed. Names are case-insensitive: renaming `Site` to
-`site` keeps its last result and schedule.
+`site` keeps its last result and schedule. Changing what a check checks (type, target, timeout,
+expected status or body, certificate warning days) starts its failure count and waiting period
+over and runs it at once; changing only its interval, `FailuresBeforeAlert` or `SustainedSeconds`
+keeps the failures counted so far.
 
 The list can also be imported, e.g. when provisioning many servers
 (`WatchTower.exe config import endpoints.json`, validated first). The imported list replaces
@@ -760,6 +796,13 @@ Build the release zip locally (self-contained single-file exe, `install.ps1`, `I
   [one-line installer](#quick-start), served at `releases/latest/download/get-watchtower.ps1`) and
   `SHA256SUMS.txt` (checksums of the zip and of `get-watchtower.ps1`). *Run workflow* releases a
   version you enter (e.g. `1.3.0` or `1.3.0-beta.1`; a version with a suffix is a prerelease).
+- **Release notes** ([release-notes.ps1](build/release-notes.ps1)): users see them under
+  *What's new* when they check for updates, and on the release page. They come from the
+  **Release notes** section of the merged pull request (the
+  [pull request template](.github/pull_request_template.md) has one: write a sentence per change
+  for operators, under *New*, *Fixes* or *Faster*). Without that section, the release lists the
+  `feat`, `fix` and `perf` commit subjects since the previous release instead. The console shows
+  the notes as plain text, so keep to titles and `-` bullets.
 - **Signing**: with the repository secret `WATCHTOWER_SIGNING_KEY` (ECDSA P-256 private key,
   PEM) set, packages are signed; agents with the matching `Updates:PublicKey` then install only
   signed releases. Without it, packages carry a SHA-256 checksum only.

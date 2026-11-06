@@ -36,11 +36,11 @@ public static partial class RemoteConfigValidator
 
         if (!Interval(config.Cpu?.PollIntervalSeconds, "Cpu.PollIntervalSeconds", ref error)) return false;
         if (!Percent(config.Cpu?.ThresholdPercent, "Cpu.ThresholdPercent", ref error)) return false;
-        if (!Interval(config.Cpu?.SustainedSeconds, "Cpu.SustainedSeconds", ref error)) return false;
+        if (!WaitingPeriod(config.Cpu?.SustainedSeconds, "Cpu.SustainedSeconds", ref error)) return false;
 
         if (!Interval(config.Ram?.PollIntervalSeconds, "Ram.PollIntervalSeconds", ref error)) return false;
         if (!Percent(config.Ram?.ThresholdPercent, "Ram.ThresholdPercent", ref error)) return false;
-        if (!Interval(config.Ram?.SustainedSeconds, "Ram.SustainedSeconds", ref error)) return false;
+        if (!WaitingPeriod(config.Ram?.SustainedSeconds, "Ram.SustainedSeconds", ref error)) return false;
 
         if (!Interval(config.Disk?.PollIntervalSeconds, "Disk.PollIntervalSeconds", ref error)) return false;
         if (!Percent(config.Disk?.WarningThresholdPercent, "Disk.WarningThresholdPercent", ref error)) return false;
@@ -53,15 +53,22 @@ public static partial class RemoteConfigValidator
             return false;
         }
         if (!QueueThreshold(config.Disk?.QueueLengthWarningThreshold, "Disk.QueueLengthWarningThreshold", ref error)) return false;
+        if (!WaitingPeriod(config.Disk?.SustainedSeconds, "Disk.SustainedSeconds", ref error)) return false;
+        if (!WaitingPeriod(config.Disk?.QueueSustainedSeconds, "Disk.QueueSustainedSeconds", ref error)) return false;
 
         if (!Interval(config.Network?.PollIntervalSeconds, "Network.PollIntervalSeconds", ref error)) return false;
         if (!QueueThreshold(config.Network?.OutputQueueWarningThreshold, "Network.OutputQueueWarningThreshold", ref error)) return false;
+        if (!WaitingPeriod(config.Network?.SustainedSeconds, "Network.SustainedSeconds", ref error)) return false;
 
         if (!Interval(config.Services?.PollIntervalSeconds, "Services.PollIntervalSeconds", ref error)) return false;
         if (!NameList(config.Services?.WatchedServices, "Services.WatchedServices", ref error)) return false;
+        if (!WaitingPeriod(config.Services?.SustainedSeconds, "Services.SustainedSeconds", ref error)) return false;
 
         if (!Interval(config.AppPools?.PollIntervalSeconds, "AppPools.PollIntervalSeconds", ref error)) return false;
         if (!NameList(config.AppPools?.WatchedApplicationPools, "AppPools.WatchedApplicationPools", ref error)) return false;
+        if (!WaitingPeriod(config.AppPools?.SustainedSeconds, "AppPools.SustainedSeconds", ref error)) return false;
+
+        if (!WaitingPeriod(config.Endpoints?.SustainedSeconds, "Endpoints.SustainedSeconds", ref error)) return false;
 
         // Portal timing — these feed worker Task.Delay loops directly; a 0 would hot-spin.
         if (!Interval(config.Portal?.OutboxFlushIntervalSeconds, "Portal.OutboxFlushIntervalSeconds", ref error)) return false;
@@ -106,6 +113,20 @@ public static partial class RemoteConfigValidator
         if (value.HasValue && (value.Value < 1 || value.Value > MaxIntervalSeconds))
         {
             error = $"{name} must be between 1 and {MaxIntervalSeconds}";
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// A waiting period (<c>...SustainedSeconds</c>): 0 (alert at once) to <see cref="MaxIntervalSeconds"/>.
+    /// Unlike an interval, 0 is valid: it never drives a delay loop.
+    /// </summary>
+    private static bool WaitingPeriod(int? value, string name, ref string error)
+    {
+        if (value.HasValue && (value.Value < 0 || value.Value > MaxIntervalSeconds))
+        {
+            error = $"{name} must be between 0 and {MaxIntervalSeconds}";
             return false;
         }
         return true;

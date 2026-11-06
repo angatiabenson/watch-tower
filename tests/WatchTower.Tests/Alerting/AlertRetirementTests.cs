@@ -132,8 +132,8 @@ public class AlertRetirementTests
         {
             Endpoints =
             [
-                new EndpointCheckOptions { Name = "a", Target = "https://a.example", FailuresBeforeAlert = 1 },
-                new EndpointCheckOptions { Name = "b", Target = "https://b.example", FailuresBeforeAlert = 1 },
+                new EndpointCheckOptions { Name = "a", Target = "https://a.example", FailuresBeforeAlert = 1, SustainedSeconds = 0 },
+                new EndpointCheckOptions { Name = "b", Target = "https://b.example", FailuresBeforeAlert = 1, SustainedSeconds = 0 },
             ],
         });
         var alerts = Alerts(new SqliteAlertStateStore(dir.Paths.DatabasePath));

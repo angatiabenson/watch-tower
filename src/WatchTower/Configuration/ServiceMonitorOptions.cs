@@ -17,5 +17,13 @@ public class ServiceMonitorOptions
     /// long, so delayed-auto-start services coming up after a reboot are not restarted mid-start.</summary>
     public int StartupGraceSeconds { get; set; } = 120;
 
+    /// <summary>
+    /// Waiting period: a service is restarted automatically, and operators are only notified
+    /// when it is still down this long after it was first seen down and
+    /// <see cref="MaxRestartAttempts"/> restarts in a row have failed. A successful restart is
+    /// recorded (ServiceRestarted), never sent. 0 = notify as soon as the restarts have failed.
+    /// </summary>
+    public int SustainedSeconds { get; set; } = 120;
+
     public List<string> WatchedServices { get; set; } = new();
 }

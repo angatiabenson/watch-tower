@@ -38,8 +38,8 @@ info:
       `x-extensible-enum` and in the description. A portal MUST accept a value it does not know
       and treat it as unrecognised but valid, for example by storing and displaying it.
     * A portal MUST NOT reject a request because an optional property is missing. Older v1
-      agents do not send properties marked `x-since: 1.0.19`, `x-since: 1.0.20` or
-      `x-since: after-1.0.20`.
+      agents do not send properties marked `x-since: 1.0.19`, `x-since: 1.0.20`,
+      `x-since: after-1.0.20` or `x-since: after-1.0.21`.
     * The agent ignores response properties it does not know, so a portal MAY add its own.
 
     ## Field availability (`x-since`)
@@ -47,8 +47,10 @@ info:
     * `base`: sent by every released v1 agent.
     * `1.0.19`: added in 1.0.19 (released 2026-06-15). Not sent by 1.0.18 or earlier.
     * `1.0.20`: added in 1.0.20 (released 2026-11-04). Not sent by 1.0.19 or earlier.
-    * `after-1.0.20`: added after 1.0.20 (unreleased): sent by agents built from the current
-      source and by the first release after 1.0.20. Not sent by 1.0.20 or earlier.
+    * `after-1.0.20`: added after 1.0.20: first released in 1.0.21 (2026-11-04). Not sent by
+      1.0.20 or earlier.
+    * `after-1.0.21`: added after 1.0.21 (unreleased): sent by agents built from the current
+      source and by the first release after 1.0.21. Not sent by 1.0.21 or earlier.
 
     ## Status codes
 
@@ -176,6 +178,12 @@ paths:
           then send the entry with `isStale: true` once that reading is older than its freshness
           window (see SnapshotIsStale). Presence in the batch never means fresh: use `isStale`,
           and where it is missing (older agents) the entry's `timestamp`.
+
+        `pendingAlerts` (after-1.0.21) is a snapshot too: the breaches that are inside their
+        alert's waiting period at `batchedAt`. They are NOT alerts: nothing was raised or sent for
+        them, and a portal MUST NOT show them as open alerts or count them as such. Replace the
+        agent's pending set with the list of each newer batch (later `batchedAt`); an empty or
+        missing list means nothing is pending. See PendingAlert.
 
         Deduplicate on `batchId` (when present). The same `batchId` MUST produce the same
         stored result however many times it arrives.
@@ -481,6 +489,8 @@ paths:
                   $ref: '#/components/examples/ConfigThresholds'
                 maintenance:
                   $ref: '#/components/examples/ConfigMaintenance'
+                waitingPeriods:
+                  $ref: '#/components/examples/ConfigWaitingPeriods'
                 empty:
                   $ref: '#/components/examples/ConfigEmpty'
         '204':
@@ -688,6 +698,17 @@ components:
           items:
             $ref: '#/components/schemas/EndpointStatus'
           x-since: 1.0.20
+        pendingAlerts:
+          type: array
+          description: |
+            Breaches inside their alert's waiting period at batchedAt (snapshot, oldest first).
+            NOT alerts: nothing has been raised or sent for them. Agents after 1.0.21 send it in
+            every batch, empty when nothing is pending; older agents never send it (they have
+            no waiting periods apart from CPU and memory, which they do not report). Treat a
+            missing list as empty.
+          items:
+            $ref: '#/components/schemas/PendingAlert'
+          x-since: after-1.0.21
 
     AgentTelemetry:
       type: object
@@ -948,6 +969,48 @@ components:
             which means unknown (see SnapshotIsStale).
           x-since: 1.0.20
 
+    PendingAlert:
+      type: object
+      description: |
+        A condition the agent sees but has not alerted on yet, because its waiting period
+        (`Monitoring:...:SustainedSeconds`, see the remote configuration) has not elapsed. While
+        pending, the agent records metrics as usual but sends no notification and no alert
+        event. If the condition is still present at `alertsAt`, the agent raises the alert: an
+        AgentEvent with this `alertKey` and `resolved: false` follows, and the entry leaves the
+        list. If it clears first, the entry just disappears: no alert, no "resolved" event and
+        no notification, ever. One reading back under the threshold ends the wait; the next
+        breach starts a new one. Pending state is kept in memory only, so after an agent
+        restart a breach starts waiting again from the beginning.
+
+        Services and application pools: the agent restarts the resource itself while it is
+        pending; it alerts only if the resource is still down at `alertsAt` AND its restart
+        attempts (`MaxRestartAttempts` / `MaxStartAttempts`) failed, so a pending entry can
+        stay a little past `alertsAt`. Endpoint checks likewise also need
+        `FailuresBeforeAlert` failed checks in a row.
+      required: [alertKey, severity, title, since, alertAfterSeconds, alertsAt]
+      properties:
+        alertKey:
+          type: string
+          description: The key the alert will have (same format as AgentEvent.alertKey), e.g. `diskqueue:0 C:`, `svc:W3SVC`, `endpoint:shop-home`. Unique per severity.
+        severity:
+          type: string
+          description: Severity the alert will have. Known values are listed in x-extensible-enum; accept others.
+          x-extensible-enum: [Info, Warning, Critical]
+        title:
+          type: string
+          description: 'Latest headline for the condition, for example "Disk Queue High: 0 C: at 3.4". Display only.'
+        since:
+          $ref: '#/components/schemas/Timestamp'
+          description: When the condition was first seen at this severity (UTC).
+        alertAfterSeconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          description: The waiting period that applies, in seconds.
+        alertsAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: since + alertAfterSeconds (UTC). When the alert is raised if the condition is still present.
+
     AgentEvent:
       type: object
       required: [eventId, timestamp, incidentType, description]
@@ -1153,12 +1216,23 @@ components:
           $ref: '#/components/schemas/RemotePortalConfig'
         maintenance:
           $ref: '#/components/schemas/RemoteMaintenanceConfig'
+        endpoints:
+          $ref: '#/components/schemas/RemoteEndpointConfig'
 
     IntervalSeconds:
       type: [integer, 'null']
       minimum: 1
       maximum: 86400
       description: Whole seconds, 1 to 86400. A fractional number makes the whole configuration unreadable.
+
+    WaitingSeconds:
+      type: [integer, 'null']
+      minimum: 0
+      maximum: 86400
+      description: |
+        A waiting period (`...SustainedSeconds`) in whole seconds, 0 to 86400: how long a
+        condition must last before the agent alerts. 0 = alert on the first reading. A
+        fractional number makes the whole configuration unreadable.
 
     Percent:
       type: [number, 'null']
@@ -1190,7 +1264,8 @@ components:
         thresholdPercent:
           $ref: '#/components/schemas/Percent'
         sustainedSeconds:
-          $ref: '#/components/schemas/IntervalSeconds'
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:Cpu:SustainedSeconds (default 300). Agents up to 1.0.21 reject 0 (minimum 1 there).
 
     RemoteRamConfig:
       type: [object, 'null']
@@ -1200,7 +1275,8 @@ components:
         thresholdPercent:
           $ref: '#/components/schemas/Percent'
         sustainedSeconds:
-          $ref: '#/components/schemas/IntervalSeconds'
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:Ram:SustainedSeconds (default 300). Agents up to 1.0.21 reject 0 (minimum 1 there).
 
     RemoteDiskConfig:
       type: [object, 'null']
@@ -1213,6 +1289,14 @@ components:
           $ref: '#/components/schemas/Percent'
         queueLengthWarningThreshold:
           $ref: '#/components/schemas/QueueThreshold'
+        sustainedSeconds:
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:Disk:SustainedSeconds (default 600), the waiting period of disk space (DiskCritical) alerts.
+          x-since: after-1.0.21
+        queueSustainedSeconds:
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:Disk:QueueSustainedSeconds (default 300), the waiting period of disk queue (DiskQueueHigh) alerts.
+          x-since: after-1.0.21
 
     RemoteNetworkConfig:
       type: [object, 'null']
@@ -1221,6 +1305,10 @@ components:
           $ref: '#/components/schemas/IntervalSeconds'
         outputQueueWarningThreshold:
           $ref: '#/components/schemas/QueueThreshold'
+        sustainedSeconds:
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:Network:SustainedSeconds (default 300).
+          x-since: after-1.0.21
 
     RemoteServiceConfig:
       type: [object, 'null']
@@ -1229,6 +1317,10 @@ components:
           $ref: '#/components/schemas/IntervalSeconds'
         watchedServices:
           $ref: '#/components/schemas/WatchedNames'
+        sustainedSeconds:
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:Services:SustainedSeconds (default 120). A down service is restarted at once; the alert waits until it has been down this long AND MaxRestartAttempts restarts failed.
+          x-since: after-1.0.21
 
     RemoteAppPoolConfig:
       type: [object, 'null']
@@ -1237,6 +1329,10 @@ components:
           $ref: '#/components/schemas/IntervalSeconds'
         watchedApplicationPools:
           $ref: '#/components/schemas/WatchedNames'
+        sustainedSeconds:
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:ApplicationPools:SustainedSeconds (default 120), like services.sustainedSeconds.
+          x-since: after-1.0.21
 
     RemotePortalConfig:
       type: [object, 'null']
@@ -1247,6 +1343,18 @@ components:
           $ref: '#/components/schemas/IntervalSeconds'
         remoteConfigPollIntervalSeconds:
           $ref: '#/components/schemas/IntervalSeconds'
+
+    RemoteEndpointConfig:
+      type: [object, 'null']
+      description: |
+        Defaults for every endpoint check. The checks themselves (Monitoring:Endpoints) are
+        configured on the server and cannot be pushed; a check's own SustainedSeconds wins over
+        this default.
+      x-since: after-1.0.21
+      properties:
+        sustainedSeconds:
+          $ref: '#/components/schemas/WaitingSeconds'
+          description: Monitoring:EndpointDefaults:SustainedSeconds (default 120). An endpoint is reported down only once it has been failing this long AND FailuresBeforeAlert checks in a row.
 
     RemoteMaintenanceConfig:
       type: [object, 'null']
@@ -1398,6 +1506,13 @@ components:
             responseTimeMs: 3.1
             detail: 'Configuration error: Monitoring:Endpoints:1:Target must be host:port. Last result: Up: Connected'
             isStale: true
+        pendingAlerts:
+          - alertKey: 'diskqueue:0 C:'
+            severity: Warning
+            title: 'Disk Queue High: 0 C: at 3.4'
+            since: '2026-11-03T10:13:30.0000000Z'
+            alertAfterSeconds: 300
+            alertsAt: '2026-11-03T10:18:30.0000000Z'
     MetricsBatchMinimal:
       summary: A batch as sent by an agent up to 1.0.18 (no batchId, agent or endpointStatuses)
       value:
@@ -1518,6 +1633,26 @@ components:
             watchedServices: [W3SVC, MSSQLSERVER]
           portal:
             commandPollIntervalSeconds: 15
+    ConfigWaitingPeriods:
+      summary: Per-alert waiting periods (agents after 1.0.21; older agents ignore the new fields)
+      value:
+        version: '2026-11-06.1'
+        config:
+          cpu:
+            sustainedSeconds: 300
+          ram:
+            sustainedSeconds: 300
+          disk:
+            sustainedSeconds: 600
+            queueSustainedSeconds: 900
+          network:
+            sustainedSeconds: 300
+          services:
+            sustainedSeconds: 120
+          appPools:
+            sustainedSeconds: 0
+          endpoints:
+            sustainedSeconds: 180
     ConfigMaintenance:
       summary: A maintenance window pushed by the portal
       value:

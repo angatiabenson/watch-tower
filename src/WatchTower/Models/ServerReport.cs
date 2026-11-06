@@ -21,4 +21,7 @@ public class ServerReport
     public List<ServiceStatus> ServiceSnapshots { get; set; } = new();
     public List<ApplicationPoolStatus> ApplicationPoolSnapshots { get; set; } = new();
     public List<Incident> Incidents { get; set; } = new();
+
+    /// <summary>Breaches that cleared within their waiting period (nobody was notified), per kind.</summary>
+    public List<Services.Alerting.ShortBreachSummary> ShortBreaches { get; set; } = new();
 }

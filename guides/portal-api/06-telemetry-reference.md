@@ -201,8 +201,9 @@ Absent from the batch until at least one check produced a result.
 | `detail` | | e.g. `HTTP 200`, `Connection refused`, certificate summary; for `ConfigurationError`, `Configuration error: <error> Last result: <status>[: <detail>]` |
 | `isStale` | | `true` once the result is older than max(2 × `IntervalSeconds` + `TimeoutSeconds`, 10 min) of the check, `ConfigurationError` included; absent from older agents (unknown). See [Staleness](#staleness-isstale) |
 
-The agent alerts only after `FailuresBeforeAlert` (default 2) consecutive failures, but every
-single result is reported here.
+The agent alerts only after `FailuresBeforeAlert` (default 2) consecutive failures, and (agents
+after 1.0.21) only once the check has been failing for its waiting period (default 120 s), but
+every single result is reported here.
 
 **`ConfigurationError`.** Endpoint checks are configured locally by the operator (remote
 configuration can't change them). When the operator leaves a check
@@ -218,6 +219,50 @@ alert on `isUp` for it. Because the `timestamp` doesn't change, a portal that ke
 entry per name must let an equal `timestamp` from a later batch (`batchedAt`) replace it. The
 same goes for `isStale`, which turns `true` on a later batch once the kept result is older than
 the check's window.
+
+## Pending alerts (`pendingAlerts`)
+
+Agents after 1.0.21 wait before they alert. Each alert type has a waiting period (the
+`...SustainedSeconds` settings, see [Remote configuration](09-remote-config.md#alert-waiting-periods)):
+a threshold breach must last that long before the agent raises the alert and notifies anyone.
+While it waits, the breach is **pending**: the agent keeps recording metrics as usual, sends no
+notification and no alert [event](07-events-and-alerts.md), and lists it in `pendingAlerts` in
+every batch.
+
+| Field | Notes |
+| --- | --- |
+| `alertKey` | the key the alert will have, e.g. `diskqueue:0 C:`, `disk:C:\`, `net:Ethernet`, `svc:W3SVC`, `pool:DefaultAppPool`, `endpoint:shop-home`, `cpu`, `ram` |
+| `severity` | `Info`, `Warning` or `Critical` (open set): the severity the alert will have |
+| `title` | latest headline, e.g. `Disk Queue High: 0 C: at 3.4`; display only, don't parse it |
+| `since` | first seen at this severity (UTC) |
+| `alertAfterSeconds` | the waiting period that applies |
+| `alertsAt` | `since` + `alertAfterSeconds` (UTC) |
+
+What happens next:
+
+- **Still present at `alertsAt`**: the agent raises the alert. An event with this `alertKey` and
+  `resolved: false` follows, the entry leaves the list, and notifications go out as usual.
+  Services and pools also need their automatic restarts to have failed, and endpoint checks
+  their `FailuresBeforeAlert` failed checks in a row, so their entries can stay a little past
+  `alertsAt`.
+- **Clears first**: the entry disappears from the next batch. No alert, no event, no
+  notification and no "resolved", ever. One good reading is enough; the next breach starts a new
+  wait.
+- **Agent restart**: waits start over (pending state is not persisted).
+- A key can be pending at a higher severity while its alert is already open at a lower one
+  (an escalation that is waiting).
+
+How to use it:
+
+- Treat the list as a snapshot of the whole pending set: replace what you stored for the agent
+  with the list from each newer batch (later `batchedAt`), and ignore an older batch delivered
+  late. Agents after 1.0.21 send the list in every batch, empty when nothing is pending. A missing
+  list (older agents, which alert at once) means nothing is pending.
+- Show pending entries apart from open alerts, e.g. "Disk queue high on 0 C: for 2 min, alerts at
+  10:18". Never count them as open alerts, page on them or send notifications for them.
+- Over gRPC the list is `repeated PendingAlertProto pending_alerts = 12` in
+  `MetricsBatchPayload`, with the same fields in snake_case (`alert_key`, `severity`, `title`,
+  `since`, `alert_after_seconds`, `alerts_at`). An empty list means nothing is pending.
 
 ## The agent object
 

@@ -82,12 +82,14 @@ public sealed class SnapshotPruningTests : IDisposable
             WarningThresholdPercent = 70,
             CriticalThresholdPercent = 85,
             QueueLengthWarningThreshold = 2,
+            SustainedSeconds = 0,
+            QueueSustainedSeconds = 0,
         }),
         _time, NullLogger<DiskMonitorWorker>.Instance);
 
     private NetworkMonitorWorker NetworkWorker() => new(
         _provider.Object, _store, _alerts,
-        new TestOptionsMonitor<NetworkMonitorOptions>(new NetworkMonitorOptions { PollIntervalSeconds = 60, OutputQueueWarningThreshold = 10 }),
+        new TestOptionsMonitor<NetworkMonitorOptions>(new NetworkMonitorOptions { PollIntervalSeconds = 60, OutputQueueWarningThreshold = 10, SustainedSeconds = 0 }),
         _time, NullLogger<NetworkMonitorWorker>.Instance);
 
     private IEnumerable<string> Drives => _store.GetLatestDiskMetrics().Select(d => d.DriveName);

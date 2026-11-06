@@ -36,6 +36,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read # release notes are taken from the merged pull request's "Release notes" section
 
 concurrency:
   group: release
@@ -61,12 +62,13 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           $v = "$env:INPUT_VERSION".Trim().TrimStart('v')
+          # The highest existing vX.Y.Z tag: the base of the next patch and of the release notes.
+          $latest = git tag --list 'v*' |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+            ForEach-Object { [version]($_.TrimStart('v')) } |
+            Sort-Object -Descending | Select-Object -First 1
           if (-not $v) {
-            # Next patch after the highest existing vX.Y.Z tag (v1.0.0 when there is none).
-            $latest = git tag --list 'v*' |
-              Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
-              ForEach-Object { [version]($_.TrimStart('v')) } |
-              Sort-Object -Descending | Select-Object -First 1
+            # Next patch after it (v1.0.0 when there is none).
             $v = if ($latest) { "$($latest.Major).$($latest.Minor).$($latest.Build + 1)" } else { '1.0.0' }
           }
           if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.\-]+)?$') { throw "Invalid version '$v'" }
@@ -74,6 +76,19 @@ jobs:
           Write-Host "Releasing v$v"
           "number=$v" >> $env:GITHUB_OUTPUT
           "prerelease=$($v.Contains('-').ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          "previous=$(if ($latest) { "v$latest" })" >> $env:GITHUB_OUTPUT
+
+      - name: Write release notes
+        shell: pwsh
+        # Shown to users under "What's new" in the agent's console and on the release page:
+        # the merged pull request's "## Release notes" section, else the feat/fix/perf commits.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.number }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: ./build/release-notes.ps1 -Version $env:VERSION -PreviousTag $env:PREVIOUS -Repository $env:REPOSITORY -Sha $env:SHA -OutFile artifacts/release-notes.md
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
@@ -95,7 +110,7 @@ jobs:
           WATCHTOWER_SIGNING_KEY: ${{ secrets.WATCHTOWER_SIGNING_KEY }}
           VERSION: ${{ steps.version.outputs.number }}
           REPOSITORY: ${{ github.repository }}
-        run: ./build/package.ps1 -Version $env:VERSION -Repository $env:REPOSITORY -OutputDir artifacts
+        run: ./build/package.ps1 -Version $env:VERSION -Repository $env:REPOSITORY -OutputDir artifacts -NotesFile artifacts/release-notes.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
@@ -104,7 +119,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: WatchTower v${{ steps.version.outputs.number }}
           prerelease: ${{ steps.version.outputs.prerelease }}
-          generate_release_notes: true
+          body_path: artifacts/release-notes.md
           files: |
             artifacts/WatchTower-*.zip
             artifacts/watchtower-update.json

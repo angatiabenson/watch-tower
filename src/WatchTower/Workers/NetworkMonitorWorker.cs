@@ -108,9 +108,11 @@ public class NetworkMonitorWorker : BackgroundService
                     "NETWORK QUEUE SATURATED: {Interface} output queue {Queue:F0} (threshold: > {Threshold})",
                     metric.InterfaceName, metric.OutputQueueLength, opts.OutputQueueWarningThreshold);
                 _recovery.Breached(key);
-                await _alerts.RaiseAsync(
+                // Waiting period (Monitoring:Network:SustainedSeconds).
+                await _alerts.RaiseAfterAsync(
                     key,
                     AlertSeverity.Warning,
+                    PendingAlertTracker.Period(opts.SustainedSeconds),
                     $"Network Saturated: {metric.InterfaceName}",
                     new Incident(
                         UtcNow,
@@ -123,6 +125,7 @@ public class NetworkMonitorWorker : BackgroundService
                 _logger.LogDebug(
                     "Network {Interface}: output queue {Queue:F0}",
                     metric.InterfaceName, metric.OutputQueueLength);
+                _alerts.ClearBreach(key);
                 if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
                     await _alerts.ResolveAsync(key, ct: ct);
             }

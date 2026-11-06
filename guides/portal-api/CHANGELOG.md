@@ -6,9 +6,54 @@ Changes to the contract between the WatchTower agent and a portal
 ([spec](../../spec/portal-agent-api.v1.openapi.yaml)). Agent releases that don't change the
 contract aren't listed. Versioning rules: [Versioning and compatibility](12-versioning-and-compatibility.md).
 
-## Unreleased (after 1.0.20)
+## Unreleased (after 1.0.21)
 
-Everything here is marked `x-since: after-1.0.20` in the spec.
+Everything here is marked `x-since: after-1.0.21` in the spec: agents built from the current
+source and the first release after 1.0.21 send or accept it; 1.0.21 and older don't. All wire
+changes are additive. Agent behaviour changes: alerts now wait before they are raised (see
+"Changed").
+
+### Added
+
+- `pendingAlerts` in metrics batches (gRPC: `repeated PendingAlertProto pending_alerts = 12` in
+  `MetricsBatchPayload`): the breaches inside their alert's waiting period at `batchedAt`, each
+  with `alertKey`, `severity` (`Info`, `Warning`, `Critical`, open set), `title`, `since`,
+  `alertAfterSeconds` and `alertsAt` (gRPC: `alert_key`, `severity`, `title`, `since`,
+  `alert_after_seconds`, `alerts_at`, fields 1 to 6). They are **not alerts**: nothing was raised
+  or sent for them, and a portal must not show or count them as open alerts. The list is sent in
+  every batch, empty when nothing is pending; replace the stored set with each newer batch's
+  list. A missing list (older agents) means nothing is pending. Spec: `MetricsBatch.pendingAlerts`
+  and the `PendingAlert` schema. Guide: [Pending alerts](06-telemetry-reference.md#pending-alerts-pendingalerts).
+- Remote configuration of the waiting periods: `disk.sustainedSeconds`,
+  `disk.queueSustainedSeconds`, `network.sustainedSeconds`, `services.sustainedSeconds`,
+  `appPools.sustainedSeconds` and a new `endpoints` section with `sustainedSeconds` (the default
+  of every endpoint check; the checks themselves stay local). Each is an integer from 0 to 86400;
+  0 = alert at once. gRPC: `optional int32 sustained_seconds` (field 5 of `RemoteDiskConfig`, 3 of
+  `RemoteNetworkConfig`, `RemoteServiceConfig` and `RemoteAppPoolConfig`),
+  `optional int32 queue_sustained_seconds = 6` in `RemoteDiskConfig`, and
+  `RemoteEndpointConfig endpoints = 9` in `RemoteAgentConfig` with
+  `optional int32 sustained_seconds = 1`. Agents up to 1.0.21 ignore them. Guide:
+  [Alert waiting periods](09-remote-config.md#alert-waiting-periods).
+- MinimalPortal keeps each agent's `pendingAlerts` apart from its open alerts and validates the
+  new configuration fields. AgentSimulator sends an empty `pendingAlerts` list, like the agent.
+
+### Changed
+
+- Alerts wait before they are raised. Disk space (`disk:`, 600 s), disk queue (`diskqueue:`,
+  300 s) and network queue (`net:`, 300 s) alerts used to open on the first reading over the
+  threshold; endpoint alerts after `FailuresBeforeAlert` failures; service and pool alerts after
+  the restart attempts failed. Now each needs its condition to last its waiting period as well
+  (endpoints, services and pools: 120 s, in addition to the failure or restart counts). CPU and
+  memory keep their `SustainedSeconds` (300 s). A breach that clears within its period produces no
+  event at all (no "opened", no "resolved"), so a portal sees fewer alert events. Successful
+  automatic restarts are still reported as ServiceRestarted / ApplicationPoolStarted events.
+- `cpu.sustainedSeconds` and `ram.sustainedSeconds` accept 0 (alert on the first reading); the
+  minimum was 1. Agents up to 1.0.21 still reject a configuration with 0 there.
+
+## 1.0.21 (2026-11-04)
+
+Everything here is marked `x-since: after-1.0.20` in the spec (it was added after 1.0.20 and
+first released in 1.0.21).
 
 ### Added
 

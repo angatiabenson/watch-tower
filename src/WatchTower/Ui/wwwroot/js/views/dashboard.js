@@ -144,7 +144,10 @@ export function mount(root, _params, ctx) {
     patch('strip', { svc: m.services, pools: m.appPools, disks: m.disks, inc: s.incidents }, renderStrip);
     // Minute bucket: the "open for" durations advance without rebuilding on every refresh.
     if (Array.isArray(s.alerts)) {
-      patch('alerts', { alerts: s.alerts, held: !!maint, minute: s.alerts.length ? Math.floor(Date.now() / 60000) : 0 }, renderAlerts);
+      // Older agents send no pendingAlerts: nothing is waiting there (they alert at once).
+      const pending = Array.isArray(s.pendingAlerts) ? s.pendingAlerts : [];
+      const ticking = s.alerts.length || pending.length;
+      patch('alerts', { alerts: s.alerts, pending, held: !!maint, minute: ticking ? Math.floor(Date.now() / 60000) : 0 }, renderAlerts);
     } else {
       slots.alerts.hidden = true; // older agent without the alerts list
     }
@@ -572,17 +575,25 @@ function renderIncidents(incidents) {
 
 const SEV_RANK = { critical: 0, warning: 1, info: 2 };
 
-/** Open alerts: most severe first, then the longest-running. */
-function renderAlerts({ alerts, held }) {
+/**
+ * Open alerts: most severe first, then the longest-running. Below them, breaches still inside
+ * their waiting period ("pending"): nothing has been sent for them, and one that clears before
+ * its alertsAt is never sent.
+ */
+function renderAlerts({ alerts, pending, held }) {
   const list = [...(Array.isArray(alerts) ? alerts : [])].sort((a, b) =>
     (SEV_RANK[a.severity] ?? 3) - (SEV_RANK[b.severity] ?? 3) || String(a.openedAt).localeCompare(String(b.openedAt)));
   const crit = list.filter((a) => a.severity === 'critical').length;
+  const waiting = [...(Array.isArray(pending) ? pending : [])].sort((a, b) => String(a.alertsAt).localeCompare(String(b.alertsAt)));
   const head = panelHead('h-alerts', 'Open alerts',
-    list.length ? h('span', { class: 'panel-meta' }, [
-      crit ? `${list.length} open, ${crit} critical` : `${list.length} open`,
-      held ? ' · notifications held' : '',
+    list.length || waiting.length ? h('span', { class: 'panel-meta' }, [
+      list.length ? (crit ? `${list.length} open, ${crit} critical` : `${list.length} open`) : '',
+      waiting.length ? `${list.length ? ' · ' : ''}${waiting.length} pending` : '',
+      held && list.length ? ' · notifications held' : '',
     ].join('')) : null);
+  const pendingList = waiting.length ? h('ol', { class: 'alerts alerts-pending' }, waiting.map(renderPending)) : null;
   if (!list.length) {
+    if (pendingList) return [head, pendingList];
     return [head, h('p', { class: 'empty empty-good' }, h('span', { class: 'tag-glyph', 'aria-hidden': 'true' }, '■'),
       'No open alerts. Everything WatchTower watches is within its limits.')];
   }
@@ -605,7 +616,29 @@ function renderAlerts({ alerts, held }) {
             a.lastNotifiedAt ? h('span', { class: 'muted' }, `last ${whenText(a.lastNotifiedAt)}`) : null]
           : [h('span', { class: 'alert-count is-held' }, 'Not sent'),
             h('span', { class: 'muted' }, held ? 'Held for maintenance' : 'Held: no channel took it')]));
-  }))];
+  })), pendingList];
+}
+
+/** A breach inside its waiting period, e.g. "for 2 min, alerts at 10:35 (waiting period 5 min)". */
+function renderPending(p) {
+  const forMs = -msUntilServer(p.since);
+  const leftMs = msUntilServer(p.alertsAt);
+  const lasted = Number.isFinite(forMs) ? fmtDuration(Math.max(0, forMs / 1000)) : null;
+  const wait = isNum(p.alertAfterSeconds) ? ` (waiting period ${fmtDuration(p.alertAfterSeconds)})` : '';
+  return h('li', { class: 'alert sev-pending' },
+    h('time', { class: 'alert-when', datetime: p.since, title: `Since ${fmtDateTime(p.since)}` },
+      h('span', { class: 'alert-time' }, whenText(p.since) || '–'),
+      h('span', { class: 'muted' }, lasted ? `for ${lasted}` : '')),
+    statusTag('stale', 'Pending'),
+    h('div', { class: 'alert-body' },
+      h('p', { class: 'strong' }, p.title || humanize(p.key)),
+      h('p', { class: 'alert-desc' },
+        `${lasted ? `For ${lasted}, alerts` : 'Alerts'} at ${whenText(p.alertsAt) || '–'}${wait} if it is still present. ` +
+        'Nothing has been sent.'),
+      p.key ? h('p', { class: 'alert-key' }, p.key) : null),
+    h('div', { class: 'alert-notify' },
+      h('span', { class: 'alert-count is-pending' }, 'Waiting'),
+      h('span', { class: 'muted' }, Number.isFinite(leftMs) && leftMs > 0 ? `alerts in ${fmtDuration(leftMs / 1000)}` : 'alerts when confirmed')));
 }
 
 const ENDPOINT_STATUS = {

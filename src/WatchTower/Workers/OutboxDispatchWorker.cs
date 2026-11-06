@@ -25,6 +25,7 @@ public class OutboxDispatchWorker : BackgroundService
     private readonly ILogger<OutboxDispatchWorker> _logger;
     private readonly IAgentTelemetry? _telemetry;
     private readonly SnapshotFreshnessPolicy _freshness;
+    private readonly Services.Alerting.PendingAlertTracker? _pendingAlerts;
 
     internal const string MetricsMessageType = "MetricsBatch";
     internal const string EventMessageType = "AgentEvent";
@@ -53,8 +54,10 @@ public class OutboxDispatchWorker : BackgroundService
         TimeProvider timeProvider,
         ILogger<OutboxDispatchWorker> logger,
         IAgentTelemetry? telemetry = null,
-        SnapshotFreshnessPolicy? freshness = null)
+        SnapshotFreshnessPolicy? freshness = null,
+        Services.Alerting.PendingAlertTracker? pendingAlerts = null)
     {
+        _pendingAlerts = pendingAlerts;
         _telemetry = telemetry;
         _freshness = freshness ?? SnapshotFreshnessPolicy.Default;
         _portalClient = portalClient;
@@ -172,7 +175,8 @@ public class OutboxDispatchWorker : BackgroundService
                     ? null
                     : endpointStatuses.Select(e => new EndpointStatusDto(e.Timestamp.ToString("O"), e.Name, e.Type, e.Target,
                         e.Status, e.IsUp, e.ResponseTimeMs, e.CertificateDaysLeft, e.Detail,
-                        Stale(SnapshotKind.Endpoint, e.Name, e.Timestamp))).ToList()
+                        Stale(SnapshotKind.Endpoint, e.Name, e.Timestamp))).ToList(),
+                PendingAlerts(now)
             );
 
             await _outboxStore.AddMessageAsync(
@@ -196,6 +200,20 @@ public class OutboxDispatchWorker : BackgroundService
         }
     }
 
+
+    /// <summary>
+    /// Breaches inside their waiting period as of <paramref name="now"/>: always a list (empty when
+    /// nothing is waiting), so a portal can tell "nothing pending" from an older agent's batch.
+    /// Null only without a tracker (tests).
+    /// </summary>
+    private List<PendingAlertDto>? PendingAlerts(DateTime now) =>
+        _pendingAlerts?.Snapshot()
+            .Where(p => p.Since <= now)
+            .Select(p => new PendingAlertDto(p.Key, p.Severity.ToString(), p.Title,
+                Utc(p.Since).ToString("O"), (int)p.AlertAfter.TotalSeconds, Utc(p.AlertsAt).ToString("O")))
+            .ToList();
+
+    private static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
     /// <summary>
     /// Delivers pending outbox messages, highest priority first.

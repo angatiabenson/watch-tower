@@ -123,6 +123,7 @@ public class SpecExamplesTests
     [Theory]
     [InlineData("ConfigThresholds")]
     [InlineData("ConfigMaintenance")]
+    [InlineData("ConfigWaitingPeriods")]
     [InlineData("ConfigEmpty")]
     public void TheAgent_ParsesAndAcceptsTheConfigExamples(string example)
     {

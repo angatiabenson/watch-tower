@@ -65,9 +65,9 @@ There is no capability negotiation. Use:
 ## Feature compatibility
 
 `base` = every released v1 agent. `1.0.19` = added in 1.0.19 (released 2026-06-15). `1.0.20` =
-added in 1.0.20 (released 2026-11-04). `after-1.0.20` = added after 1.0.20 and not released
-yet: builds from the current source, then the first release after 1.0.20 and later; not sent
-by 1.0.20 or earlier.
+added in 1.0.20 (released 2026-11-04). `after-1.0.20` = added after 1.0.20 and first released in 1.0.21 (2026-11-04); not sent by
+1.0.20 or earlier. `after-1.0.21` = added after 1.0.21 and not released yet: builds from the
+current source, then the first release after 1.0.21 and later; not sent by 1.0.21 or earlier.
 
 | Feature | ≤ 1.0.18 | 1.0.19 | 1.0.20 |
 | --- | --- | --- | --- |
@@ -102,7 +102,7 @@ without answering it), validate remote configuration yourself (those agents chec
 values), and gate service and pool commands in the portal: 1.0.18 and older act on any name,
 and 1.0.19 accepts any name on a watch list your portal pushed.
 
-### After 1.0.20 (unreleased)
+### 1.0.21 (marked after-1.0.20)
 
 | Feature | ≤ 1.0.20 | after-1.0.20 |
 | --- | --- | --- |
@@ -112,6 +112,19 @@ and 1.0.19 accepts any name on a watch list your portal pushed.
 A portal can't tell from a request whether the agent would compress: it sees `Content-Encoding`
 only when compression is on. Put `"acceptsGzip": true` in codes only if you decode gzip; the same
 code works for older agents, which ignore the flag and keep sending plain JSON.
+
+### After 1.0.21 (unreleased)
+
+| Feature | ≤ 1.0.21 | after-1.0.21 |
+| --- | --- | --- |
+| Alert waiting periods: disk space, disk queue, network queue, endpoint, service and pool alerts are raised only once the breach lasted its period (`...SustainedSeconds`) | ✗ (at once; endpoints after `FailuresBeforeAlert`, services and pools after the failed restarts; only CPU and memory waited) | ✓ |
+| `pendingAlerts` in metrics batches (gRPC `pending_alerts`), breaches inside their waiting period; not alerts | ✗ (absent: nothing is pending) | ✓ (always present, possibly empty) |
+| Remote `disk.sustainedSeconds`, `disk.queueSustainedSeconds`, `network.sustainedSeconds`, `services.sustainedSeconds`, `appPools.sustainedSeconds`, `endpoints.sustainedSeconds` | ✗ (ignored) | ✓ |
+| Remote `cpu.sustainedSeconds` / `ram.sustainedSeconds` of 0 | ✗ (the whole version is rejected) | ✓ (alert on the first reading) |
+
+Fewer alert events reach the portal: a breach that clears within its waiting period produces
+none. Show `pendingAlerts` apart from open alerts, and check `agent.version` before pushing a
+waiting period of 0 for CPU or memory to an older agent.
 
 ## The gRPC alternative
 

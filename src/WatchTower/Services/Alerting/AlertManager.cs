@@ -119,7 +119,8 @@ public sealed class AlertManager : IAlertManager
         ILogger<AlertManager> logger,
         IMaintenanceState? maintenance = null,
         string? serverName = null,
-        IOptionsMonitor<NotificationOptions>? notificationOptions = null)
+        IOptionsMonitor<NotificationOptions>? notificationOptions = null,
+        PendingAlertTracker? pendingAlerts = null)
     {
         _store = store;
         _metricsStore = metricsStore;
@@ -131,6 +132,7 @@ public sealed class AlertManager : IAlertManager
         _maintenance = maintenance ?? NoMaintenance.Instance;
         _server = serverName ?? Environment.MachineName;
         _notificationOptions = notificationOptions;
+        _pending = pendingAlerts ?? new PendingAlertTracker();
     }
 
     private DateTime UtcNow => _time.GetUtcNow().UtcDateTime;
@@ -151,6 +153,20 @@ public sealed class AlertManager : IAlertManager
     public TimeSpan RecoveryWindow => TimeSpan.FromSeconds(Math.Max(0, _options.CurrentValue.ResolveAfterSeconds));
 
     public bool IsOpen(AlertKey key) => TryGet(key) is { IsOpen: true };
+
+    /// <summary>Waiting periods (see <see cref="ObserveBreach"/>); in memory, so a restart starts them over.</summary>
+    private readonly PendingAlertTracker _pending;
+
+    public bool ObserveBreach(AlertKey key, AlertSeverity severity, TimeSpan alertAfter, string title) =>
+        _pending.Observe(key, severity, alertAfter, title, UtcNow, TryGet(key) is { IsOpen: true } open ? open.Severity : null);
+
+    public void ClearBreach(AlertKey key) => _pending.Clear(key, UtcNow);
+
+    public void ForgetBreach(AlertKey key) => _pending.Forget(key);
+
+    public IReadOnlyList<PendingAlert> GetPendingAlerts() => _pending.Snapshot();
+
+    public IReadOnlyList<ShortBreachSummary> GetShortBreaches(DateTime sinceUtc) => _pending.ShortBreaches(sinceUtc);
 
     public IReadOnlyList<AlertState> GetOpenAlerts()
     {
@@ -196,6 +212,7 @@ public sealed class AlertManager : IAlertManager
 
         if (open && !escalated)
         {
+            _pending.Raised(key, severity); // nothing left to wait for at this severity
             var pending = PendingNotice(key.Value, existing!.Occurrence);
             var reminderDue = IsReminderDue(existing, now, options);
             // A notice still on its way (held, or not yet delivered anywhere) is finished rather
@@ -243,6 +260,9 @@ public sealed class AlertManager : IAlertManager
             Save(state);
         }
 
+        // Raised: the waiting period (if any) is over for this severity and the ones below it.
+        _pending.Raised(key, state.Severity);
+
         if (isNew)
         {
             _metricsStore.AddIncident(incident);
@@ -274,6 +294,7 @@ public sealed class AlertManager : IAlertManager
     public Task<bool> RetireAsync(AlertKey key, string reason, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        _pending.Forget(key);
         return CloseAsync(key, recoveryIncident: null, reason, ct);
     }
 
@@ -283,6 +304,13 @@ public sealed class AlertManager : IAlertManager
         ArgumentException.ThrowIfNullOrWhiteSpace(keyPrefix);
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
         var keep = configured.Select(k => k.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // A breach still waiting for something that is no longer watched would wait forever.
+        foreach (var waiting in _pending.Keys())
+        {
+            if (waiting.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase) && !keep.Contains(waiting))
+                _pending.Forget(new AlertKey(waiting));
+        }
 
         List<string> retire;
         lock (_gate)

@@ -1,3 +1,10 @@
+| `pendingAlerts[]` | array | one per breach and severity | optional (always from agents after 1.0.21, possibly empty) | Snapshot of the breaches inside their waiting period at `batchedAt`. **Not alerts**: nothing was raised or sent. Replace the agent's pending set with each newer batch's list; absent = nothing pending. See [Pending alerts](../06-telemetry-reference.md#pending-alerts-pendingalerts). | after-1.0.21 |
+| `pendingAlerts[].alertKey` | string | | always | The key the alert will have (`diskqueue:0 C:`, `svc:W3SVC`, ...), as in [events](events.md). | after-1.0.21 |
+| `pendingAlerts[].severity` | string (open enum) | `Info`, `Warning`, `Critical` | always | Severity the alert will have. | after-1.0.21 |
+| `pendingAlerts[].title` | string | | always | Latest headline, for display. | after-1.0.21 |
+| `pendingAlerts[].since` | string | ISO-8601 UTC | always | When the condition was first seen at this severity. | after-1.0.21 |
+| `pendingAlerts[].alertAfterSeconds` | integer | s, 0 to 86400 | always | The waiting period. | after-1.0.21 |
+| `pendingAlerts[].alertsAt` | string | ISO-8601 UTC | always | `since` + `alertAfterSeconds`: when it is raised if still present. | after-1.0.21 |
 # POST /api/v1/agent/metrics/batch
 
 [Portal API guide](../README.md) › [Endpoints](README.md) › metrics/batch
@@ -39,7 +46,9 @@ answers 415 and the agent resends it uncompressed. See
 
 No query parameters. Body from a current agent. Drive `D:\` is still listed but hasn't been
 read since 1 November (a fixed drive that is not ready), and the check `status-api` has been
-left misconfigured for over 10 minutes. Both keep their last reading, marked `isStale: true`:
+left misconfigured for over 10 minutes. Both keep their last reading, marked `isStale: true`. The
+disk queue of `0 C:` and the stopped Print Spooler are inside their waiting period (`pendingAlerts`,
+not alerts yet):
 
 <!-- schema: MetricsBatch -->
 ```json
@@ -86,6 +95,10 @@ left misconfigured for over 10 minutes. Both keep their last reading, marked `is
     { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "shop-home", "type": "Http", "target": "https://shop.example.com/", "status": "Up", "isUp": true, "responseTimeMs": 182, "certificateDaysLeft": 61.4, "detail": "HTTP 200", "isStale": false },
     { "timestamp": "2026-11-03T10:15:20.0000000Z", "name": "sql-port", "type": "Tcp", "target": "sql01.corp.local:1433", "status": "Down", "isUp": false, "detail": "Connection refused", "isStale": false },
     { "timestamp": "2026-11-03T09:58:41.0000000Z", "name": "status-api", "type": "Http", "target": "https://api.example.com/health", "status": "ConfigurationError", "isUp": true, "responseTimeMs": 95, "detail": "Configuration error: Monitoring:Endpoints:2:ExpectStatus must be status codes or ranges between 100 and 599, e.g. 200-399 or 200,204. Last result: Up: HTTP 200", "isStale": true }
+  ],
+  "pendingAlerts": [
+    { "alertKey": "diskqueue:0 C:", "severity": "Warning", "title": "Disk Queue High: 0 C: at 3.4", "since": "2026-11-03T10:13:30.0000000Z", "alertAfterSeconds": 300, "alertsAt": "2026-11-03T10:18:30.0000000Z" },
+    { "alertKey": "svc:Spooler", "severity": "Critical", "title": "Service Down: Spooler", "since": "2026-11-03T10:14:40.0000000Z", "alertAfterSeconds": 120, "alertsAt": "2026-11-03T10:16:40.0000000Z" }
   ]
 }
 ```
@@ -235,6 +248,8 @@ reach the portal. Delivered and dropped messages are purged from the agent after
 - Counting snapshot entries as new samples (disk history with duplicates every 30 s).
 - Treating a missing `isStale` as `false` (older agents don't send it), or showing a stale
   entry's last `status` or usage as current.
+- Showing `pendingAlerts` as open alerts, paging on them, or keeping an entry that a newer batch no
+  longer lists: they are breaches that may still clear without any alert.
 - Parsing `driveName` without the trailing backslash, or `"C:\\"` as an escape error.
 - Using `agent.uptimeSeconds` as server uptime (it is the agent process; a reboot shows up as a
   ServerRestarted event instead).

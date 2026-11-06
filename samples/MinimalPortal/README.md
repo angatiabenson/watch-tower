@@ -133,6 +133,9 @@ curl -s -X PUT -H "X-Admin-Key: $KEY" -H "Content-Type: application/json" \
   same timestamp mean "closed, then opened again" in either arrival order (an endpoint going
   from Down to Expiring sends both at one instant). Timestamps cannot settle every reordering,
   so a real portal also reconciles open alerts against the snapshots in each metrics batch.
+- Pending breaches (`pendingAlerts`, agents after 1.0.21): conditions inside their waiting period
+  that are NOT alerts. Kept apart from the open alerts and replaced as a whole by each newer
+  batch; a batch without the list (older agents) means nothing is pending.
 - Commands re-delivered until acknowledged, expired before the agent would reject them as stale,
   results accepted without a prior acknowledgement and first result wins.
 - Remote configuration versions, 204 when the agent is current, acknowledgement tracking and

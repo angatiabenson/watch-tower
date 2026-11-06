@@ -2,7 +2,8 @@ namespace WatchTower.Configuration;
 
 /// <summary>
 /// Endpoint checks: <c>Monitoring:Endpoints</c> is a list of <see cref="EndpointCheckOptions"/>.
-/// Bound from the <c>Monitoring</c> section (only the <c>Endpoints</c> key is read). The list is
+/// Bound from the <c>Monitoring</c> section (only the <c>Endpoints</c> and <c>EndpointDefaults</c>
+/// keys are read). The list is
 /// edited in the web console's "Endpoint checks" settings section (or imported with
 /// <c>WatchTower config import</c>); the results are shown in the console status.
 /// </summary>
@@ -11,6 +12,9 @@ public class EndpointMonitorOptions
     public const string SectionName = "Monitoring";
 
     public List<EndpointCheckOptions> Endpoints { get; set; } = [];
+
+    /// <summary>Settings every check uses unless it sets its own: <c>Monitoring:EndpointDefaults</c>.</summary>
+    public EndpointDefaultsOptions EndpointDefaults { get; set; } = new();
 }
 
 public class EndpointCheckOptions
@@ -42,4 +46,24 @@ public class EndpointCheckOptions
 
     /// <summary>Consecutive failed checks before the endpoint is reported down.</summary>
     public int FailuresBeforeAlert { get; set; } = 2;
+
+    /// <summary>
+    /// Waiting period for this check (seconds): it must have been failing this long, as well as
+    /// <see cref="FailuresBeforeAlert"/> times in a row, before the endpoint is reported down.
+    /// Null (absent) = <c>Monitoring:EndpointDefaults:SustainedSeconds</c>; 0 = no waiting period.
+    /// </summary>
+    public int? SustainedSeconds { get; set; }
+}
+
+/// <summary>Defaults for every endpoint check: <c>Monitoring:EndpointDefaults</c>.</summary>
+public class EndpointDefaultsOptions
+{
+    public const string SectionName = "Monitoring:EndpointDefaults";
+
+    /// <summary>
+    /// Waiting period (seconds) of checks without their own <c>SustainedSeconds</c>: an endpoint
+    /// is reported down only once it has been failing this long and
+    /// <see cref="EndpointCheckOptions.FailuresBeforeAlert"/> checks in a row. 0 = failures only.
+    /// </summary>
+    public int SustainedSeconds { get; set; } = 120;
 }
