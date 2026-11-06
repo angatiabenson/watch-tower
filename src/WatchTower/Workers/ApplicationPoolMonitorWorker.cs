@@ -256,10 +256,15 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 applicationPoolName, failures);
 
             // Alerts only once MaxStartAttempts starts in a row failed AND the pool has been down for
-            // the waiting period (Monitoring:ApplicationPools:SustainedSeconds).
-            if (failures >= opts.MaxStartAttempts &&
+            // the waiting period (Monitoring:ApplicationPools:SustainedSeconds). Decided on the
+            // settings as they are now, not as they were when this poll began: the start delay,
+            // the attempt and the stability check can take a while, and the settings (or the watch
+            // list) may have changed meanwhile.
+            var current = _options.CurrentValue;
+            if (failures >= current.MaxStartAttempts &&
+                Watched(current).Contains(applicationPoolName, StringComparer.OrdinalIgnoreCase) &&
                 _alerts.ObserveBreach(AlertKey.AppPool(applicationPoolName), AlertSeverity.Critical,
-                    PendingAlertTracker.Period(opts.SustainedSeconds), Title(applicationPoolName)))
+                    PendingAlertTracker.Period(current.SustainedSeconds), Title(applicationPoolName)))
                 await RaiseStartFailedAsync(applicationPoolName, failures, ct);
         }
     }

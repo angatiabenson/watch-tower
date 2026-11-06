@@ -321,9 +321,10 @@ public class ServiceMonitorWorker : BackgroundService
 
             // A recovery that outlived the service's removal from the watch list must not re-open its alert.
             // Alerts only once MaxRestartAttempts restarts in a row failed AND the service has been
-            // down for the waiting period (Monitoring:Services:SustainedSeconds).
+            // down for the waiting period (Monitoring:Services:SustainedSeconds), all decided on the
+            // settings as they are now: the restart delay and attempt can take a while.
             var current = _options.CurrentValue;
-            if (failures >= opts.MaxRestartAttempts &&
+            if (failures >= current.MaxRestartAttempts &&
                 Watched(current).Contains(serviceName, StringComparer.OrdinalIgnoreCase) &&
                 _alerts.ObserveBreach(AlertKey.Service(serviceName), AlertSeverity.Critical,
                     PendingAlertTracker.Period(current.SustainedSeconds), Title(serviceName)))

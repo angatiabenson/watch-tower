@@ -620,5 +620,72 @@ public class WaitingPeriodTests
         _alerts.GetPendingAlerts().Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task AppPool_WaitingPeriodRaisedDuringAStartAttempt_IsTheOneThatDecides()
+    {
+        var pools = new Mock<IIisApplicationPoolManager>();
+        pools.Setup(p => p.GetApplicationPoolStatusAsync("Api", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => new ApplicationPoolStatus(Now, "Api", "Stopped", false));
+        pools.Setup(p => p.StartApplicationPoolAsync("Api", It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        var options = new TestOptionsMonitor<ApplicationPoolMonitorOptions>(new ApplicationPoolMonitorOptions
+        {
+            WatchedApplicationPools = ["Api"],
+            StartDelaySeconds = 0,
+            StableStateDelaySeconds = 0,
+            MaxStartAttempts = 1,
+            SustainedSeconds = 120,
+        });
+        var worker = new ApplicationPoolMonitorWorker(pools.Object, _store.Object, _alerts, new NullPortalEventPublisher(),
+            options, _time, NullLogger<ApplicationPoolMonitorWorker>.Instance);
+
+        await worker.PollOnceAsync(Ct); // t = 0: down, first start fails, pending
+        Advance(130);
+
+        // The next start attempt hangs; meanwhile the operator raises the waiting period to 10 min.
+        var attempt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pools.Setup(p => p.StartApplicationPoolAsync("Api", It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>())).Returns(attempt.Task);
+        var poll = worker.PollOnceAsync(Ct);
+        options.CurrentValue = new ApplicationPoolMonitorOptions
+        {
+            WatchedApplicationPools = ["Api"],
+            StartDelaySeconds = 0,
+            StableStateDelaySeconds = 0,
+            MaxStartAttempts = 1,
+            SustainedSeconds = 600,
+        };
+        attempt.SetResult(false);
+        await poll;
+
+        _dispatcher.Sent.Should().BeEmpty("down for 130 s, under the 600 s in effect when the attempt failed");
+        _alerts.GetPendingAlerts().Single().AlertAfter.Should().Be(TimeSpan.FromSeconds(600));
+    }
+
+    [Fact]
+    public async Task AppPool_RemovedFromTheWatchListDuringAStartAttempt_DoesNotAlert()
+    {
+        var pools = new Mock<IIisApplicationPoolManager>();
+        pools.Setup(p => p.GetApplicationPoolStatusAsync("Api", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => new ApplicationPoolStatus(Now, "Api", "Stopped", false));
+        var attempt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pools.Setup(p => p.StartApplicationPoolAsync("Api", It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>())).Returns(attempt.Task);
+        var options = new TestOptionsMonitor<ApplicationPoolMonitorOptions>(new ApplicationPoolMonitorOptions
+        {
+            WatchedApplicationPools = ["Api"],
+            StartDelaySeconds = 0,
+            StableStateDelaySeconds = 0,
+            MaxStartAttempts = 1,
+            SustainedSeconds = 0,
+        });
+        var worker = new ApplicationPoolMonitorWorker(pools.Object, _store.Object, _alerts, new NullPortalEventPublisher(),
+            options, _time, NullLogger<ApplicationPoolMonitorWorker>.Instance);
+
+        var poll = worker.PollOnceAsync(Ct);
+        options.CurrentValue = new ApplicationPoolMonitorOptions { WatchedApplicationPools = [], SustainedSeconds = 0 };
+        attempt.SetResult(false);
+        await poll;
+
+        _dispatcher.Sent.Should().BeEmpty("the pool is no longer watched when its start attempt fails");
+    }
+
     private Incident Incident() => new(Now, IncidentType.DiskQueueHigh, "test");
 }
