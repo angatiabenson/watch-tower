@@ -367,6 +367,31 @@ public static class EmailTemplates
             sb.AppendLine("</table></td></tr></table>");
         }
 
+        // Breaches that cleared within their waiting period: nothing was sent for them.
+        if (report.ShortBreaches.Count > 0)
+        {
+            sb.AppendLine(
+                @"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top:20px;border:1px solid #e8ecf1;border-radius:6px;overflow:hidden;'>
+<tr><td style='background:#f8f9fb;padding:10px 14px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:600;color:#5a6a85;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e8ecf1;'>Recovered before alerting</td></tr>
+<tr><td style='padding:12px 14px;'>
+<table width='100%' cellpadding='0' cellspacing='0'>"
+            );
+            foreach (var breach in report.ShortBreaches)
+            {
+                sb.AppendLine(
+                    $@"<tr>
+<td style='padding:4px 0;font-family:Segoe UI,Arial,sans-serif;font-size:13px;color:#333;'>{H(breach.Label)}</td>
+<td align='right' style='padding:4px 0;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#555;'>{breach.Count}&times;, longest {H(AlertText.FormatDuration(breach.Longest))}</td></tr>"
+                );
+            }
+            sb.AppendLine(
+                @"</table></td></tr>
+<tr><td style='padding:8px 14px 12px;border-top:1px solid #f0f2f5;'>
+<span style='font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#8896a8;line-height:1.4;'>Short breaches that cleared within their alert's waiting period, so nobody was notified. Counted since the agent last started, at most for this report's period.</span>
+</td></tr></table>"
+            );
+        }
+
         // No incidents message
         if (report.Incidents.Count == 0 && emergencyIncident == null)
         {

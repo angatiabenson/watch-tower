@@ -12,10 +12,14 @@ public class ReportBuilder : IReportBuilder
     private readonly IMetricsStore _metricsStore;
     private readonly IOptionsMonitor<DisplayOptions> _displayOptions;
 
-    public ReportBuilder(IMetricsStore metricsStore, IOptionsMonitor<DisplayOptions> displayOptions)
+    private readonly Alerting.PendingAlertTracker? _waits;
+
+    public ReportBuilder(IMetricsStore metricsStore, IOptionsMonitor<DisplayOptions> displayOptions,
+        Alerting.PendingAlertTracker? waits = null)
     {
         _metricsStore = metricsStore;
         _displayOptions = displayOptions;
+        _waits = waits;
     }
 
     private (TimeZoneInfo Zone, string Label) ResolveZone()
@@ -50,7 +54,10 @@ public class ReportBuilder : IReportBuilder
             NetworkSnapshots = networkMetrics.ToList(),
             ServiceSnapshots = serviceStatuses.ToList(),
             ApplicationPoolSnapshots = applicationPoolStatuses.ToList(),
-            Incidents = incidents.ToList()
+            Incidents = incidents.ToList(),
+            // Breaches that cleared inside their waiting period: nobody was notified, but the
+            // report shows the agent kept watching. In memory only (since the agent started).
+            ShortBreaches = _waits?.ShortBreaches(generatedAt - period).ToList() ?? [],
         };
 
         if (cpuMetrics.Count > 0)
