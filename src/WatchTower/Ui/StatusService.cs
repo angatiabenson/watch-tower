@@ -70,6 +70,18 @@ public sealed class StatusService(
                 lastNotifiedAt = a.LastNotifiedAt is { } n ? DateTime.SpecifyKind(n, DateTimeKind.Utc) : (DateTime?)null,
                 notifyCount = a.NotifyCount,
             }),
+            // Breaches inside their waiting period (oldest first): nothing has been sent; each
+            // becomes an alert at alertsAt if it is still present then.
+            pendingAlerts = alerts.GetPendingAlerts().Select(p => new
+            {
+                key = p.Key,
+                severity = Services.Alerting.AlertText.Label(p.Severity),
+                title = p.Title,
+                since = Utc(p.Since),
+                alertAfterSeconds = (long)p.AlertAfter.TotalSeconds,
+                alertsAt = Utc(p.AlertsAt),
+                lastSeenAt = Utc(p.LastSeenAt),
+            }),
             // Liveness of the monitoring workers; any stale one makes the heartbeat report failure.
             workers = workerHealth.Snapshot().Select(w => new
             {

@@ -184,7 +184,9 @@ public class EndpointConfigApiTests
 
         var view = await client.GetFromJsonAsync<JsonElement>("api/config", Ct);
         var section = view.GetProperty("sections").EnumerateArray().Single(s => s.GetProperty("id").GetString() == "endpoints");
-        var field = section.GetProperty("fields").EnumerateArray().Single();
+        var fields = section.GetProperty("fields").EnumerateArray().ToDictionary(f => f.GetProperty("key").GetString()!);
+        fields.Keys.Should().BeEquivalentTo(["Monitoring:Endpoints", "Monitoring:EndpointDefaults:SustainedSeconds"]);
+        var field = fields["Monitoring:Endpoints"];
 
         field.GetProperty("type").GetString().Should().Be("ObjectList");
         field.GetProperty("uniqueBy").GetString().Should().Be("Name");
@@ -195,6 +197,12 @@ public class EndpointConfigApiTests
         subs["IntervalSeconds"].GetProperty("default").GetInt32().Should().Be(60);
         subs["ExpectStatus"].GetProperty("visibleWhen").GetProperty("values")[0].GetString().Should().Be("Http");
         subs["IntervalSeconds"].TryGetProperty("visibleWhen", out _).Should().BeFalse(); // null extras are omitted
+
+        // Waiting period: optional per check (no default: empty means the section-wide default).
+        subs["SustainedSeconds"].GetProperty("label").GetString().Should().Be("Alert after (s)");
+        subs["SustainedSeconds"].TryGetProperty("default", out _).Should().BeFalse();
+        subs["SustainedSeconds"].GetProperty("min").GetDouble().Should().Be(0);
+        fields["Monitoring:EndpointDefaults:SustainedSeconds"].GetProperty("type").GetString().Should().Be("Int");
 
         // Other fields are unchanged on the wire.
         var smtp = view.GetProperty("sections").EnumerateArray().SelectMany(s => s.GetProperty("fields").EnumerateArray())
