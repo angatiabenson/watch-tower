@@ -103,9 +103,11 @@ public class DiskMonitorWorker : BackgroundService
             {
                 _logger.LogWarning("DISK CRITICAL: {Drive} at {Usage:F1}%", disk.DriveName, disk.UsagePercent);
                 _recovery.Breached(key);
-                await _alerts.RaiseAsync(
+                // Waiting period (Monitoring:Disk:SustainedSeconds): pending until it lasted that long.
+                await _alerts.RaiseAfterAsync(
                     key,
                     AlertSeverity.Critical,
+                    PendingAlertTracker.Period(opts.SustainedSeconds),
                     $"Disk Critical: {disk.DriveName} at {disk.UsagePercent:F1}%",
                     new Incident(
                         UtcNow,
@@ -120,6 +122,7 @@ public class DiskMonitorWorker : BackgroundService
             else
                 _logger.LogDebug("Disk {Drive}: {Usage:F1}% ({Free:F1} GB free)", disk.DriveName, disk.UsagePercent, disk.FreeGb);
 
+            _alerts.ClearBreach(key); // below critical: a breach still waiting goes without a word
             if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
                 await _alerts.ResolveAsync(key, ct: ct);
         }
@@ -141,9 +144,11 @@ public class DiskMonitorWorker : BackgroundService
                     "DISK QUEUE HIGH: {Disk} queue length {Queue:F1} (threshold: {Threshold})",
                     queue.InstanceName, queue.QueueLength, opts.QueueLengthWarningThreshold);
                 _recovery.Breached(key);
-                await _alerts.RaiseAsync(
+                // Waiting period (Monitoring:Disk:QueueSustainedSeconds).
+                await _alerts.RaiseAfterAsync(
                     key,
                     AlertSeverity.Warning,
+                    PendingAlertTracker.Period(opts.QueueSustainedSeconds),
                     $"Disk Queue High: {queue.InstanceName} at {queue.QueueLength:F1}",
                     new Incident(
                         UtcNow,
@@ -154,6 +159,7 @@ public class DiskMonitorWorker : BackgroundService
             }
 
             _logger.LogDebug("Disk queue {Disk}: {Queue:F1}", queue.InstanceName, queue.QueueLength);
+            _alerts.ClearBreach(key);
             if (_recovery.Clear(key, UtcNow, _alerts.RecoveryWindow))
                 await _alerts.ResolveAsync(key, ct: ct);
         }

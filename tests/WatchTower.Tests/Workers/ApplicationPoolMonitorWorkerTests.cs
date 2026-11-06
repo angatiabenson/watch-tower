@@ -31,6 +31,7 @@ public class ApplicationPoolMonitorWorkerTests
             StartDelaySeconds = 0,
             StartTimeoutSeconds = 1,
             StableStateDelaySeconds = 0,
+            SustainedSeconds = 0,
             WatchedApplicationPools = new List<string> { "DefaultAppPool" }
         });
         _emailService.Setup(e => e.IsConfigured).Returns(true);

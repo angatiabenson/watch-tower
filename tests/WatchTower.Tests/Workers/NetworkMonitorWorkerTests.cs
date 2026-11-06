@@ -30,7 +30,8 @@ public class NetworkMonitorWorkerTests
         _options.Setup(o => o.CurrentValue).Returns(new NetworkMonitorOptions
         {
             PollIntervalSeconds = 1,
-            OutputQueueWarningThreshold = 0.0
+            OutputQueueWarningThreshold = 0.0,
+            SustainedSeconds = 0,
         });
         _emailService.Setup(e => e.IsConfigured).Returns(true);
         _emailService.Setup(e => e.SendEmailAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))

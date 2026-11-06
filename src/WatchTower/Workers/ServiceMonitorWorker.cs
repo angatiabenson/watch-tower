@@ -193,6 +193,7 @@ public class ServiceMonitorWorker : BackgroundService
             _activeOutages.TryRemove(serviceName, out _);
             _disabledLogged.TryRemove(serviceName, out _);
             _logger.LogDebug("Service {ServiceName}: Running", serviceName);
+            _alerts.ClearBreach(AlertKey.Service(serviceName)); // back before its waiting period ended: nobody is told
             // Running again (e.g. started by an operator): close any open restart-failed alert.
             await _alerts.ResolveAsync(AlertKey.Service(serviceName), ct: ct);
             return;
@@ -208,6 +209,7 @@ public class ServiceMonitorWorker : BackgroundService
 
         if (IsDisabled(status))
         {
+            _alerts.ClearBreach(AlertKey.Service(serviceName)); // never restarted, never alerted
             if (_disabledLogged.TryAdd(serviceName, 0))
             {
                 _logger.LogWarning(
@@ -246,6 +248,11 @@ public class ServiceMonitorWorker : BackgroundService
             return;
         }
         _maintenanceLogged.TryRemove(serviceName, out _);
+
+        // The waiting period (Monitoring:Services:SustainedSeconds) runs from now: the outage is
+        // pending while the agent restarts the service, and only alerts if it is still down then.
+        _alerts.ObserveBreach(AlertKey.Service(serviceName), AlertSeverity.Critical,
+            PendingAlertTracker.Period(opts.SustainedSeconds), Title(serviceName));
 
         _logger.LogWarning("Service {ServiceName} is {Status}, attempting restart", serviceName, status.Status);
 
@@ -290,6 +297,8 @@ public class ServiceMonitorWorker : BackgroundService
                 _consecutiveFailures.TryRemove(serviceName, out _);
                 _activeOutages.TryRemove(serviceName, out _);
                 _logger.LogInformation("Service {ServiceName} restarted successfully", serviceName);
+                // Logged and recorded (ServiceRestarted), never sent: a waiting outage ends silently.
+                _alerts.ClearBreach(AlertKey.Service(serviceName));
 
                 var restartIncident = new Incident(
                     UtcNow,
@@ -311,8 +320,13 @@ public class ServiceMonitorWorker : BackgroundService
                 serviceName, restarted, failures);
 
             // A recovery that outlived the service's removal from the watch list must not re-open its alert.
+            // Alerts only once MaxRestartAttempts restarts in a row failed AND the service has been
+            // down for the waiting period (Monitoring:Services:SustainedSeconds).
+            var current = _options.CurrentValue;
             if (failures >= opts.MaxRestartAttempts &&
-                Watched(_options.CurrentValue).Contains(serviceName, StringComparer.OrdinalIgnoreCase))
+                Watched(current).Contains(serviceName, StringComparer.OrdinalIgnoreCase) &&
+                _alerts.ObserveBreach(AlertKey.Service(serviceName), AlertSeverity.Critical,
+                    PendingAlertTracker.Period(current.SustainedSeconds), Title(serviceName)))
                 await RaiseRestartFailedAsync(serviceName, failures, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -332,6 +346,8 @@ public class ServiceMonitorWorker : BackgroundService
     private static bool IsDisabled(ServiceStatus status) =>
         string.Equals(status.StartType, "Disabled", StringComparison.OrdinalIgnoreCase);
 
+    private static string Title(string serviceName) => $"Service Down: {serviceName}";
+
     /// <summary>
     /// Recovery keeps failing: raise (or keep open) the <c>svc:&lt;name&gt;</c> alert. Later failed
     /// attempts are quiet until the re-notify interval; the alert resolves once the service runs.
@@ -340,7 +356,7 @@ public class ServiceMonitorWorker : BackgroundService
         _alerts.RaiseAsync(
             AlertKey.Service(serviceName),
             AlertSeverity.Critical,
-            $"Service Down: {serviceName}",
+            Title(serviceName),
             new Incident(
                 UtcNow,
                 IncidentType.ServiceRestartFailed,

@@ -144,6 +144,7 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 _consecutiveFailures.TryRemove(applicationPoolName, out _);
                 _activeOutages.TryRemove(applicationPoolName, out _);
                 _logger.LogDebug("Application pool {ApplicationPoolName}: Started", applicationPoolName);
+                _alerts.ClearBreach(AlertKey.AppPool(applicationPoolName)); // back before its waiting period ended: nobody is told
                 await _alerts.ResolveAsync(AlertKey.AppPool(applicationPoolName), ct: ct);
                 continue;
             }
@@ -180,6 +181,11 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 continue;
             }
             _maintenanceLogged.TryRemove(applicationPoolName, out _);
+
+            // The waiting period (Monitoring:ApplicationPools:SustainedSeconds) runs from now: the
+            // outage is pending while the agent starts the pool, and only alerts if it is still down then.
+            _alerts.ObserveBreach(AlertKey.AppPool(applicationPoolName), AlertSeverity.Critical,
+                PendingAlertTracker.Period(opts.SustainedSeconds), Title(applicationPoolName));
 
             _logger.LogWarning(
                 "Application pool {ApplicationPoolName} is {Status}, attempting start",
@@ -225,6 +231,8 @@ public class ApplicationPoolMonitorWorker : BackgroundService
 
                     _logger.LogInformation(
                         "Application pool {ApplicationPoolName} started successfully", applicationPoolName);
+                    // Logged and recorded (ApplicationPoolStarted), never sent: a waiting outage ends silently.
+                    _alerts.ClearBreach(AlertKey.AppPool(applicationPoolName));
 
                     var startedIncident = new Incident(
                         UtcNow,
@@ -247,17 +255,23 @@ public class ApplicationPoolMonitorWorker : BackgroundService
                 "Failed to start application pool {ApplicationPoolName}. Consecutive failures: {Failures}",
                 applicationPoolName, failures);
 
-            if (failures >= opts.MaxStartAttempts)
+            // Alerts only once MaxStartAttempts starts in a row failed AND the pool has been down for
+            // the waiting period (Monitoring:ApplicationPools:SustainedSeconds).
+            if (failures >= opts.MaxStartAttempts &&
+                _alerts.ObserveBreach(AlertKey.AppPool(applicationPoolName), AlertSeverity.Critical,
+                    PendingAlertTracker.Period(opts.SustainedSeconds), Title(applicationPoolName)))
                 await RaiseStartFailedAsync(applicationPoolName, failures, ct);
         }
     }
+
+    private static string Title(string applicationPoolName) => $"IIS App Pool Down: {applicationPoolName}";
 
     /// <summary>Start attempts keep failing: raise (or keep open) the <c>pool:&lt;name&gt;</c> alert.</summary>
     private Task RaiseStartFailedAsync(string applicationPoolName, int failures, CancellationToken ct) =>
         _alerts.RaiseAsync(
             AlertKey.AppPool(applicationPoolName),
             AlertSeverity.Critical,
-            $"IIS App Pool Down: {applicationPoolName}",
+            Title(applicationPoolName),
             new Incident(
                 UtcNow,
                 IncidentType.ApplicationPoolStartFailed,

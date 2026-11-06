@@ -14,7 +14,9 @@ namespace WatchTower.Workers;
 /// <summary>
 /// Runs the <c>Monitoring:Endpoints</c> checks (HTTP, TCP, TLS certificate), each on its own
 /// interval, records the latest result per endpoint and drives the <c>endpoint:&lt;name&gt;</c>
-/// alert: Critical (EndpointDown) after <c>FailuresBeforeAlert</c> consecutive failures,
+/// alert: Critical (EndpointDown) after <c>FailuresBeforeAlert</c> consecutive failures spanning at
+/// least the check's waiting period (<c>SustainedSeconds</c>, default
+/// <c>Monitoring:EndpointDefaults:SustainedSeconds</c>),
 /// Warning (CertificateExpiring) when a certificate is inside its warning window, resolved
 /// (EndpointRecovered) when the check passes again.
 /// </summary>
@@ -251,10 +253,15 @@ public sealed class EndpointMonitorWorker(
             var failures = _failures.AddOrUpdate(check.Name, 1, (_, n) => n + 1);
             logger.LogWarning("Endpoint {Endpoint} check failed ({Failures}/{Threshold}): {Detail}",
                 check.Name, failures, check.FailuresBeforeAlert, result.Detail);
-            if (failures < check.FailuresBeforeAlert)
+            // Both must hold: FailuresBeforeAlert failed checks in a row, and failing for the waiting
+            // period (the check's SustainedSeconds, else Monitoring:EndpointDefaults:SustainedSeconds)
+            // since the first of them. Until then the outage is pending: shown, not sent.
+            var title = $"Endpoint Down: {check.Name}";
+            var waited = alerts.ObserveBreach(key, AlertSeverity.Critical, AlertAfter(check), title);
+            if (failures < check.FailuresBeforeAlert || !waited)
                 return;
 
-            await alerts.RaiseAsync(key, AlertSeverity.Critical, $"Endpoint Down: {check.Name}",
+            await alerts.RaiseAsync(key, AlertSeverity.Critical, title,
                 new Incident(now, IncidentType.EndpointDown,
                     $"Endpoint '{check.Name}' ({check.Type} {check.DisplayTarget}) is down: {result.Detail} " +
                     $"({failures} consecutive failed checks)"),
@@ -263,6 +270,7 @@ public sealed class EndpointMonitorWorker(
         }
 
         _failures.TryRemove(check.Name, out _);
+        alerts.ClearBreach(key); // not down: an outage still waiting goes without a word
 
         if (result.State == EndpointState.Expiring)
         {
@@ -281,6 +289,10 @@ public sealed class EndpointMonitorWorker(
         logger.LogDebug("Endpoint {Endpoint}: {Detail}", check.Name, result.Detail);
         await alerts.ResolveAsync(key, Recovered(check, result, now), ct);
     }
+
+    /// <summary>The check's waiting period: its own <c>SustainedSeconds</c>, else <c>Monitoring:EndpointDefaults:SustainedSeconds</c>.</summary>
+    private TimeSpan AlertAfter(EndpointCheck check) =>
+        check.AlertAfter ?? PendingAlertTracker.Period(options.CurrentValue.EndpointDefaults.SustainedSeconds);
 
     private static Incident Recovered(EndpointCheck check, EndpointProbeResult result, DateTime now) =>
         new(now, IncidentType.EndpointRecovered,

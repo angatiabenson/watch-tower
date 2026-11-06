@@ -72,7 +72,8 @@ public sealed class AbsentResourceTracker(
 
         // Resource name -> open alert key / stored snapshot name, as stored.
         var alerting = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var key in alerts.GetOpenAlerts().Select(a => a.Key))
+        // Breaches still in their waiting period count too: they would otherwise wait forever.
+        foreach (var key in alerts.GetOpenAlerts().Select(a => a.Key).Concat(alerts.GetPendingAlerts().Select(p => p.Key)))
         {
             if (key.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase))
                 alerting.TryAdd(key[keyPrefix.Length..], key);

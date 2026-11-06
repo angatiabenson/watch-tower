@@ -60,6 +60,7 @@ public static class ServiceCollectionExtensions
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
             .RemoveAllLoggers();
         services.AddSingleton<IMaintenanceState, MaintenanceState>();
+        services.AddSingleton<PendingAlertTracker>();
         services.AddSingleton<IAlertManager, AlertManager>();
         services.AddHostedService<NotificationDeliveryWorker>();
 

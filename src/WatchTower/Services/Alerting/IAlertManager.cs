@@ -7,7 +7,10 @@ namespace WatchTower.Services.Alerting;
 /// </summary>
 /// <remarks>
 /// <list type="bullet">
-/// <item>First raise of a key: the incident is recorded and published to the portal, and a
+/// <item>Waiting periods: monitors report a breach with <see cref="ObserveBreach"/> and raise it
+/// only once it lasted its alert's <c>SustainedSeconds</c>; until then it is pending (see
+/// <see cref="PendingAlert"/>), and one that clears first is never notified.</item>
+/// <item>First raise of a key:the incident is recorded and published to the portal, and a
 /// notification is sent.</item>
 /// <item>Raising an open key: nothing is recorded; a reminder is sent only every
 /// <c>Alerting:RenotifyMinutes</c> (0 = never). Raising at a higher severity escalates
@@ -80,6 +83,33 @@ public interface IAlertManager
     Task NotifyEventAsync(
         AlertKey key, AlertSeverity severity, string title, Incident incident, CancellationToken ct = default);
 
+    /// <summary>
+    /// Waiting period: reports that the condition behind <paramref name="key"/> is present at
+    /// <paramref name="severity"/> and says whether to raise it now. True when its alert is
+    /// already open at this severity or higher (keep it open), or when the condition has been
+    /// present at this severity for <paramref name="alertAfter"/> (the per-alert
+    /// <c>SustainedSeconds</c> setting; zero = at once). Until then it is a
+    /// <see cref="PendingAlert"/>: shown in the console and reported to the portal, but nothing
+    /// is recorded as an alert or sent. Raising the key at this severity ends the wait (see
+    /// <see cref="RaiseAsync"/>). Monitors call <see cref="ClearBreach"/> for every reading in
+    /// which the condition is absent.
+    /// </summary>
+    bool ObserveBreach(AlertKey key, AlertSeverity severity, TimeSpan alertAfter, string title);
+
+    /// <summary>
+    /// The condition behind <paramref name="key"/> is absent: a breach still inside its waiting
+    /// period is dropped silently (nobody was told, so no "resolved" either) and counted in the
+    /// daily report. An open alert is unaffected; it resolves through <see cref="ResolveAsync"/>
+    /// as before.
+    /// </summary>
+    void ClearBreach(AlertKey key);
+
+    /// <summary>Breaches still inside their waiting period, oldest first.</summary>
+    IReadOnlyList<PendingAlert> GetPendingAlerts();
+
+    /// <summary>Breaches that cleared within their waiting period since <paramref name="sinceUtc"/>, per kind.</summary>
+    IReadOnlyList<ShortBreachSummary> GetShortBreaches(DateTime sinceUtc);
+
     bool IsOpen(AlertKey key);
 
     /// <summary>Currently open alerts, oldest first.</summary>
@@ -106,4 +136,24 @@ public static class AlertManagerExtensions
         this IAlertManager alerts, AlertKey key, AlertSeverity severity, string title, Incident incident,
         CancellationToken ct = default) =>
         alerts.RaiseAsync(key, severity, title, _ => Task.FromResult(incident), ct);
+
+    /// <summary>
+    /// Raises <paramref name="key"/> once its waiting period is over (see
+    /// <see cref="IAlertManager.ObserveBreach"/>). Returns true when it was raised (or kept open).
+    /// </summary>
+    public static async Task<bool> RaiseAfterAsync(
+        this IAlertManager alerts, AlertKey key, AlertSeverity severity, TimeSpan alertAfter, string title,
+        Func<CancellationToken, Task<Incident>> incidentFactory, CancellationToken ct = default)
+    {
+        if (!alerts.ObserveBreach(key, severity, alertAfter, title))
+            return false;
+        await alerts.RaiseAsync(key, severity, title, incidentFactory, ct);
+        return true;
+    }
+
+    /// <inheritdoc cref="RaiseAfterAsync(IAlertManager, AlertKey, AlertSeverity, TimeSpan, string, Func{CancellationToken, Task{Incident}}, CancellationToken)"/>
+    public static Task<bool> RaiseAfterAsync(
+        this IAlertManager alerts, AlertKey key, AlertSeverity severity, TimeSpan alertAfter, string title,
+        Incident incident, CancellationToken ct = default) =>
+        alerts.RaiseAfterAsync(key, severity, alertAfter, title, _ => Task.FromResult(incident), ct);
 }

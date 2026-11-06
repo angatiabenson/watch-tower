@@ -46,6 +46,7 @@ public class ServiceMonitorWorkerTests
             RestartTimeoutSeconds = 1,
             StableStateDelaySeconds = 0,
             StartupGraceSeconds = startupGraceSeconds,
+            SustainedSeconds = 0,
             WatchedServices = services.Length > 0 ? services.ToList() : new List<string> { "TestService" }
         });
 

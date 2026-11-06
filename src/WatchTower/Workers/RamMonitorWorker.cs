@@ -120,16 +120,16 @@ public class RamMonitorWorker : BackgroundService
                 _logger.LogWarning("RAM spike detected: {Description}", spike.Description);
             }
 
-            var elapsed = UtcNow - _firstBreachTime.Value;
-            if (elapsed.TotalSeconds >= opts.SustainedSeconds)
-            {
+            // Waiting period (Monitoring:Ram:SustainedSeconds): pending until the breach has lasted
+            // that long; already open, it stays open (reminders as usual).
+            if (_alerts.ObserveBreach(AlertKey.Ram, AlertSeverity.Critical,
+                    PendingAlertTracker.Period(opts.SustainedSeconds), Title(ramMetric)))
                 await RaiseEmergencyAsync(ramMetric, opts, ct);
-                _firstBreachTime = UtcNow;
-            }
         }
         else
         {
             _firstBreachTime = null;
+            _alerts.ClearBreach(AlertKey.Ram); // a breach still waiting goes without a word
             if (_recovery.Clear(AlertKey.Ram, UtcNow, _alerts.RecoveryWindow))
                 await _alerts.ResolveAsync(AlertKey.Ram, ct: ct);
         }
@@ -167,12 +167,14 @@ public class RamMonitorWorker : BackgroundService
         return false;
     }
 
+    private static string Title(RamMetric ramMetric) => $"RAM Emergency: {ramMetric.UsagePercent:F1}%";
+
     /// <summary>Sustained breach: raise (or keep open) the <c>ram</c> alert; see CpuMonitorWorker.</summary>
     private Task RaiseEmergencyAsync(RamMetric ramMetric, RamMonitorOptions opts, CancellationToken ct) =>
         _alerts.RaiseAsync(
             AlertKey.Ram,
             AlertSeverity.Critical,
-            $"RAM Emergency: {ramMetric.UsagePercent:F1}%",
+            Title(ramMetric),
             async token =>
             {
                 var topProcesses = (await _metricsProvider.GetTopMemoryProcessesAsync(opts.TopProcessCount, token)).ToList();

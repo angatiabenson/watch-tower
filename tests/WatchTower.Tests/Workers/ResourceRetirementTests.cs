@@ -69,12 +69,14 @@ public class ResourceRetirementTests
             WarningThresholdPercent = 70,
             CriticalThresholdPercent = 85,
             QueueLengthWarningThreshold = 2,
+            SustainedSeconds = 0,
+            QueueSustainedSeconds = 0,
         }),
         _time, NullLogger<DiskMonitorWorker>.Instance);
 
     private NetworkMonitorWorker NetworkWorker(IAlertManager alerts) => new(
         _provider.Object, _metricsStore.Object, alerts,
-        new TestOptionsMonitor<NetworkMonitorOptions>(new NetworkMonitorOptions { PollIntervalSeconds = 60, OutputQueueWarningThreshold = 10 }),
+        new TestOptionsMonitor<NetworkMonitorOptions>(new NetworkMonitorOptions { PollIntervalSeconds = 60, OutputQueueWarningThreshold = 10, SustainedSeconds = 0 }),
         _time, NullLogger<NetworkMonitorWorker>.Instance);
 
     /// <summary>Raises the D: disk, D: disk queue and USB adapter alerts (C: is critical too).</summary>
