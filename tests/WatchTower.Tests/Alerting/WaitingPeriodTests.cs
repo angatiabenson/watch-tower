@@ -393,6 +393,106 @@ public class WaitingPeriodTests
         _dispatcher.Sent.Should().ContainSingle();
     }
 
+    private static EndpointMonitorOptions Shop(string target, int failuresBeforeAlert = 2) => new()
+    {
+        Endpoints = [new EndpointCheckOptions { Name = "shop", Target = target, IntervalSeconds = 60, FailuresBeforeAlert = failuresBeforeAlert }],
+    };
+
+    private void ProbeByTarget(Func<string, EndpointState> state) =>
+        _probe.Setup(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((EndpointCheck c, CancellationToken _) =>
+            {
+                var s = state(c.Url!.Host);
+                return new EndpointProbeResult(s, s == EndpointState.Down ? "HTTP 503" : "HTTP 200", 12);
+            });
+
+    [Fact]
+    public async Task Endpoint_PointedAtANewTarget_StartsItsFailuresAndWaitOver()
+    {
+        var bDown = true;
+        ProbeByTarget(host => host == "a.example" || bDown ? EndpointState.Down : EndpointState.Up);
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(Shop("https://a.example/"));
+        var worker = new EndpointMonitorWorker(_probe.Object, _store.Object, _alerts, options, _time,
+            NullLogger<EndpointMonitorWorker>.Instance);
+
+        await worker.PollOnceAsync(Ct);          // t = 0: A fails
+        Advance(60);
+        await worker.PollOnceAsync(Ct);          // t = 60: A fails again (2 of 2, 60 of 120 s)
+        Advance(30);
+        options.CurrentValue = Shop("https://b.example/");
+        await worker.PollOnceAsync(Ct);          // t = 90: B runs at once and fails: 1 of 2, wait from 90
+        _dispatcher.Sent.Should().BeEmpty("B's first failure must not inherit A's failures and elapsed time");
+        _alerts.GetPendingAlerts().Single().Since.Should().Be(new DateTime(2026, 1, 1, 0, 1, 30, DateTimeKind.Utc));
+
+        bDown = false;
+        for (var i = 0; i < 12; i++)
+        {
+            Advance(5);
+            await worker.PollOnceAsync(Ct);      // B's next check at 150 s succeeds
+        }
+
+        _dispatcher.Sent.Should().BeEmpty("a transient failure of B is suppressed: no opening and no resolved notice");
+        _alerts.GetOpenAlerts().Should().BeEmpty();
+        _alerts.GetPendingAlerts().Should().BeEmpty();
+        _alerts.GetShortBreaches(Now.AddDays(-1)).Should().ContainSingle()
+            .Which.Should().Be(new ShortBreachSummary("endpoint", "Endpoint down", 1, TimeSpan.FromSeconds(60)),
+                "only B's breach recovered; A's was replaced, not recovered");
+    }
+
+    [Fact]
+    public async Task Endpoint_ReplacedTarget_StillAlertsOnItsOwnFailuresAndTime()
+    {
+        ProbeByTarget(_ => EndpointState.Down);
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(Shop("https://a.example/"));
+        var worker = new EndpointMonitorWorker(_probe.Object, _store.Object, _alerts, options, _time,
+            NullLogger<EndpointMonitorWorker>.Instance);
+        await worker.PollOnceAsync(Ct);
+        Advance(60);
+        await worker.PollOnceAsync(Ct);
+        Advance(30);
+        options.CurrentValue = Shop("https://b.example/");
+
+        (await FirstAlertSecond(worker, 300)).Should().Be(120, "B fails at 90, 150 and 210 s; 210 s is 120 s after its first failure");
+    }
+
+    [Fact]
+    public async Task Endpoint_TuningOnlyTheAlertPolicy_KeepsTheFailuresCountedSoFar()
+    {
+        ProbeByTarget(_ => EndpointState.Down);
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(Shop("https://a.example/", failuresBeforeAlert: 3));
+        var worker = new EndpointMonitorWorker(_probe.Object, _store.Object, _alerts, options, _time,
+            NullLogger<EndpointMonitorWorker>.Instance);
+        await worker.PollOnceAsync(Ct);          // t = 0
+        Advance(5);
+        options.CurrentValue = Shop("https://a.example/", failuresBeforeAlert: 2);
+
+        (await FirstAlertSecond(worker, 300)).Should().Be(115, "the wait still runs from the first failure at t = 0");
+    }
+
+    [Fact]
+    public async Task Endpoint_ResultOfTheReplacedDefinition_IsIgnored()
+    {
+        var oldProbe = new TaskCompletionSource<EndpointProbeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _probe.Setup(p => p.ProbeAsync(It.IsAny<EndpointCheck>(), It.IsAny<CancellationToken>()))
+            .Returns((EndpointCheck c, CancellationToken _) => c.Url!.Host == "a.example"
+                ? oldProbe.Task
+                : Task.FromResult(new EndpointProbeResult(EndpointState.Up, "HTTP 200", 12)));
+        var options = new TestOptionsMonitor<EndpointMonitorOptions>(Shop("https://a.example/", failuresBeforeAlert: 1));
+        var worker = new EndpointMonitorWorker(_probe.Object, _store.Object, _alerts, options, _time,
+            NullLogger<EndpointMonitorWorker>.Instance);
+
+        var slow = worker.PollOnceAsync(Ct);     // A's check is still running...
+        options.CurrentValue = Shop("https://b.example/", failuresBeforeAlert: 1);
+        Advance(5);
+        await worker.PollOnceAsync(Ct);          // ...when the check is pointed at B, which is up
+        oldProbe.SetResult(new EndpointProbeResult(EndpointState.Down, "HTTP 503", 12));
+        await slow;
+
+        _alerts.GetPendingAlerts().Should().BeEmpty("A's late failure is not B's");
+        _store.Verify(s => s.AddEndpointStatus(It.Is<EndpointStatus>(e => !e.IsUp)), Times.Never,
+            "the late result does not overwrite B's status either");
+    }
+
     // ------------------------------------------------------------------ services and pools
 
     private readonly Mock<IWindowsServiceManager> _services = new();

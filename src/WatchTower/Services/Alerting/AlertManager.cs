@@ -162,6 +162,8 @@ public sealed class AlertManager : IAlertManager
 
     public void ClearBreach(AlertKey key) => _pending.Clear(key, UtcNow);
 
+    public void ForgetBreach(AlertKey key) => _pending.Forget(key);
+
     public IReadOnlyList<PendingAlert> GetPendingAlerts() => _pending.Snapshot();
 
     public IReadOnlyList<ShortBreachSummary> GetShortBreaches(DateTime sinceUtc) => _pending.ShortBreaches(sinceUtc);

@@ -104,6 +104,13 @@ public interface IAlertManager
     /// </summary>
     void ClearBreach(AlertKey key);
 
+    /// <summary>
+    /// What <paramref name="key"/> watched was replaced (e.g. an endpoint check got a new target):
+    /// a breach still inside its waiting period is dropped without notifying anyone and is NOT
+    /// counted as recovered. The replacement starts its own wait. An open alert is unaffected.
+    /// </summary>
+    void ForgetBreach(AlertKey key);
+
     /// <summary>Breaches still inside their waiting period, oldest first.</summary>
     IReadOnlyList<PendingAlert> GetPendingAlerts();
 

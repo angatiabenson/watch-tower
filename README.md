@@ -583,7 +583,10 @@ the check passes. HTTP redirects are followed at most 5 times and only within th
 A check whose configuration becomes invalid stops running (its alert is retired) but keeps its
 last result, reported with status `ConfigurationError` and the reason in its detail, until it
 is fixed (it then runs at once) or removed. Names are case-insensitive: renaming `Site` to
-`site` keeps its last result and schedule.
+`site` keeps its last result and schedule. Changing what a check checks (type, target, timeout,
+expected status or body, certificate warning days) starts its failure count and waiting period
+over and runs it at once; changing only its interval, `FailuresBeforeAlert` or `SustainedSeconds`
+keeps the failures counted so far.
 
 The list can also be imported, e.g. when provisioning many servers
 (`WatchTower.exe config import endpoints.json`, validated first). The imported list replaces

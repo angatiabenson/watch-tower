@@ -36,6 +36,14 @@ public sealed class EndpointMonitorWorker(
     private readonly ConcurrentDictionary<string, int> _failures = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _invalidLogged = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// What each running check checks (see <see cref="Definition"/>), by name. The schedule, the
+    /// failure count and the waiting period belong to a definition, not just to a name: when an
+    /// operator points a check at another target or changes what counts as success, they start
+    /// over, and a result of the previous definition is never counted for the new one.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, string> _definitions = new(StringComparer.OrdinalIgnoreCase);
+
     private DateTime UtcNow => timeProvider.GetUtcNow().UtcDateTime;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -116,6 +124,11 @@ public sealed class EndpointMonitorWorker(
             if (!names.Add(check.Name))
                 continue; // duplicate name: StartupValidator reports it
 
+            var definition = Definition(check);
+            if (_definitions.TryGetValue(check.Name, out var previous) && previous != definition)
+                Replaced(check);
+            _definitions[check.Name] = definition;
+
             if (!_lastRun.TryGetValue(check.Name, out var last) || now - last >= check.Interval)
                 due.Add(check);
         }
@@ -141,10 +154,11 @@ public sealed class EndpointMonitorWorker(
     /// </summary>
     private async Task ReconcileAsync(HashSet<string> running, HashSet<string> configuredNames, CancellationToken ct)
     {
-        foreach (var name in _lastRun.Keys.Concat(_failures.Keys).Where(n => !running.Contains(n)).ToList())
+        foreach (var name in _lastRun.Keys.Concat(_failures.Keys).Concat(_definitions.Keys).Where(n => !running.Contains(n)).ToList())
         {
             _lastRun.TryRemove(name, out _);
             _failures.TryRemove(name, out _);
+            _definitions.TryRemove(name, out _);
         }
 
         try
@@ -241,6 +255,14 @@ public sealed class EndpointMonitorWorker(
 
     private async Task HandleResultAsync(EndpointCheck check, EndpointProbeResult result, CancellationToken ct)
     {
+        // A result of a definition that has been replaced (or removed) while it ran says nothing
+        // about the check as it is now: it must not count as its failure or start its wait.
+        if (!_definitions.TryGetValue(check.Name, out var current) || current != Definition(check))
+        {
+            logger.LogDebug("Ignoring the result of endpoint check {Endpoint}: it was changed while the check ran", check.Name);
+            return;
+        }
+
         var now = UtcNow;
         metricsStore.AddEndpointStatus(new EndpointStatus(
             now, check.Name, check.Type.ToString(), check.DisplayTarget, result.State.ToString(),
@@ -288,6 +310,33 @@ public sealed class EndpointMonitorWorker(
 
         logger.LogDebug("Endpoint {Endpoint}: {Detail}", check.Name, result.Detail);
         await alerts.ResolveAsync(key, Recovered(check, result, now), ct);
+    }
+
+    /// <summary>
+    /// What the check checks and what counts as success: type, target (the full URL or host and
+    /// port), timeout, expected status, expected body and the certificate warning window. Not
+    /// the schedule or the alerting policy (interval, FailuresBeforeAlert, SustainedSeconds):
+    /// tuning those keeps the failures counted so far. Kept in memory only, never logged.
+    /// </summary>
+    private const char Separator = (char)0x1F; // ASCII unit separator: not expected in any of the parts
+
+    internal static string Definition(EndpointCheck check) => string.Join(Separator,
+        check.Type, check.Url?.AbsoluteUri, check.Host, check.Port, check.Timeout.Ticks,
+        string.Join(',', check.ExpectStatus.Select(r => $"{r.From}-{r.To}")), check.ExpectBodyContains, check.CertificateWarnDays);
+
+    /// <summary>
+    /// The check now checks something else: its failures, its waiting period and its schedule
+    /// start over (it runs at once). An open alert stays open; the new definition's first
+    /// success resolves it.
+    /// </summary>
+    private void Replaced(EndpointCheck check)
+    {
+        _lastRun.TryRemove(check.Name, out _);
+        _failures.TryRemove(check.Name, out _);
+        alerts.ForgetBreach(AlertKey.Endpoint(check.Name));
+        logger.LogInformation(
+            "Endpoint check {Endpoint} now checks {Type} {Target}: its failure count and waiting period start over",
+            check.Name, check.Type, check.DisplayTarget);
     }
 
     /// <summary>The check's waiting period: its own <c>SustainedSeconds</c>, else <c>Monitoring:EndpointDefaults:SustainedSeconds</c>.</summary>
