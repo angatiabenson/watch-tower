@@ -419,6 +419,8 @@ public class GrpcPortalClient : IPortalClient, IDisposable
 
             if (batch.EndpointStatuses is { } endpoints)
                 payload.EndpointStatuses.AddRange(endpoints.Select(ToProto));
+            if (batch.PendingAlerts is { } pending)
+                payload.PendingAlerts.AddRange(pending.Select(ToProto));
 
             var reply = await CallCompressibleAsync((connection, metadata) => connection.Client.SendMetricsBatchAsync(
                 new MetricsBatchRequest { Identity = connection.Identity(), Batch = payload },
@@ -583,6 +585,17 @@ public class GrpcPortalClient : IPortalClient, IDisposable
         }
     }
 
+    /// <summary>A breach inside its waiting period (not an alert); every field is always set.</summary>
+    internal static PendingAlertProto ToProto(PendingAlertDto p) => new()
+    {
+        AlertKey = p.AlertKey,
+        Severity = p.Severity,
+        Title = p.Title,
+        Since = p.Since,
+        AlertAfterSeconds = p.AlertAfterSeconds,
+        AlertsAt = p.AlertsAt,
+    };
+
     internal static EndpointStatusProto ToProto(EndpointStatusDto e)
     {
         var proto = new EndpointStatusProto
@@ -694,24 +707,29 @@ public class GrpcPortalClient : IPortalClient, IDisposable
                     ? proto.Disk.CriticalThresholdPercent : null,
                 QueueLengthWarningThreshold = proto.Disk.HasQueueLengthWarningThreshold
                     ? proto.Disk.QueueLengthWarningThreshold : null,
+                SustainedSeconds = proto.Disk.HasSustainedSeconds ? proto.Disk.SustainedSeconds : null,
+                QueueSustainedSeconds = proto.Disk.HasQueueSustainedSeconds ? proto.Disk.QueueSustainedSeconds : null,
             },
             Network = proto.Network == null ? null : new Contracts.RemoteNetworkConfig
             {
                 PollIntervalSeconds = proto.Network.HasPollIntervalSeconds ? proto.Network.PollIntervalSeconds : null,
                 OutputQueueWarningThreshold = proto.Network.HasOutputQueueWarningThreshold
                     ? proto.Network.OutputQueueWarningThreshold : null,
+                SustainedSeconds = proto.Network.HasSustainedSeconds ? proto.Network.SustainedSeconds : null,
             },
             Services = proto.Services == null ? null : new Contracts.RemoteServiceConfig
             {
                 PollIntervalSeconds = proto.Services.HasPollIntervalSeconds ? proto.Services.PollIntervalSeconds : null,
                 WatchedServices = proto.Services.WatchedServices.Count > 0
                     ? proto.Services.WatchedServices.ToList() : null,
+                SustainedSeconds = proto.Services.HasSustainedSeconds ? proto.Services.SustainedSeconds : null,
             },
             AppPools = proto.AppPools == null ? null : new Contracts.RemoteAppPoolConfig
             {
                 PollIntervalSeconds = proto.AppPools.HasPollIntervalSeconds ? proto.AppPools.PollIntervalSeconds : null,
                 WatchedApplicationPools = proto.AppPools.WatchedApplicationPools.Count > 0
                     ? proto.AppPools.WatchedApplicationPools.ToList() : null,
+                SustainedSeconds = proto.AppPools.HasSustainedSeconds ? proto.AppPools.SustainedSeconds : null,
             },
             Portal = proto.Portal == null ? null : new Contracts.RemotePortalConfig
             {
@@ -726,6 +744,10 @@ public class GrpcPortalClient : IPortalClient, IDisposable
             {
                 UntilUtc = proto.Maintenance.HasUntilUtc ? proto.Maintenance.UntilUtc : null,
                 Reason = proto.Maintenance.HasReason ? proto.Maintenance.Reason : null,
+            },
+            Endpoints = proto.Endpoints == null ? null : new Contracts.RemoteEndpointConfig
+            {
+                SustainedSeconds = proto.Endpoints.HasSustainedSeconds ? proto.Endpoints.SustainedSeconds : null,
             },
         };
     }

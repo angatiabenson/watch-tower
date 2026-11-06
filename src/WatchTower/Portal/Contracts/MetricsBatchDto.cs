@@ -12,7 +12,8 @@ public record MetricsBatchDto(
     List<ServiceStatusDto> ServiceStatuses,
     List<ApplicationPoolStatusDto> ApplicationPoolStatuses,
     AgentTelemetryDto? Agent = null,
-    List<EndpointStatusDto>? EndpointStatuses = null
+    List<EndpointStatusDto>? EndpointStatuses = null,
+    List<PendingAlertDto>? PendingAlerts = null
 );
 
 /// <summary>Agent self-description sent with every batch (omitted by older agents).</summary>
@@ -82,6 +83,26 @@ public record EndpointStatusDto(
     double? CertificateDaysLeft,
     string? Detail,
     bool? IsStale = null
+);
+
+/// <summary>
+/// A breach inside its alert's waiting period at <c>batchedAt</c> (sent by agents after 1.0.21; the
+/// list is present, possibly empty, in every batch they send): nothing has been raised or sent.
+/// Not an alert: a portal must not show it as one, nor count it as open.
+/// </summary>
+/// <param name="AlertKey">Key the alert will have if it is raised (same format as events' <c>alertKey</c>).</param>
+/// <param name="Severity">Info | Warning | Critical (open set): the severity it will have.</param>
+/// <param name="Title">Latest headline, e.g. "Disk Queue High: 0 C: at 3.4".</param>
+/// <param name="Since">When the condition was first seen at this severity (ISO-8601 UTC).</param>
+/// <param name="AlertAfterSeconds">The waiting period.</param>
+/// <param name="AlertsAt">Since + AlertAfterSeconds: when it is raised if still present (ISO-8601 UTC).</param>
+public record PendingAlertDto(
+    string AlertKey,
+    string Severity,
+    string Title,
+    string Since,
+    int AlertAfterSeconds,
+    string AlertsAt
 );
 
 public record ApplicationPoolStatusDto(

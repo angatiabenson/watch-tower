@@ -123,6 +123,8 @@ public class ApplyConfigurationHandler : IActionHandler
             if (config.Disk.WarningThresholdPercent.HasValue) disk["WarningThresholdPercent"] = config.Disk.WarningThresholdPercent;
             if (config.Disk.CriticalThresholdPercent.HasValue) disk["CriticalThresholdPercent"] = config.Disk.CriticalThresholdPercent;
             if (config.Disk.QueueLengthWarningThreshold.HasValue) disk["QueueLengthWarningThreshold"] = config.Disk.QueueLengthWarningThreshold;
+            if (config.Disk.SustainedSeconds.HasValue) disk["SustainedSeconds"] = config.Disk.SustainedSeconds;
+            if (config.Disk.QueueSustainedSeconds.HasValue) disk["QueueSustainedSeconds"] = config.Disk.QueueSustainedSeconds;
             if (disk.Count > 0) monitoring["Disk"] = disk;
         }
 
@@ -131,6 +133,7 @@ public class ApplyConfigurationHandler : IActionHandler
             var net = new Dictionary<string, object?>();
             if (config.Network.PollIntervalSeconds.HasValue) net["PollIntervalSeconds"] = config.Network.PollIntervalSeconds;
             if (config.Network.OutputQueueWarningThreshold.HasValue) net["OutputQueueWarningThreshold"] = config.Network.OutputQueueWarningThreshold;
+            if (config.Network.SustainedSeconds.HasValue) net["SustainedSeconds"] = config.Network.SustainedSeconds;
             if (net.Count > 0) monitoring["Network"] = net;
         }
 
@@ -139,6 +142,7 @@ public class ApplyConfigurationHandler : IActionHandler
             var svc = new Dictionary<string, object?>();
             if (config.Services.PollIntervalSeconds.HasValue) svc["PollIntervalSeconds"] = config.Services.PollIntervalSeconds;
             if (config.Services.WatchedServices != null) svc["WatchedServices"] = config.Services.WatchedServices;
+            if (config.Services.SustainedSeconds.HasValue) svc["SustainedSeconds"] = config.Services.SustainedSeconds;
             if (svc.Count > 0) monitoring["Services"] = svc;
         }
 
@@ -147,8 +151,13 @@ public class ApplyConfigurationHandler : IActionHandler
             var pools = new Dictionary<string, object?>();
             if (config.AppPools.PollIntervalSeconds.HasValue) pools["PollIntervalSeconds"] = config.AppPools.PollIntervalSeconds;
             if (config.AppPools.WatchedApplicationPools != null) pools["WatchedApplicationPools"] = config.AppPools.WatchedApplicationPools;
+            if (config.AppPools.SustainedSeconds.HasValue) pools["SustainedSeconds"] = config.AppPools.SustainedSeconds;
             if (pools.Count > 0) monitoring["ApplicationPools"] = pools;
         }
+
+        // Only the defaults: the checks themselves (Monitoring:Endpoints) stay the operator's.
+        if (config.Endpoints?.SustainedSeconds is { } endpointWait)
+            monitoring["EndpointDefaults"] = new Dictionary<string, object?> { ["SustainedSeconds"] = endpointWait };
 
         var root = new Dictionary<string, object?>();
         if (monitoring.Count > 0) root["Monitoring"] = monitoring;

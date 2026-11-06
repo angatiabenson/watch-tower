@@ -53,6 +53,13 @@ public static class AgentPayloads
                 182.4, 61.4, "HTTP 200", IsStale: false),
             new EndpointStatusDto(Utc(TimeSpan.FromSeconds(10)), "old-cert", "Certificate", "legacy.example.com:443", "Down", false,
                 40.0, -2.5, "Certificate expired 2.5 days ago", IsStale: false),
+        ],
+        [
+            // Breaches inside their waiting period: not alerts, nothing sent yet.
+            new PendingAlertDto("diskqueue:0 C:", "Warning", "Disk Queue High: 0 C: at 3.4",
+                Utc(TimeSpan.FromMinutes(2)), 300, Utc(TimeSpan.FromMinutes(-3))),
+            new PendingAlertDto("svc:Spooler", "Critical", "Service Down: Spooler",
+                Utc(TimeSpan.FromSeconds(45)), 120, Utc(TimeSpan.FromSeconds(-75))),
         ]);
 
     /// <summary>A batch as the agent builds it with nothing optional: no telemetry provider, no endpoints.</summary>
@@ -105,10 +112,12 @@ public static class AgentPayloads
             WarningThresholdPercent = 80,
             CriticalThresholdPercent = 95,
             QueueLengthWarningThreshold = 2,
+            SustainedSeconds = 600,
+            QueueSustainedSeconds = 240,
         },
-        Network = new RemoteNetworkConfig { PollIntervalSeconds = 30, OutputQueueWarningThreshold = 10 },
-        Services = new RemoteServiceConfig { PollIntervalSeconds = 30, WatchedServices = ["W3SVC", "MSSQL$SQLEXPRESS"] },
-        AppPools = new RemoteAppPoolConfig { PollIntervalSeconds = 30, WatchedApplicationPools = ["DefaultAppPool", "Shop (v2)"] },
+        Network = new RemoteNetworkConfig { PollIntervalSeconds = 30, OutputQueueWarningThreshold = 10, SustainedSeconds = 300 },
+        Services = new RemoteServiceConfig { PollIntervalSeconds = 30, WatchedServices = ["W3SVC", "MSSQL$SQLEXPRESS"], SustainedSeconds = 120 },
+        AppPools = new RemoteAppPoolConfig { PollIntervalSeconds = 30, WatchedApplicationPools = ["DefaultAppPool", "Shop (v2)"], SustainedSeconds = 180 },
         Portal = new RemotePortalConfig
         {
             OutboxFlushIntervalSeconds = 30,
@@ -116,5 +125,6 @@ public static class AgentPayloads
             RemoteConfigPollIntervalSeconds = 300,
         },
         Maintenance = new RemoteMaintenanceConfig { UntilUtc = "2026-11-03T18:00:00Z", Reason = "Patch Tuesday" },
+        Endpoints = new RemoteEndpointConfig { SustainedSeconds = 90 },
     };
 }

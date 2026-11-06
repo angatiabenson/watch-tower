@@ -41,7 +41,15 @@ public sealed record MetricsBatch(
     List<ServiceStatus>? ServiceStatuses,
     List<ApplicationPoolStatus>? ApplicationPoolStatuses,
     AgentTelemetry? Agent,              // absent from agents up to 1.0.19
-    List<EndpointStatus>? EndpointStatuses);
+    List<EndpointStatus>? EndpointStatuses,
+    List<PendingAlert>? PendingAlerts = null); // agents after 1.0.21; absent = nothing pending
+
+/// <summary>
+/// A breach inside its waiting period: NOT an alert (nothing was raised or sent). Shown apart from
+/// the open alerts; replaced as a whole by every newer batch.
+/// </summary>
+public sealed record PendingAlert(
+    string AlertKey, string Severity, string Title, DateTimeOffset Since, int AlertAfterSeconds, DateTimeOffset AlertsAt);
 
 public sealed record CpuMetric(DateTimeOffset Timestamp, double UsagePercent);
 public sealed record RamMetric(DateTimeOffset Timestamp, double UsagePercent, double AvailableMb, double TotalMb);
@@ -155,6 +163,10 @@ public sealed class AgentRecord
 
     public Dictionary<string, AgentEvent> Events { get; } = new(StringComparer.OrdinalIgnoreCase);
     public int DuplicateEvents { get; set; }
+
+    /// <summary>Breaches inside their waiting period, from the newest batch (not alerts).</summary>
+    public List<PendingAlert> PendingAlerts { get; set; } = [];
+    public DateTimeOffset? PendingAlertsBatchedAt { get; set; }
 
     /// <summary>Open alerts by alertKey. Alert keys are compared case-insensitively.</summary>
     public Dictionary<string, OpenAlert> OpenAlerts { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -333,6 +345,14 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
             Latest(agent, ServiceKind, agent.Services, batch.ServiceStatuses, m => m.ServiceName, m => m.Timestamp, batchedAt);
             Latest(agent, AppPoolKind, agent.AppPools, batch.ApplicationPoolStatuses, m => m.ApplicationPoolName, m => m.Timestamp, batchedAt);
             Latest(agent, EndpointKind, agent.Endpoints, batch.EndpointStatuses, m => m.Name, m => m.Timestamp, batchedAt);
+
+            // Pending breaches are a snapshot of the whole set: the newest batch replaces it (an
+            // older agent sends none, which correctly means nothing is pending).
+            if (agent.PendingAlertsBatchedAt is null || agent.PendingAlertsBatchedAt <= batch.BatchedAt)
+            {
+                agent.PendingAlerts = batch.PendingAlerts ?? [];
+                agent.PendingAlertsBatchedAt = batch.BatchedAt;
+            }
 
             // Same for the agent object: a late, older batch must not roll the version back.
             if (batch.Agent is not null && (agent.TelemetryBatchedAt is null || agent.TelemetryBatchedAt <= batch.BatchedAt))
@@ -565,6 +585,8 @@ public sealed class PortalState(PortalOptions options, TimeProvider time)
                 Events = agent.Events.Values.OrderByDescending(e => e.Timestamp).Take(50),
                 agent.DuplicateEvents,
                 OpenAlerts = agent.OpenAlerts.Values,
+                // Waiting out their alert's waiting period: not alerts, never counted as open.
+                agent.PendingAlerts,
                 Commands = agent.Commands.Values.Select(r => new
                 {
                     r.Command,
@@ -926,18 +948,21 @@ public static class RemoteConfigRules
 {
     private static readonly Dictionary<string, Dictionary<string, string>> Sections = new(StringComparer.Ordinal)
     {
-        ["cpu"] = new() { ["pollIntervalSeconds"] = "interval", ["thresholdPercent"] = "percent", ["sustainedSeconds"] = "interval" },
-        ["ram"] = new() { ["pollIntervalSeconds"] = "interval", ["thresholdPercent"] = "percent", ["sustainedSeconds"] = "interval" },
+        ["cpu"] = new() { ["pollIntervalSeconds"] = "interval", ["thresholdPercent"] = "percent", ["sustainedSeconds"] = "wait" },
+        ["ram"] = new() { ["pollIntervalSeconds"] = "interval", ["thresholdPercent"] = "percent", ["sustainedSeconds"] = "wait" },
         ["disk"] = new()
         {
             ["pollIntervalSeconds"] = "interval",
             ["warningThresholdPercent"] = "percent",
             ["criticalThresholdPercent"] = "percent",
             ["queueLengthWarningThreshold"] = "queue",
+            ["sustainedSeconds"] = "wait",
+            ["queueSustainedSeconds"] = "wait",
         },
-        ["network"] = new() { ["pollIntervalSeconds"] = "interval", ["outputQueueWarningThreshold"] = "queue" },
-        ["services"] = new() { ["pollIntervalSeconds"] = "interval", ["watchedServices"] = "names" },
-        ["appPools"] = new() { ["pollIntervalSeconds"] = "interval", ["watchedApplicationPools"] = "names" },
+        ["network"] = new() { ["pollIntervalSeconds"] = "interval", ["outputQueueWarningThreshold"] = "queue", ["sustainedSeconds"] = "wait" },
+        ["services"] = new() { ["pollIntervalSeconds"] = "interval", ["watchedServices"] = "names", ["sustainedSeconds"] = "wait" },
+        ["appPools"] = new() { ["pollIntervalSeconds"] = "interval", ["watchedApplicationPools"] = "names", ["sustainedSeconds"] = "wait" },
+        ["endpoints"] = new() { ["sustainedSeconds"] = "wait" },
         ["portal"] = new()
         {
             ["outboxFlushIntervalSeconds"] = "interval",
@@ -972,6 +997,7 @@ public static class RemoteConfigRules
                 var error = kind switch
                 {
                     "interval" => Integer(value, 1, 86400),
+                    "wait" => Integer(value, 0, 86400), // waiting periods: 0 = alert at once
                     "percent" => Number(value, 1, 100),
                     "queue" => Number(value, 0, 10000),
                     "names" => Names(value),

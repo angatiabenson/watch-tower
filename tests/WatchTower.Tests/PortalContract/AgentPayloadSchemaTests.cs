@@ -41,6 +41,7 @@ public class AgentPayloadSchemaTests
         (typeof(ServiceStatusDto), "ServiceStatus", Direction.AgentToPortal),
         (typeof(ApplicationPoolStatusDto), "ApplicationPoolStatus", Direction.AgentToPortal),
         (typeof(EndpointStatusDto), "EndpointStatus", Direction.AgentToPortal),
+        (typeof(PendingAlertDto), "PendingAlert", Direction.AgentToPortal),
         (typeof(AgentEventDto), "AgentEvent", Direction.AgentToPortal),
         (typeof(ProcessInfoDto), "ProcessInfo", Direction.AgentToPortal),
         (typeof(AcknowledgeCommandDto), "AcknowledgeCommand", Direction.AgentToPortal),
@@ -56,6 +57,7 @@ public class AgentPayloadSchemaTests
         (typeof(RemoteAppPoolConfig), "RemoteAppPoolConfig", Direction.PortalToAgent),
         (typeof(RemotePortalConfig), "RemotePortalConfig", Direction.PortalToAgent),
         (typeof(RemoteMaintenanceConfig), "RemoteMaintenanceConfig", Direction.PortalToAgent),
+        (typeof(RemoteEndpointConfig), "RemoteEndpointConfig", Direction.PortalToAgent),
     ];
 
     /// <summary>
@@ -177,13 +179,13 @@ public class AgentPayloadSchemaTests
 
         // Agent to portal: a property the agent can omit must not be required, and a property it always
         // sends but the spec does not require must be one that older agents omit (x-since 1.0.19,
-        // 1.0.20 or after-1.0.20).
+        // 1.0.20, after-1.0.20 or after-1.0.21).
         var alwaysSent = AlwaysSent(contract.Type);
         required.Except(alwaysSent).Should().BeEmpty($"the agent may omit these, so {schema} must not require them");
         var optionalButAlwaysSent = alwaysSent.Except(required)
-            .Where(p => (string?)spec["properties"]![p]!["x-since"] is not ("1.0.19" or "1.0.20" or "after-1.0.20"));
+            .Where(p => (string?)spec["properties"]![p]!["x-since"] is not ("1.0.19" or "1.0.20" or "after-1.0.20" or "after-1.0.21"));
         optionalButAlwaysSent.Should().BeEmpty(
-            $"the agent always sends these: require them in {schema}, or mark them x-since: 1.0.19, 1.0.20 or after-1.0.20 if older agents omit them");
+            $"the agent always sends these: require them in {schema}, or mark them x-since: 1.0.19, 1.0.20, after-1.0.20 or after-1.0.21 if older agents omit them");
     }
 
     [Fact]
